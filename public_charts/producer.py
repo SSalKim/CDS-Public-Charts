@@ -60,7 +60,7 @@ def encode(frame, path):
     temporary.replace(path)
 
 
-def produce_lead(model, cycle, hour, root, existing, publish, *, force=False):
+def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, checkpoint_root=None):
     """publish(product, domain, path, alias_of=None) commits one verified image."""
     root = Path(root)
     completed = set(existing)
@@ -104,6 +104,8 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False):
         if not done("surfce", "asia"):
             emit("surfce", "asia", draw(base, "surfce", "asia"))
         extra = ExtraFields(root, model, cycle)
+        if checkpoint_root is not None:
+            extra.checkpoints = Path(checkpoint_root) / cycle / model
         selected = crop(base, "hkor")
         total = None if not hour or done("acrain", "hkor") and done("acrain1", "hkor") else extra.total_rain(hour)
         if policy.winter(model, cycle):

@@ -10,9 +10,12 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 
 from public_charts import policy
 from public_charts.dates import parse_cycle
+from public_charts.parallel import LeadQueue, child_path, cleanup_raw, execute_leads, model_workspace
+from public_charts_publish import publish_manifest
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "data/public_charts_manifest.json"
@@ -88,19 +91,6 @@ def recover_rows(inventory):
     return rows
 
 
-def cleanup_raw(work):
-    work = Path(work).resolve()
-    root = work / "raw-cache"
-    if root.is_symlink() or root.resolve().parent != work:
-        raise ValueError("Unsafe scratch root")
-    for name in ("grib-cache", "fields", "extended-fields", "images"):
-        target = root / name
-        if target.is_symlink() or target.resolve().parent != root:
-            raise ValueError("Unsafe scratch directory")
-        if target.exists():
-            shutil.rmtree(target)
-
-
 def plan_cleanup(rows, inventory, budget, reserve_bytes=0):
     if reserve_bytes >= budget:
         raise ValueError("One incoming image exceeds the image budget")
@@ -161,9 +151,9 @@ def run(args, store=None):
     if args.dry_run:
         print(json.dumps({"dry_run": True, "retention": policy.RETENTION,
                           "products": "nine seasonal products; Asia surfce only; Korea rain/snow layouts",
-                          "candidates": plan, "max_leads_per_model": args.max_leads}, indent=2))
+                          "candidates": plan, "max_leads_per_model": args.max_leads,
+                          "workers": args.workers, "incremental_publication": args.publish_incremental}, indent=2))
         return 0
-    from public_charts.producer import produce_lead
     work = Path(args.workdir).resolve()
     work.mkdir(parents=True, exist_ok=True)
     if work == ROOT or work == work.parent:
@@ -203,15 +193,14 @@ def run(args, store=None):
     if not local:
         image_bytes = sum(int(item.get("size", 0)) for item in inventory
                           if item.get("appProperties", {}).get("kind") == "image")
-    counts = {model: 0 for model in args.models}
+    queue = LeadQueue(plan, fresh, args.max_leads, args.force)
+    counts = queue.counts
+    for model in args.models:
+        counts.setdefault(model, 0)
     errors = []
     verified_cycles = set(state.get("verified_cycles", []))
-    attempts = 0
-    unavailable_cycles = set()
-    cycle_misses = {}
     budget_blocked = False
     reserve_bytes = 0
-    raw_root = Path(args.cache_root).resolve() if args.cache_root else work / "raw-cache"
     before_ids = {item["id"] for item in inventory} | {row["file_id"] for row in rows.values()}
 
     def save_state():
@@ -223,72 +212,96 @@ def run(args, store=None):
                              "verified_cycles": sorted(verified_cycles),
                              "pending_delete_after": state.get("pending_delete_after", {})})
 
-    try:
-        for target in plan:
-            model, cycle, hour = target["model"], target["cycle"], target["hour"]
-            if counts[model] >= args.max_leads:
-                continue
-            if (model, cycle) in unavailable_cycles:
-                continue
-            if not args.force and policy.expected_keys(model, cycle, hour) <= fresh:
-                continue
-            attempts += 1
-            if attempts > args.max_leads * len(args.models) * 4:
-                break
+    def snapshot():
+        kept, delete_ids = plan_cleanup(list(rows.values()), inventory, args.max_bytes, reserve_bytes)
+        manifest = policy.public_manifest(kept)
+        previous = read_json(args.manifest, {})
+        if previous.get("charts") == manifest["charts"] and previous.get("models") == manifest["models"]:
+            manifest = previous
+        store.write_json("manifest.json", manifest)
+        write_json(args.manifest, manifest)
+        write_json(work / "cleanup-plan.json", {"namespace": "cds-public-charts-v1", "folder_id": store.folder_id,
+                   "manifest_sha256": hashlib.sha256(manifest_bytes(manifest)).hexdigest(), "delete_ids": delete_ids})
+        if args.publish_incremental:
+            publish_manifest(ROOT)
+        return kept, delete_ids
 
-            def publish(product, domain, path, alias_of=None):
-                nonlocal image_bytes, reserve_bytes
+    class BudgetReached(Exception):
+        pass
+
+    def consume(target, staged):
+        nonlocal image_bytes, reserve_bytes, budget_blocked
+        model, cycle, hour = target["model"], target["cycle"], target["hour"]
+        uploading = time.monotonic()
+        try:
+            for artifact in staged["artifacts"]:
+                product, domain = artifact["product"], artifact["domain"]
                 entry_key = policy.key(model, cycle, hour, product, domain)
-                if alias_of:
-                    source = rows[policy.key(model, cycle, hour, *alias_of)]
+                if entry_key not in policy.expected_keys(model, cycle, hour):
+                    raise ValueError("Unexpected renderer output")
+                if artifact["alias_of"]:
+                    source = rows[policy.key(model, cycle, hour, *artifact["alias_of"])]
                     info = {key: source[key] for key in ("file_id", "url", "size", "sha256")}
-                elif local:
-                    destination = output / "images" / model / path.name
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(path, destination)
-                    info = {"file_id": entry_key, "url": destination.relative_to(output).as_posix(),
-                            "size": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                 else:
-                    if image_bytes + path.stat().st_size > args.max_bytes:
-                        reserve_bytes = max(reserve_bytes, path.stat().st_size)
-                        raise OverflowError("Image budget reached; publish retention cleanup before continuing")
-                    info = store.upload_image(path, entry_key)
-                    if f"{model}/{cycle}" not in verified_cycles:
-                        verify_public_url(info["url"])
-                        verified_cycles.add(f"{model}/{cycle}")
-                    if info["file_id"] not in before_ids:
-                        image_bytes += int(info["size"])
-                        before_ids.add(info["file_id"])
+                    path = Path(artifact["path"])
+                    directory = child_path(model_workspace(work, model), "staged", cycle, f"{hour:03}")
+                    if path.is_symlink() or not path.resolve().is_relative_to(directory.resolve()) or path.suffix != ".webp":
+                        raise ValueError("Unsafe staged image")
+                    if local:
+                        destination = output / "images" / model / path.name
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(path, destination)
+                        info = {"file_id": entry_key, "url": destination.relative_to(output).as_posix(),
+                                "size": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                    else:
+                        if image_bytes + path.stat().st_size > args.max_bytes:
+                            reserve_bytes = max(reserve_bytes, path.stat().st_size)
+                            raise OverflowError("Image budget reached; publish retention cleanup before continuing")
+                        info = store.upload_image(path, entry_key)
+                        if f"{model}/{cycle}" not in verified_cycles:
+                            verify_public_url(info["url"])
+                            verified_cycles.add(f"{model}/{cycle}")
+                        if info["file_id"] not in before_ids:
+                            image_bytes += int(info["size"])
+                            before_ids.add(info["file_id"])
                 rows[entry_key] = {"model": model, "cycle": cycle, "hour": hour, "product": product,
                                    "domain": domain, "render_version": policy.PIPELINE_VERSION,
                                    **{key: info[key] for key in ("file_id", "url", "size", "sha256")}}
                 fresh.add(entry_key)
+        except OverflowError as exception:
+            budget_blocked = True
+            errors.append({**target, "status": "budget", "error": str(exception)})
+            raise BudgetReached from None
+        finally:
+            save_state()
+        upload_seconds = time.monotonic() - uploading
+        publishing = time.monotonic()
+        if not local and staged["artifacts"]:
+            snapshot()
+        error = staged["error"]
+        if error:
+            errors.append({**target, "status": "pending" if error["pending"] else "error", "error": error["type"]})
+            print(json.dumps(errors[-1]), flush=True)
+            if args.fail_fast and not error["pending"]:
+                raise RuntimeError("Renderer failed: " + error["type"])
+        else:
+            print(json.dumps({**target, **staged["result"], "render_seconds": staged["render_seconds"],
+                              "upload_seconds": round(upload_seconds, 3),
+                              "publish_seconds": round(time.monotonic() - publishing, 3),
+                              "renderer_pid": staged["pid"]}), flush=True)
 
-            try:
-                result = produce_lead(model, cycle, hour, raw_root, fresh, publish, force=args.force)
-                counts[model] += 1
-                print(json.dumps({**target, **result}), flush=True)
-                save_state()
-            except OverflowError as error:
-                budget_blocked = True
-                errors.append({**target, "status": "budget", "error": str(error)})
-                break
-            except Exception as error:
-                from public_charts.sources import NotReady
-                if isinstance(error, NotReady):
-                    cycle_misses[model, cycle] = cycle_misses.get((model, cycle), 0) + 1
-                    if hour == 0 or cycle_misses[model, cycle] >= 2:
-                        unavailable_cycles.add((model, cycle))
-                errors.append({**target, "status": "pending" if isinstance(error, NotReady) else "error",
-                               "error": type(error).__name__})
-                print(json.dumps(errors[-1]), flush=True)
-                if args.fail_fast and not isinstance(error, NotReady):
-                    raise
-            finally:
-                if not local:
-                    cleanup_raw(work)
+    def started(target, active):
+        print(json.dumps({**target, "event": "render_started", "active_workers": active}), flush=True)
+
+    try:
+        execute_leads(queue, work, args.workers, consume, force=args.force,
+                      raw_override=args.cache_root, started=started)
+    except BudgetReached:
+        pass
     finally:
         save_state()
+        if not local:
+            kept, delete_ids = snapshot()
     if local:
         manifest = policy.public_manifest(list(rows.values()))
         write_json(output / "manifest.json", manifest)
@@ -298,15 +311,6 @@ def run(args, store=None):
         (output / "index.html").write_text('<!doctype html><meta charset="utf-8"><title>Public chart preview</title>' + cards, encoding="utf-8")
         print(f"Local preview: {output / 'index.html'}")
         return int(any(row["status"] == "error" for row in errors))
-    kept, delete_ids = plan_cleanup(list(rows.values()), inventory, args.max_bytes, reserve_bytes)
-    manifest = policy.public_manifest(kept)
-    previous = read_json(args.manifest, {})
-    if previous.get("charts") == manifest["charts"] and previous.get("models") == manifest["models"]:
-        manifest = previous
-    store.write_json("manifest.json", manifest)
-    write_json(args.manifest, manifest)
-    write_json(work / "cleanup-plan.json", {"namespace": "cds-public-charts-v1", "folder_id": store.folder_id,
-               "manifest_sha256": hashlib.sha256(manifest_bytes(manifest)).hexdigest(), "delete_ids": delete_ids})
     print(json.dumps({"rendered_leads": counts, "retained_bytes": policy.unique_bytes(kept),
                       "pending_delete_files": len(delete_ids), "budget_wait": budget_blocked, "errors": errors[-40:]}))
     return int(any(row["status"] == "error" for row in errors))
@@ -319,6 +323,8 @@ def main():
     parser.add_argument("--start-cycle", help="Never produce initialization cycles before this UTC YYYYMMDDHH")
     parser.add_argument("--hours", nargs="+", type=int)
     parser.add_argument("--max-leads", type=int, default=2)
+    parser.add_argument("--workers", type=int, choices=(1, 2), help="Separate renderer processes; defaults to two in production")
+    parser.add_argument("--publish-incremental", action="store_true", help="Push each completed lead's verified manifest")
     parser.add_argument("--max-bytes", type=int, default=policy.MAX_IMAGE_BYTES)
     parser.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
     parser.add_argument("--workdir", type=Path, default=ROOT / "outputs/public-charts-work")
@@ -330,6 +336,10 @@ def main():
     parser.add_argument("--check-drive", action="store_true")
     parser.add_argument("--finalize-cleanup", action="store_true")
     args = parser.parse_args()
+    if args.workers is None:
+        args.workers = 1 if args.local else 2
+    if args.cache_root and args.workers != 1 or args.local and args.publish_incremental:
+        parser.error("A local cache override requires one worker; local mode cannot publish to Git")
     if args.max_leads < 1 or args.max_bytes < 1 or args.cache_root and not args.local:
         parser.error("Invalid batch/budget; cache-root is local-only")
     if args.check_drive or args.finalize_cleanup:

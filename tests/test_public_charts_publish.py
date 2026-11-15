@@ -1,0 +1,90 @@
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from public_charts_publish import MANIFEST, PublicationError, publish_manifest
+
+
+def git(root, *args):
+    return subprocess.run(["git", "-c", f"safe.directory={Path(root).as_posix()}",
+                           "-c", "user.name=Test", "-c", "user.email=test@example.invalid", *args],
+                          cwd=root, capture_output=True, text=True, encoding="utf-8", check=True).stdout
+
+
+def make_repository(root):
+    remote, local = root / "remote.git", root / "checkout"
+    git(root, "init", "--bare", "--initial-branch=main", str(remote))
+    git(root, "clone", str(remote), str(local))
+    path = local / MANIFEST
+    path.parent.mkdir()
+    path.write_text('{"charts":[]}\n', encoding="utf-8")
+    git(local, "add", MANIFEST)
+    git(local, "commit", "-m", "Initial manifest")
+    git(local, "push", "origin", "main")
+    return local, remote
+
+
+class PublicationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.local, self.remote = make_repository(Path(self.temporary.name))
+
+    def remote_manifest(self):
+        return json.loads(git(self.remote, "show", f"main:{MANIFEST}"))
+
+    def test_only_manifest_is_committed_and_unrelated_staging_is_preserved(self):
+        unrelated = self.local / "user.txt"
+        unrelated.write_text("Keep my staged changes", encoding="utf-8")
+        git(self.local, "add", "user.txt")
+        expected = {"charts": [{"hour": 24}]}
+        (self.local / MANIFEST).write_text(json.dumps(expected), encoding="utf-8")
+        self.assertEqual(publish_manifest(self.local), expected)
+        self.assertEqual(self.remote_manifest(), expected)
+        self.assertEqual(git(self.local, "diff", "--cached", "--name-only").strip(), "user.txt")
+        self.assertEqual(git(self.remote, "show", "--pretty=format:", "--name-only", "main").strip(), MANIFEST)
+
+    def test_unchanged_manifest_does_not_make_a_commit(self):
+        before = git(self.local, "rev-parse", "HEAD")
+        publish_manifest(self.local)
+        self.assertEqual(before, git(self.local, "rev-parse", "HEAD"))
+
+    def test_retry_can_publish_manifest_commit_left_by_a_failed_push(self):
+        expected = {"charts": [{"hour": 120}]}
+        (self.local / MANIFEST).write_text(json.dumps(expected), encoding="utf-8")
+        real_run = subprocess.run
+
+        def reject_push(command, **kwargs):
+            if "push" in command:
+                return subprocess.CompletedProcess(command, 1, "", "simulated network failure")
+            return real_run(command, **kwargs)
+
+        with patch("public_charts_publish.subprocess.run", side_effect=reject_push), patch("public_charts_publish.time.sleep"):
+            with self.assertRaises(PublicationError):
+                publish_manifest(self.local)
+        self.assertEqual(self.remote_manifest(), {"charts": []})
+        self.assertEqual(publish_manifest(self.local), expected)
+        self.assertEqual(self.remote_manifest(), expected)
+
+    def test_unrelated_unpublished_commit_is_not_pushed(self):
+        expected = {"charts": [{"hour": 240}]}
+        (self.local / MANIFEST).write_text(json.dumps(expected), encoding="utf-8")
+        git(self.local, "add", MANIFEST)
+        git(self.local, "commit", "-m", "Manifest")
+        (self.local / "private.txt").write_text("Do not publish", encoding="utf-8")
+        git(self.local, "add", "private.txt")
+        git(self.local, "commit", "-m", "Unrelated")
+        expected["charts"].append({"hour": 120})
+        (self.local / MANIFEST).write_text(json.dumps(expected), encoding="utf-8")
+        git(self.local, "add", MANIFEST)
+        git(self.local, "commit", "-m", "Another manifest after unrelated changes")
+        with self.assertRaises(PublicationError):
+            publish_manifest(self.local)
+        self.assertEqual(self.remote_manifest(), {"charts": []})
+
+
+if __name__ == "__main__":
+    unittest.main()

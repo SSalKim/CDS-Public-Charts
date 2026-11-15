@@ -1,0 +1,174 @@
+"""Bounded renderer processes; only the caller owns Drive and Git publication."""
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+import multiprocessing
+import os
+from pathlib import Path
+import shutil
+import time
+
+from . import policy
+
+
+def child_path(root, *parts):
+    root = Path(root).resolve()
+    target = root.joinpath(*parts)
+    if target.is_symlink() or not target.resolve().is_relative_to(root) or target.resolve() == root:
+        raise ValueError("Unsafe renderer scratch path")
+    return target
+
+
+def cleanup_raw(work):
+    root = child_path(work, "raw-cache")
+    for name in ("grib-cache", "fields", "extended-fields", "images"):
+        target = child_path(root, name)
+        if target.exists():
+            shutil.rmtree(target)
+
+
+def model_workspace(work, model):
+    if model not in policy.RETENTION:
+        raise ValueError("Unknown renderer model")
+    return child_path(work, "render-workers", model)
+
+
+def initialize_renderer():
+    for name in list(os.environ):
+        if name.startswith("PUBLIC_CHARTS_DRIVE_") or name in {"GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN"}:
+            os.environ.pop(name, None)
+    for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[name] = "1"
+    if os.environ.get("MPLCONFIGDIR"):
+        os.environ["MPLCONFIGDIR"] = str(Path(os.environ["MPLCONFIGDIR"]) / str(os.getpid()))
+
+
+def stage_lead(target, work, existing, force=False, raw_override=None, renderer=None):
+    """Keep validated WebPs until the coordinator uploads them; never write Drive."""
+    from .producer import produce_lead
+    from .sources import NotReady
+
+    model, cycle, hour = target["model"], target["cycle"], target["hour"]
+    expected = policy.expected_keys(model, cycle, hour)
+    workspace = model_workspace(work, model)
+    raw = Path(raw_override) if raw_override else child_path(workspace, "raw-cache")
+    checkpoints = Path(raw_override) / "checkpoints" if raw_override else child_path(work, "raw-cache", "checkpoints")
+    staged = child_path(workspace, "staged", cycle, f"{hour:03}")
+    staged.mkdir(parents=True, exist_ok=True)
+    artifacts = []
+    started = time.monotonic()
+
+    def emit(product, domain, path, alias_of=None):
+        if policy.key(model, cycle, hour, product, domain) not in expected:
+            raise ValueError("Unexpected staged product")
+        artifact = {"product": product, "domain": domain, "alias_of": alias_of}
+        if alias_of:
+            artifact["path"] = None
+        else:
+            source = Path(path)
+            destination = child_path(staged, source.name)
+            if source.suffix != ".webp" or source.is_symlink():
+                raise ValueError("Unexpected staged image")
+            shutil.copyfile(source, destination)
+            artifact["path"] = str(destination)
+        artifacts.append(artifact)
+
+    result, error = {}, None
+    try:
+        result = (renderer or produce_lead)(model, cycle, hour, raw, set(existing), emit,
+                                           force=force, checkpoint_root=checkpoints)
+    except Exception as exception:
+        error = {"type": type(exception).__name__, "pending": isinstance(exception, NotReady)}
+    finally:
+        if not raw_override:
+            cleanup_raw(workspace)
+    return {"artifacts": artifacts, "result": result, "error": error,
+            "render_seconds": round(time.monotonic() - started, 3), "pid": os.getpid()}
+
+
+class LeadQueue:
+    """One active lead per model protects cumulative checkpoint ordering."""
+
+    def __init__(self, targets, existing, max_leads, force=False):
+        self.queues = {}
+        for target in targets:
+            self.queues.setdefault(target["model"], deque()).append(target)
+        self.order = deque(self.queues)
+        self.counts = dict.fromkeys(self.queues, 0)
+        self.existing, self.max_leads, self.force = existing, max_leads, force
+        self.blocked, self.misses = set(), {}
+        self.attempts = 0
+
+    def next(self, active):
+        if self.attempts >= self.max_leads * len(self.queues) * 4:
+            return None
+        for _ in range(len(self.order)):
+            model = self.order[0]
+            self.order.rotate(-1)
+            if model in active or self.counts[model] >= self.max_leads:
+                continue
+            while self.queues[model]:
+                target = self.queues[model].popleft()
+                cycle, hour = target["cycle"], target["hour"]
+                if (model, cycle) in self.blocked:
+                    continue
+                if not self.force and policy.expected_keys(model, cycle, hour) <= self.existing:
+                    continue
+                self.attempts += 1
+                return target
+        return None
+
+    def finished(self, target, error):
+        model, cycle = target["model"], target["cycle"]
+        if not error:
+            self.counts[model] += 1
+        elif error["pending"]:
+            key = model, cycle
+            self.misses[key] = self.misses.get(key, 0) + 1
+            if target["hour"] == 0 or self.misses[key] >= 2:
+                self.blocked.add(key)
+
+
+def execute_leads(queue, work, workers, consume, *, force=False, raw_override=None,
+                  renderer=None, started=None):
+    """consume runs only on the main process, including after renderer failures."""
+    if workers not in (1, 2) or workers > 1 and raw_override:
+        raise ValueError("Use one or two workers; a local cache override requires one")
+    try:
+        if workers == 1:
+            while (target := queue.next(set())) is not None:
+                if started:
+                    started(target, 1)
+                result = stage_lead(target, work, queue.existing, force, raw_override, renderer)
+                consume(target, result)
+                queue.finished(target, result["error"])
+            return
+        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
+                                 initializer=initialize_renderer) as executor:
+            pending, active = {}, set()
+            try:
+                while True:
+                    while len(pending) < workers and (target := queue.next(active)) is not None:
+                        known = policy.expected_keys(target["model"], target["cycle"], target["hour"]) & queue.existing
+                        future = executor.submit(stage_lead, target, work, known, force, None, renderer)
+                        pending[future] = target
+                        active.add(target["model"])
+                        if started:
+                            started(target, len(pending))
+                    if not pending:
+                        break
+                    completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in completed:
+                        target = pending.pop(future)
+                        active.remove(target["model"])
+                        result = future.result()
+                        consume(target, result)
+                        queue.finished(target, result["error"])
+            finally:
+                for future in pending:
+                    future.cancel()
+    finally:
+        # Executor shutdown has joined running renderers before staged files vanish.
+        for model in queue.queues:
+            staged = child_path(model_workspace(work, model), "staged")
+            if staged.exists():
+                shutil.rmtree(staged)

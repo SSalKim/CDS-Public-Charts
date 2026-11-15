@@ -79,6 +79,7 @@ jobs:
       START_CYCLE_INPUT: ${{ vars.PUBLIC_CHARTS_START_CYCLE }}
       HOURS_INPUT: ${{ inputs.hours }}
       LIMIT_INPUT: ${{ inputs.max_leads || 2 }}
+      WORKERS_INPUT: ${{ vars.PUBLIC_CHARTS_WORKERS || 2 }}
       FORCE_INPUT: ${{ inputs.force }}
     steps:
       - uses: actions/checkout@v4
@@ -91,6 +92,7 @@ jobs:
             /public_charts_run.py
             /public_charts_runner.py
             /public_charts_runtime.py
+            /public_charts_publish.py
             /public_charts_drive.py
             /vtg_drive_archive.py
             /requirements-public-charts.txt
@@ -141,8 +143,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          args=(--workdir "$CHART_WORK" --max-leads "$LIMIT_INPUT")
+          args=(--workdir "$CHART_WORK" --max-leads "$LIMIT_INPUT" --workers "$WORKERS_INPUT")
           if [ "$DRY_RUN" = 'true' ]; then args+=(--dry-run); fi
+          if [ "$DRY_RUN" != 'true' ]; then args+=(--publish-incremental); fi
           if [ "$MODEL_INPUT" != 'all' ]; then args+=(--models "$MODEL_INPUT"); fi
           if [ -n "$CYCLE_INPUT" ]; then args+=(--cycle "$CYCLE_INPUT"); fi
           if [ -n "$START_CYCLE_INPUT" ]; then args+=(--start-cycle "$START_CYCLE_INPUT"); fi
@@ -159,19 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f "$CHART_WORK/cleanup-plan.json"
-          git add -- data/public_charts_manifest.json
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'Update public chart availability'
-            for attempt in 1 2 3; do
-              git pull --rebase origin main
-              if git push origin HEAD:main; then break; fi
-              if [ "$attempt" = 3 ]; then exit 1; fi
-              sleep 3
-            done
-          fi
-          git fetch origin main --depth=1
+          python public_charts_publish.py
       - name: Remove expired chart files only after publication
         if: steps.publish.outcome == 'success' && env.DRY_RUN != 'true'
         run: python public_charts_run.py --finalize-cleanup --workdir "$CHART_WORK"

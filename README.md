@@ -14,6 +14,13 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
 - Only five `PUBLIC_CHARTS_DRIVE_*` repository Secrets are required.
 - Production is serialized in one concurrency group. Never enable the old CDS
   producer and this producer together: both use the same Drive state.
+- Inside that one job, two isolated renderer processes work on different models.
+  Leads within a model stay ordered so cumulative checkpoints remain reusable.
+  Only the coordinator uploads to Drive, updates manifests, publishes Git commits,
+  and plans cleanup. Each completed lead is published immediately after upload
+  verification; it does not wait for the rest of the batch.
+- Set the optional repository variable `PUBLIC_CHARTS_WORKERS=1` to fall back to
+  sequential rendering (default: `2`). No Cloudflare Worker changes are needed.
 - The renderer and model schedules are unchanged. Completed products are reused;
   no existing Drive images need to be copied or regenerated for the migration.
 
