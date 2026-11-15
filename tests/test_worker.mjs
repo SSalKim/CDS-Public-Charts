@@ -110,7 +110,42 @@ test("scheduled errors are visible without credentials in logs", async () => {
   const pending = [];
   dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 3), cron: "test" },
     env, { waitUntil: task => pending.push(task) });
-  await assert.rejects(pending[0], /GitHub scheduler request failed/);
+  await assert.rejects(pending[0], error => {
+    assert.match(error.message, /\[charts\] HTTP 403: Workflow status unavailable/);
+    assert(!error.message.includes(env.GITHUB_TOKEN));
+    assert(!error.message.includes(env.MANUAL_TRIGGER_TOKEN));
+    assert(!error.message.includes("private"));
+    return true;
+  });
+});
+
+test("scheduled dispatch failures identify the VTG target and HTTP code", async () => {
+  const { dispatcher } = fixture(() => new Response("private upstream detail", { status: 404 }));
+  const pending = [];
+  dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 9), cron: "test" },
+    env, { waitUntil: task => pending.push(task) });
+  await assert.rejects(pending[0], /\[vtg\] HTTP 404: GitHub dispatch failed/);
+});
+
+test("scheduled missing-secret error is distinguishable without making a request", async () => {
+  const { dispatcher, calls } = fixture();
+  const pending = [];
+  dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 3), cron: "test" },
+    {}, { waitUntil: task => pending.push(task) });
+  await assert.rejects(pending[0], /\[charts\] no HTTP request sent: Missing GITHUB_TOKEN secret/);
+  assert.equal(calls.length, 0);
+});
+
+test("scheduled transport errors never expose raw exceptions", async () => {
+  const { dispatcher } = fixture(() => { throw new Error("private transport detail"); });
+  const pending = [];
+  dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 3), cron: "test" },
+    env, { waitUntil: task => pending.push(task) });
+  await assert.rejects(pending[0], error => {
+    assert.match(error.message, /\[charts\] network\/response error/);
+    assert(!error.message.includes("private"));
+    return true;
+  });
 });
 
 test("health endpoint and retired manual URLs never call GitHub", async () => {

@@ -42,6 +42,11 @@ See [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configu
   this is not a distributed lock or a cross-repository runner reservation.
 - GitHub responses and tokens are not echoed to logs. HTTP 204 means accepted,
   not that chart production has completed.
+- Scheduled failures include the target, HTTP status and sanitized reason in
+  the exception itself, for example `[charts] HTTP 403: Workflow status unavailable`.
+  In Cloudflare Logs, include Info-level records to see the structured
+  `target`, `status`, `reason` line immediately before the exception. Invocation
+  summaries alone do not include that line. Never share the GitHub token.
 
 ## Optional manual HTTP dispatch
 

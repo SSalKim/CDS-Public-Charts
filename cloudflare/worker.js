@@ -114,7 +114,11 @@ export function createDispatcher(fetcher = fetch) {
     if (!target) return;
     ctx.waitUntil(runTarget(target, env).then(result => {
       console.log(JSON.stringify({ cron: event.cron, ...result }));
-      if (!result.ok) throw new Error("GitHub scheduler request failed; check sanitized Worker log");
+      if (!result.ok) {
+        const status = result.status === 0 ? "network/response error"
+          : Number.isInteger(result.status) ? `HTTP ${result.status}` : "no HTTP request sent";
+        throw new Error(`GitHub scheduler request failed [${result.target}] ${status}: ${result.reason}`);
+      }
     }));
   }
 
