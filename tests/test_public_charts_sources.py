@@ -68,6 +68,13 @@ class FileSizeTests(unittest.TestCase):
         with self.assertRaises(NotReady):
             Provider("aigfs", client).fetch("2026111518", 0, {"pressure_msl"})
 
+    def test_grib_ranges_also_disable_http_content_compression(self):
+        message = b"GRIB" + b"\x00\x00\x00\x02" + (20).to_bytes(8, "big") + b"7777"
+        self.client.session.get.return_value = response(206, message, "bytes 100-119/200")
+        self.assertEqual(self.client.get("https://example.invalid/data.grib2", (100, 119), cache=False), message)
+        self.assertEqual(self.client.session.get.call_args.kwargs["headers"],
+                         {"Range": "bytes=100-119", "Accept-Encoding": "identity"})
+
 
 class PackingTests(unittest.TestCase):
     @staticmethod

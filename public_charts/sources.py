@@ -117,7 +117,8 @@ class HttpCache:
                 self.hits += 1
                 self.records.append(record)
                 return value
-        headers = {} if byte_range is None else {"Range": f"bytes={byte_range[0]}-{byte_range[1]}"}
+        headers = {} if byte_range is None else {"Range": f"bytes={byte_range[0]}-{byte_range[1]}",
+                                                "Accept-Encoding": "identity"}
         for attempt in range(3):
             try:
                 response = self.session.get(url, headers=headers, timeout=(15, 120))
