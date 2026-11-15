@@ -41,8 +41,8 @@ PowerShell, 프로젝트 루트에서 실행한다. `<...>`는 본인 값으로 
 
 ```powershell
 gh auth status
-& .\local_tools\weathermesh\.venv\Scripts\python.exe -m pip install -r requirements-public-charts-auth.txt
-& .\local_tools\weathermesh\.venv\Scripts\python.exe public_charts_authorize.py `
+& .\.venv\Scripts\python.exe -m pip install -r requirements-public-charts-auth.txt
+& .\.venv\Scripts\python.exe public_charts_authorize.py `
   --client-secrets "$env:USERPROFILE\Downloads\<다운로드한 OAuth JSON 파일명>" `
   --folder-id "<전용 폴더 ID>" `
   --account-email "<새 Drive 계정 이메일>" `
@@ -77,7 +77,7 @@ PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL
 
 공개/비공개 목록의 각 행에는 `render_version`을 기록한다. 이전 규격의 이미지는 새 규격으로 다시 생산하기 전까지 그대로 제공하며, 현재 버전의 이미지로 교체된 뒤에만 기존 파일을 정리한다.
 
-기존 `RUNNER_STATUS_TOKEN`은 GitHub 러너 조회 용도로만 재사용한다. 이것이 없어 조회에 실패해도 GitHub-hosted로 진행한다.
+`RUNNER_STATUS_TOKEN`은 선택적인 러너 조회용 Secret이다. 현재는 Drive 인증정보 5개만 이전했으며, 이 토큰이나 새 저장소의 노트북 등록이 없어도 GitHub-hosted로 진행한다.
 
 ## 저장/삭제 흐름
 
@@ -98,8 +98,8 @@ Drive v3가 메타데이터 ETag를 생략하면 v2에서 소유자·폴더·비
 아래는 Drive와 연결하지 않는 로컬 모드다. 기존 캐시는 검증해 재사용하며 지우지 않는다. 추가 필드와 체크포인트를 같은 캐시 경로에 기록할 수 있고, 캐시에 없는 필드는 공개 소스에서 받을 수 있다.
 
 ```powershell
-$env:PUBLIC_CHARTS_MAP_DIR = (Resolve-Path .\local_tools\weathermesh\maps).Path
-& .\local_tools\weathermesh\.venv\Scripts\python.exe public_charts_run.py --local `
+& .\.venv\Scripts\python.exe public_charts_runtime.py --prepare-maps
+& .\.venv\Scripts\python.exe public_charts_run.py --local `
   --models aifs --cycle 2026111500 --hours 24 --max-leads 1 `
   --cache-root outputs/open-models-20261115 --workdir outputs/public-charts-preview
 ```
