@@ -9,7 +9,7 @@ const TARGETS = {
   charts: {
     repo: "CDS-Public-Charts",
     workflow: "public_charts.yml",
-    inputs: { dry_run: false, runner_mode: "auto", model: "all", max_leads: 2, force: false }
+    inputs: { dry_run: false, runner_mode: "auto", model: "all", max_leads: "2", force: false }
   }
 };
 const CRONS = {

@@ -52,7 +52,7 @@ Body:
     "dry_run": false,
     "runner_mode": "auto",
     "model": "all",
-    "max_leads": 2,
+    "max_leads": "2",
     "force": false
   }
 }

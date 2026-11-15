@@ -25,7 +25,7 @@ test("chart dispatch uses the new repo, real production and no fixed cycle", asy
   const post = calls.at(-1);
   assert.match(post.url, /SSalKim\/CDS-Public-Charts\/actions\/workflows\/public_charts.yml\/dispatches$/);
   assert.deepEqual(JSON.parse(post.body), { ref: "main", inputs: {
-    dry_run: false, runner_mode: "auto", model: "all", max_leads: 2, force: false
+    dry_run: false, runner_mode: "auto", model: "all", max_leads: "2", force: false
   } });
   assert.equal(post.headers["Content-Type"], "application/json");
 });
@@ -78,6 +78,17 @@ test("VTG keeps original CDS dispatch without new busy filtering", async () => {
   assert.equal(calls.length, 1);
   assert.match(calls[0].url, /SSalKim\/CDS\/actions\/workflows\/vtg.yml\/dispatches$/);
   assert.deepEqual(JSON.parse(calls[0].body), { ref: "main" });
+});
+
+test("numeric workflow inputs are serialized as strings accepted by GitHub", async () => {
+  const { dispatcher, calls } = fixture((url, options) => {
+    if (options.method !== "POST") return null;
+    const input = JSON.parse(options.body).inputs.max_leads;
+    return typeof input === "string" ? new Response(null, { status: 204 })
+      : Response.json({ message: "Invalid value for input 'max_leads'" }, { status: 422 });
+  });
+  assert.equal((await dispatcher.runTarget("charts", env)).ok, true);
+  assert.equal(JSON.parse(calls.at(-1).body).inputs.max_leads, "2");
 });
 
 test("failed or ambiguous POSTs are never retried", async () => {

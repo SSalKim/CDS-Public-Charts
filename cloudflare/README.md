@@ -31,7 +31,9 @@ See [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configu
 - VTG keeps its original periodic dispatch behavior; the worker does not select
   a VTG cycle or alter VTG's own scheduling logic.
 - Public charts receive `dry_run=false`, `runner_mode=auto`, `model=all`,
-  `max_leads=2`, `force=false`. Cycle and hour are deliberately unspecified.
+  `max_leads="2"`, `force=false`. Cycle and hour are deliberately unspecified.
+  Send `max_leads` as a JSON string even though the workflow input is numeric;
+  GitHub rejects the JSON number with HTTP 422. The batch limit is still two.
 - Public charts are skipped if any run is in progress, queued, waiting, pending
   or requested. Each status is filtered server-side, avoiding history truncation.
 - A failed or invalid status lookup prevents a dispatch. GET requests retry
