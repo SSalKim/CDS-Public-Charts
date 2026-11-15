@@ -1,0 +1,12 @@
+{
+  // Use the EXISTING Worker's name. This file is an example, not auto-deployed.
+  "name": "replace-with-existing-worker-name",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-16",
+  "triggers": {
+    "crons": [
+      "3,13,23,33,43,53 * * * *",
+      "9,19,29,39,49,59 * * * *"
+    ]
+  }
+}

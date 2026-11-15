@@ -19,6 +19,10 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
 
 ## Cloudflare Setup
 
+The complete replacement [Worker script](cloudflare/worker.js),
+[Cron Triggers and setup guide](cloudflare/README.md), and example Wrangler config
+are included in `cloudflare/`. The old GDM and DMDW dispatches are removed.
+
 Allow the existing Cloudflare GitHub token to access **SSalKim/CDS-Public-Charts**.
 A fine-grained token needs repository **Actions: read and write** permission.
 Store it as a Worker secret, not in source or browser code.
