@@ -1,0 +1,28 @@
+name: Verify chart Drive connection
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PUBLIC_CHARTS_DRIVE_CLIENT_ID: ${{ secrets.PUBLIC_CHARTS_DRIVE_CLIENT_ID }}
+      PUBLIC_CHARTS_DRIVE_CLIENT_SECRET: ${{ secrets.PUBLIC_CHARTS_DRIVE_CLIENT_SECRET }}
+      PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN: ${{ secrets.PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN }}
+      PUBLIC_CHARTS_DRIVE_FOLDER_ID: ${{ secrets.PUBLIC_CHARTS_DRIVE_FOLDER_ID }}
+      PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL: ${{ secrets.PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.15'
+      - run: python -m pip install requests==2.32.4
+      - name: Verify account and folder without modifying Drive
+        run: python public_charts_run.py --check-drive

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+outputs/
+*.grib
+*.grib2
+*.idx
+public_charts/maps/shapefiles/
+public-charts-oauth*.json
+client_secret*.json
+.env
