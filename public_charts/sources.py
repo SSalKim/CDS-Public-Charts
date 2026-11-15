@@ -77,6 +77,29 @@ class HttpCache:
         self.hits = 0
         self.records = []
 
+    def file_size(self, url):
+        # A compressed NOMADS HEAD can report 20 bytes for a multi-MB GRIB.
+        for attempt in range(3):
+            try:
+                with self.session.get(url, headers={"Range": "bytes=0-0", "Accept-Encoding": "identity"},
+                                      stream=True, timeout=(15, 120)) as response:
+                    self.requests += 1
+                    if response.status_code in (404, 410):
+                        raise NotReady(f"HTTP {response.status_code}: {url}")
+                    if response.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                        time.sleep(min(30, max(2, Retry().get_retry_after(response) or 3)))
+                        continue
+                    response.raise_for_status()
+                    match = re.fullmatch(r"bytes 0-0/([1-9]\d*)", response.headers.get("Content-Range", ""))
+                    if response.status_code != 206 or not match or response.content != b"G":
+                        raise ValueError("Invalid GRIB file-size probe")
+                    self.bytes += 1
+                    return int(match[1])
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == 2:
+                    raise
+                time.sleep(2 ** attempt)
+
     def get(self, url, byte_range=None, *, cache=True):
         key = hashlib.sha256(f"{url}|{byte_range}".encode()).hexdigest()
         path = self.root / (key + ".bin")
@@ -210,7 +233,8 @@ def decode(message, cycle, hour, key):
         meta = {name: get(name) for name in ("dataDate", "dataTime", "endStep", "startStep", "stepType",
                                              "stepUnits", "units", "shortName", "typeOfLevel", "level",
                                              "Ni", "Nj", "N", "gridType", "uvRelativeToGrid", "discipline",
-                                             "parameterCategory", "parameterNumber", "tablesVersion", "numberOfMissing")}
+                                             "parameterCategory", "parameterNumber", "tablesVersion", "numberOfMissing",
+                                             "packingError", "bitsPerValue")}
         if str(meta["dataDate"]) != cycle[:8] or int(meta["dataTime"] or 0) != int(cycle[8:]) * 100:
             raise ValueError(f"Wrong cycle in {key}: {meta}")
         if int(meta["endStep"]) != hour or meta["stepUnits"] not in (1, "h"):
@@ -272,6 +296,11 @@ def decode(message, cycle, hour, key):
                 raise ValueError(f"Unknown precipitation unit: {unit}")
             if meta["stepType"] != "accum":
                 raise ValueError(f"Precipitation is not an accumulation: {meta}")
+        if key in ("precipitation", "snowfall_water_equivalent", "precipitation_rate"):
+            error = float(meta.get("packingError") or 0)
+            if not np.isfinite(error) or error < 0:
+                raise ValueError("Invalid precipitation packing error")
+            meta["packing_error"] = error * (1000 if unit == "m" else 1)
         if meta["numberOfMissing"] or not np.isfinite(values).all() or np.any(np.abs(values) >= 1e15):
             raise ValueError(f"Missing or invalid data in {key}")
         return Decoded(values, lat[yi], lon[xi], meta)
@@ -338,9 +367,9 @@ class Provider:
             selected = choose_ncep(entries, subset)
             for key, item in selected.items():
                 if "length" not in item:
-                    response = self.client.session.head(url, timeout=30)
-                    response.raise_for_status()
-                    item["length"] = int(response.headers["Content-Length"])-item["offset"]
+                    item["length"] = self.client.file_size(url)-item["offset"]
+                    if item["length"] <= 0:
+                        raise NotReady("NCEP final inventory offset exceeds the published GRIB size")
                 first, length = item["offset"], item["length"]
                 result[key] = decode(self.client.get(url, (first, first+length-1)), cycle, hour, key)
         return result
@@ -428,8 +457,13 @@ def rainfall_interval(current, previous, hour, interval):
         raise ValueError("Cannot subtract accumulations with different start times")
     if not np.array_equal(current.latitude, previous.latitude) or not np.array_equal(current.longitude, previous.longitude):
         raise ValueError("Rainfall dependency grid differs")
-    difference = current.values-previous.values
-    if float(np.nanmin(difference)) < -.1:
+    difference = current.values.astype(np.float64)-previous.values.astype(np.float64)
+    # Each packed field contributes uncertainty to the de-accumulated amount.
+    error = sum(float(field.metadata.get("packing_error", 0)) for field in (current, previous))
+    if not np.isfinite(error) or error < 0:
+        raise ValueError("Invalid accumulation packing uncertainty")
+    tolerance = max(.1, error) + 1e-6
+    if float(np.nanmin(difference)) < -tolerance:
         raise ValueError("Negative accumulated-rainfall difference")
     return np.maximum(difference, 0)
 
@@ -440,8 +474,10 @@ def rainfall_from_rate(current, previous, hour, interval):
         start,end=int(field.metadata["startStep"]),int(field.metadata["endStep"])
         if field.metadata.get("stepType")!="avg" or start>=end or np.any(field.values<0):
             raise ValueError("Expected a nonempty mean rainfall-rate interval")
-        return Decoded(field.values.astype(np.float64)*(end-start)*3600,
-                       field.latitude,field.longitude,field.metadata)
+        duration = (end-start)*3600
+        return Decoded(field.values.astype(np.float64)*duration,
+                       field.latitude,field.longitude,
+                       {**field.metadata, "packing_error": float(field.metadata.get("packing_error", 0))*duration})
     return rainfall_interval(integrated(current),None if previous is None else integrated(previous),hour,interval).astype(np.float32)
 
 

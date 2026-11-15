@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import shutil
 import time
+import traceback
+from urllib.parse import urlsplit
 
 from . import policy
 
@@ -78,6 +80,15 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
                                            force=force, checkpoint_root=checkpoints)
     except Exception as exception:
         error = {"type": type(exception).__name__, "pending": isinstance(exception, NotReady)}
+        if not error["pending"]:
+            frames = traceback.extract_tb(exception.__traceback__)
+            error["location"] = [{"file": Path(frame.filename).name, "line": frame.lineno,
+                                   "function": frame.name} for frame in frames
+                                  if Path(frame.filename).parent.name == "public_charts"][-3:]
+            response = getattr(exception, "response", None)
+            if response is not None:
+                error["http_status"] = response.status_code
+                error["source_host"] = urlsplit(response.url or "").hostname
     finally:
         if not raw_override:
             cleanup_raw(workspace)
@@ -96,6 +107,7 @@ class LeadQueue:
         self.counts = dict.fromkeys(self.queues, 0)
         self.existing, self.max_leads, self.force = existing, max_leads, force
         self.blocked, self.misses = set(), {}
+        self.failures, self.model_attempts = {}, dict.fromkeys(self.queues, 0)
         self.attempts = 0
 
     def next(self, active):
@@ -104,7 +116,8 @@ class LeadQueue:
         for _ in range(len(self.order)):
             model = self.order[0]
             self.order.rotate(-1)
-            if model in active or self.counts[model] >= self.max_leads:
+            if (model in active or self.counts[model] >= self.max_leads
+                    or self.model_attempts[model] >= self.max_leads * 4):
                 continue
             while self.queues[model]:
                 target = self.queues[model].popleft()
@@ -114,6 +127,7 @@ class LeadQueue:
                 if not self.force and policy.expected_keys(model, cycle, hour) <= self.existing:
                     continue
                 self.attempts += 1
+                self.model_attempts[model] += 1
                 return target
         return None
 
@@ -125,6 +139,11 @@ class LeadQueue:
             key = model, cycle
             self.misses[key] = self.misses.get(key, 0) + 1
             if target["hour"] == 0 or self.misses[key] >= 2:
+                self.blocked.add(key)
+        else:
+            key = model, cycle
+            self.failures[key] = self.failures.get(key, 0) + 1
+            if self.failures[key] >= 2:
                 self.blocked.add(key)
 
 

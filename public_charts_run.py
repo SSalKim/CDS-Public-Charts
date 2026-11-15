@@ -280,7 +280,8 @@ def run(args, store=None):
             snapshot()
         error = staged["error"]
         if error:
-            errors.append({**target, "status": "pending" if error["pending"] else "error", "error": error["type"]})
+            errors.append({**target, "status": "pending" if error["pending"] else "error", "error": error["type"],
+                           **{key: value for key, value in error.items() if key not in {"type", "pending"}}})
             print(json.dumps(errors[-1]), flush=True)
             if args.fail_fast and not error["pending"]:
                 raise RuntimeError("Renderer failed: " + error["type"])

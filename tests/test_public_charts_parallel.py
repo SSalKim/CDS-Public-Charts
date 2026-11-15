@@ -91,6 +91,15 @@ class QueueTests(unittest.TestCase):
             queue.finished(item, {"type": "NotReady", "pending": True})
         self.assertIsNone(queue.next(set()))
 
+    def test_repeated_real_errors_stop_scanning_bad_cycle_but_remain_errors(self):
+        queue = LeadQueue([target(hour=72), target(hour=78), target(hour=84),
+                           target(cycle="2026111506")], set(), 2)
+        error = {"type": "ValueError", "pending": False}
+        for _ in range(2):
+            queue.finished(queue.next(set()), error)
+        self.assertEqual(queue.next(set()), target(cycle="2026111506"))
+        self.assertEqual(queue.counts["aifs"], 0)
+
 
 class StagingTests(unittest.TestCase):
     def test_validated_image_survives_producer_deletion_and_checkpoint_is_shared(self):

@@ -95,6 +95,15 @@ PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL
 기본 병렬 수는 `2`이다. 메모리가 부족한 러너에서는 repository variable `PUBLIC_CHARTS_WORKERS=1`로 되돌릴 수 있다.
 Cloudflare 설정은 수정할 필요가 없다. `render_seconds`, `upload_seconds`, `publish_seconds`, `renderer_pid` 로그로 시간을 구분한다.
 
+강수 누적값을 뺄 때는 두 GRIB 필드의 `packingError`를 mm 단위로 환산해 허용 오차에 합산한다.
+저장 정밀도 안의 음수만 0으로 보정하며, 이 범위를 넘는 감소·시간 구간 불일치·격자 불일치는 계속 실패 처리한다.
+NOMADS의 압축 HEAD 응답에 표시되는 Content-Length는 원본 GRIB 크기가 아닐 수 있으므로,
+마지막 필드의 끝 위치는 1바이트 범위 응답의 Content-Range 전체 크기로 계산한다.
+
+같은 cycle에서 실제 오류가 두 번 반복되면 남은 시간대는 다음 실행까지 보류하고 오류는 그대로 보고한다.
+모델별 시도 횟수에도 상한을 둔다. 원본 입전 대기와 실제 처리 오류는 구별하며, 오류를 성공으로 숨기지 않는다.
+체크포인트는 정리·검증 후 별도 cache/save 단계에서 저장하므로 다른 모델의 실패 때문에 정상 계산 결과가 사라지지 않는다.
+
 원시 GRIB와 기본 입력은 러너의 전용 임시 경로에서만 사용한다. 완료한 lead 뒤에 정리하고, 다음 계산에 필요한 압축된 누적 체크포인트만 Actions cache에 남긴다. 캐시는 없어질 수 있으므로 원본 재수집으로 복구한다. **원시자료 24시간 보관을 보장하는 구조는 아니다.**
 
 계정 검증 -> 준비된 고도/바람 먼저 생산 -> 강수/겨울 입력 확인 -> WebP 업로드 -> 서버 MD5/size/공개 권한 확인 -> 새 cycle 첫 파일 비로그인 URL 확인 -> URL manifest 반영 -> Git push 확인 -> 오래된 관리 이미지 영구 삭제 순서다.

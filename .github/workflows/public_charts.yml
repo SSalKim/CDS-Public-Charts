@@ -127,7 +127,8 @@ jobs:
         with:
           path: ${{ env.PUBLIC_CHARTS_MAP_DIR }}
           key: public-charts-maps-v1
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: prefix-cache
         if: env.DRY_RUN != 'true'
         with:
           path: ${{ env.CHART_WORK }}/raw-cache/checkpoints
@@ -167,8 +168,15 @@ jobs:
         if: steps.publish.outcome == 'success' && env.DRY_RUN != 'true'
         run: python public_charts_run.py --finalize-cleanup --workdir "$CHART_WORK"
       - name: Limit derived checkpoint cache
+        id: prune
         if: always() && env.DRY_RUN != 'true'
         run: python public_charts_runtime.py --prune-checkpoints "$CHART_WORK/raw-cache/checkpoints"
+      - name: Save verified checkpoints even after a model failure
+        if: always() && env.DRY_RUN != 'true' && steps.prune.outcome == 'success' && steps.prefix-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CHART_WORK }}/raw-cache/checkpoints
+          key: ${{ steps.prefix-cache.outputs.cache-primary-key }}
       - name: Report production failure
         if: always() && steps.generate.outcome == 'failure'
         run: exit 1
