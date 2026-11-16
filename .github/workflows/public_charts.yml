@@ -10,7 +10,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: cds-public-model-charts
+  group: cds-laptop-wsl-maintenance
   cancel-in-progress: false
 jobs:
   probe:
