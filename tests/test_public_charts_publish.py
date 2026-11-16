@@ -85,6 +85,17 @@ class PublicationTests(unittest.TestCase):
             publish_manifest(self.local)
         self.assertEqual(self.remote_manifest(), {"charts": []})
 
+    def test_git_error_reports_stage_without_leaking_raw_output(self):
+        real_run = subprocess.run
+        def reject_fetch(command, **kwargs):
+            if "fetch" in command:
+                raise subprocess.CalledProcessError(128, command, stderr="Authentication failed: private-token-value")
+            return real_run(command, **kwargs)
+        with patch("public_charts_publish.subprocess.run", side_effect=reject_fetch):
+            with self.assertRaisesRegex(PublicationError, "fetch failed.*authentication") as failure:
+                publish_manifest(self.local)
+        self.assertNotIn("private-token-value", str(failure.exception))
+
     def test_shallow_runner_can_publish_when_code_advances_during_render(self):
         (self.local / "baseline.py").write_text("baseline = 1\n", encoding="utf-8")
         git(self.local, "add", "baseline.py")
@@ -99,7 +110,10 @@ class PublicationTests(unittest.TestCase):
         git(self.local, "push", "origin", "main")
         expected = {"charts": [{"hour": 72}]}
         (shallow / MANIFEST).write_text(json.dumps(expected), encoding="utf-8")
-        with patch("public_charts_publish.time.sleep"):
+        git(shallow, "config", "core.autocrlf", "true")
+        with patch("public_charts_publish.time.sleep"), patch.dict("os.environ", {
+                "GIT_CONFIG_GLOBAL": str(self.local.parent / "no-global.gitconfig"),
+                "GIT_CONFIG_NOSYSTEM": "1"}):
             self.assertEqual(publish_manifest(shallow), expected)
         self.assertEqual(self.remote_manifest(), expected)
         self.assertEqual(git(self.remote, "show", "main:code.py").strip(), "value = 2")
