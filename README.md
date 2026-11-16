@@ -12,6 +12,11 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   dispatches while still allowing a non-mutating dry run.
 - `PUBLIC_CHARTS_START_CYCLE=2026111512` preserves the production start boundary.
 - Only five `PUBLIC_CHARTS_DRIVE_*` repository Secrets are required.
+- Managed image storage is capped at 14,000,000,000 bytes (14 decimal GB),
+  including uploads in flight and expired images awaiting deletion. Retention
+  remains nine cycles for AIFS/GFS/AIGFS and five for CMC; the byte cap can
+  still evict older cycles early. Metadata and other account usage need
+  separate space within the dedicated Drive account's quota.
 - Production is serialized in one concurrency group. Never enable the old CDS
   producer and this producer together: both use the same Drive state.
 - Inside that one job, two isolated renderer processes work on different models.

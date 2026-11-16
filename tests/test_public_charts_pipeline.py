@@ -122,6 +122,18 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             policy.retain(rows, 50)
 
+    def test_default_budget_is_fourteen_decimal_gigabytes(self):
+        self.assertEqual(policy.MAX_IMAGE_BYTES, 14_000_000_000)
+        rows = [row(cycle="2026111500", size=7_000_000_000),
+                row(cycle="2026111506", size=7_000_000_000)]
+        kept, delete = policy.retain(rows)
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(delete, [])
+        rows[1]["size"] += 1
+        kept, delete = policy.retain(rows)
+        self.assertEqual([item["cycle"] for item in kept], ["2026111506"])
+        self.assertEqual(delete, [rows[0]["file_id"]])
+
     def test_full_budget_reserves_space_for_first_new_image(self):
         rows=[row(cycle="2026111500",size=50),row(cycle="2026111506",size=50)]
         inventory=[{"id":r["file_id"],"appProperties":{"kind":"image"}} for r in rows]
