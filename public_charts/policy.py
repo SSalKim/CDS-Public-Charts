@@ -13,25 +13,30 @@ MODEL_START_CYCLE = {"ecmwf": "2026111606"}
 TITLES = {"aifs": "ECMWF AIFS-Single (N320)", "gfs": "NCEP GFS (C768 L127)",
           "aigfs": "NCEP AIGFS (0.25\u00b0)", "cmc": "CMC GDPS (GEM 0.135\u02da L84)",
           "ecmwf": "ECMWF IFS (TCo1279 L137)"}
+TITLES["icon"] = "DWD ICON (R03B07 L120)"
 MAX_IMAGE_BYTES = 14_000_000_000
 PIPELINE_VERSION = 3
-KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
+KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
 
 
 def render_version(cycle):
     return PIPELINE_VERSION if cycle >= ASIA_LAYOUT_CUTOVER else 2
 
 
-def hours(model):
+def hours(model, cycle=None):
     step = 6 if model in {"aifs", "aigfs"} else 3
-    if model not in RETENTION:
+    if model not in RETENTION and model != "icon":
         raise ValueError("Unknown model")
     maximum = 144 if model == "ecmwf" else 240
+    if model == "icon":
+        maximum = 120 if cycle and parse_cycle(cycle).hour in (6, 18) else 180
     return tuple(range(0, 85, step)) + (90, 96) + tuple(range(108, maximum + 1, 12))
 
 
 def supports_cycle(model, cycle):
     hour = parse_cycle(cycle).hour
+    if model == "icon":
+        return hour in (0, 6, 12, 18)
     return hour in ((6, 18) if model == "ecmwf" else range(0, 24, CYCLE_STEP[model]))
 
 
@@ -73,7 +78,7 @@ def supports_acrain(cycle, hour):
 
 def key(model, cycle, hour, product, domain):
     value = f"{model}/{cycle}/{hour:03}/{product}/{domain}"
-    if not KEY_PATTERN.fullmatch(value) or hour not in hours(model):
+    if not KEY_PATTERN.fullmatch(value) or hour not in hours(model, cycle):
         raise ValueError("Invalid chart identity")
     if product not in set(products(cycle)) | {"surfce", "acptot", "acptot1", "acrain", "acrain1"}:
         raise ValueError("Product is outside the active nine-product catalog")

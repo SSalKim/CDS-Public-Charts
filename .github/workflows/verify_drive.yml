@@ -2,6 +2,12 @@ name: Verify chart Drive connection
 
 on:
   workflow_dispatch:
+    inputs:
+      drive_account:
+        description: Explicit account to verify; never falls back to the other account
+        type: choice
+        options: [primary, secondary]
+        default: primary
 
 permissions:
   contents: read
@@ -11,11 +17,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
-      PUBLIC_CHARTS_DRIVE_CLIENT_ID: ${{ secrets.PUBLIC_CHARTS_DRIVE_CLIENT_ID }}
-      PUBLIC_CHARTS_DRIVE_CLIENT_SECRET: ${{ secrets.PUBLIC_CHARTS_DRIVE_CLIENT_SECRET }}
-      PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN: ${{ secrets.PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN }}
-      PUBLIC_CHARTS_DRIVE_FOLDER_ID: ${{ secrets.PUBLIC_CHARTS_DRIVE_FOLDER_ID }}
-      PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL: ${{ secrets.PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL }}
+      PUBLIC_CHARTS_DRIVE_CLIENT_ID: ${{ secrets[inputs.drive_account == 'secondary' && 'PUBLIC_CHARTS_DRIVE2_CLIENT_ID' || 'PUBLIC_CHARTS_DRIVE_CLIENT_ID'] }}
+      PUBLIC_CHARTS_DRIVE_CLIENT_SECRET: ${{ secrets[inputs.drive_account == 'secondary' && 'PUBLIC_CHARTS_DRIVE2_CLIENT_SECRET' || 'PUBLIC_CHARTS_DRIVE_CLIENT_SECRET'] }}
+      PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN: ${{ secrets[inputs.drive_account == 'secondary' && 'PUBLIC_CHARTS_DRIVE2_REFRESH_TOKEN' || 'PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN'] }}
+      PUBLIC_CHARTS_DRIVE_FOLDER_ID: ${{ secrets[inputs.drive_account == 'secondary' && 'PUBLIC_CHARTS_DRIVE2_FOLDER_ID' || 'PUBLIC_CHARTS_DRIVE_FOLDER_ID'] }}
+      PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL: ${{ secrets[inputs.drive_account == 'secondary' && 'PUBLIC_CHARTS_DRIVE2_ACCOUNT_EMAIL' || 'PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL'] }}
     steps:
       - uses: actions/checkout@v4
         with:

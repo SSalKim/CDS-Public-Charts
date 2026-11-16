@@ -1,0 +1,2 @@
+-r requirements-public-charts.txt
+pyresample==1.35.0

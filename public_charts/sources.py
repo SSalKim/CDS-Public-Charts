@@ -33,6 +33,8 @@ MODELS = {
             "attribution":"Data Sourced from ECCC MSC"},
     "ecmwf": {"name": "ECMWF IFS (TCo1279 L137)", "grid": .25, "interval": 3, "rain": 3,
               "max_hour": 144, "attribution": "Data Sourced from ECMWF (CC BY 4.0)"},
+    "icon": {"name": "DWD ICON (R03B07 L120)", "grid": .125, "interval": 3, "rain": 3,
+             "max_hour": 180, "attribution": "Data sourced from DWD (CC BY 4.0)", "preview_only": True},
 }
 FAMILIES = {"z": "geopotential", "gh": "geopotential", "HGT": "geopotential",
             "t": "temperature", "TMP": "temperature", "u": "wind_u", "UGRD": "wind_u",
@@ -325,6 +327,11 @@ class Provider:
         self.model, self.client = model, client
 
     def fetch(self, cycle, hour, wanted):
+        if self.model == "icon":
+            from .icon import IconProvider
+            if not hasattr(self, "_icon"):
+                self._icon = IconProvider(self.client)
+            return self._icon.fetch(cycle, hour, wanted)
         if self.model in {"aifs", "ecmwf"}:
             return self.ecmwf(cycle, hour, wanted)
         if self.model in ("gfs", "aigfs"):
