@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -83,8 +83,39 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(policy.cycle_candidates("ecmwf", now), ["2026111606", "2026111518"])
         self.assertEqual(policy.cycle_candidates("ecmwf", now.replace(hour=2)), ["2026111518", "2026111506"])
 
+    def test_automatic_checks_start_three_hours_after_each_cycle_in_kst(self):
+        kst = timezone(timedelta(hours=9))
+        for model in policy.RETENTION:
+            for hour in (0, 6, 12, 18):
+                cycle = f"20261116{hour:02}"
+                if not policy.supports_cycle(model, cycle):
+                    continue
+                with self.subTest(model=model, cycle=cycle):
+                    start = (datetime(2026, 11, 16, hour, tzinfo=timezone.utc) + timedelta(hours=3)).astimezone(kst)
+                    before = start - timedelta(microseconds=1)
+                    self.assertFalse(policy.source_check_due(cycle, before))
+                    self.assertTrue(policy.source_check_due(cycle, start))
+                    self.assertNotIn(cycle, {r["cycle"] for r in resolve_plan([model], requested_hours=[0], now=before)})
+                    self.assertIn(cycle, {r["cycle"] for r in resolve_plan([model], requested_hours=[0], now=start)})
+
+    def test_previous_cycle_remains_eligible_while_new_cycle_waits(self):
+        now = datetime(2026, 11, 16, 13, tzinfo=timezone.utc)
+        planned = resolve_plan(["gfs", "cmc"], requested_hours=[0], now=now)
+        self.assertNotIn("2026111612", {r["cycle"] for r in planned})
+        self.assertIn({"model": "gfs", "cycle": "2026111606", "hour": 0}, planned)
+        self.assertIn({"model": "cmc", "cycle": "2026111600", "hour": 0}, planned)
+
+    def test_manual_cycle_is_an_explicit_early_check_override(self):
+        now = datetime(2026, 11, 16, 12, tzinfo=timezone.utc)
+        self.assertEqual(resolve_plan(["gfs"], "2026111612", [0], now=now),
+                         [{"model": "gfs", "cycle": "2026111612", "hour": 0}])
+
+    def test_source_check_gate_requires_an_aware_clock(self):
+        with self.assertRaisesRegex(ValueError, "Timezone-aware"):
+            policy.source_check_due("2026111600", datetime(2026, 11, 16, 3))
+
     def test_ecmwf_only_off_cycles_and_no_backfill_before_launch(self):
-        now = datetime(2026, 11, 16, 19, tzinfo=timezone.utc)
+        now = datetime(2026, 11, 16, 21, tzinfo=timezone.utc)
         planned = resolve_plan(["ecmwf"], now=now, start_cycle="2026111512")
         self.assertEqual({item["cycle"] for item in planned}, {"2026111606", "2026111618"})
         self.assertEqual({item["hour"] for item in planned}, set(policy.hours("ecmwf")))
@@ -95,7 +126,7 @@ class PolicyTests(unittest.TestCase):
                 policy.expected_keys("ecmwf", cycle, hour)
 
     def test_automatic_plan_starts_at_the_configured_cycle_and_recovers_missed_cycles(self):
-        now = datetime(2026, 11, 16, 1, tzinfo=timezone.utc)
+        now = datetime(2026, 11, 16, 3, tzinfo=timezone.utc)
         planned = resolve_plan(["aifs", "cmc"], requested_hours=[0, 24], now=now,
                                start_cycle="2026111512")
         self.assertTrue(all(item["cycle"] >= "2026111512" for item in planned))

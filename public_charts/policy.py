@@ -7,6 +7,7 @@ from .chart_style import ASIA_LAYOUT_CUTOVER
 
 RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 5}
 CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 12}
+SOURCE_CHECK_DELAY = timedelta(hours=3)
 MODEL_START_CYCLE = {"ecmwf": "2026111606"}
 TITLES = {"aifs": "ECMWF AIFS-Single (N320)", "gfs": "NCEP GFS (C768 L127)",
           "aigfs": "NCEP AIGFS (0.25\u00b0)", "cmc": "CMC GDPS (GEM 0.135\u02da L84)",
@@ -35,6 +36,13 @@ def supports_cycle(model, cycle):
 
 def start_cycle(model, configured=None):
     return max(configured or "", MODEL_START_CYCLE.get(model, ""))
+
+
+def source_check_due(cycle, now=None):
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("Timezone-aware time required")
+    return parse_cycle(cycle) + SOURCE_CHECK_DELAY <= now
 
 
 def cycle_candidates(model, now=None, depth=2):

@@ -47,6 +47,7 @@ def current_render_keys(rows):
 
 
 def resolve_plan(models, cycle=None, requested_hours=None, now=None, start_cycle=None):
+    now = now or datetime.now(timezone.utc)
     if start_cycle:
         parsed = parse_cycle(start_cycle)
         if parsed.strftime("%Y%m%d%H") != start_cycle or parsed.hour % 6:
@@ -56,7 +57,7 @@ def resolve_plan(models, cycle=None, requested_hours=None, now=None, start_cycle
     result = []
     for model in models:
         depth = policy.RETENTION[model] if start_cycle else 2
-        cycles = [cycle] if cycle else policy.cycle_candidates(model, now, depth)
+        cycles = [cycle] if cycle else policy.cycle_candidates(model, now - policy.SOURCE_CHECK_DELAY, depth)
         floor = policy.start_cycle(model, start_cycle)
         cycles = [selected for selected in cycles if selected >= floor]
         for selected in cycles:
@@ -203,7 +204,8 @@ def run(args, store=None):
         for model in args.models:
             previous=sorted({row["cycle"] for row in rows.values() if row["model"]==model},reverse=True)[:policy.RETENTION[model]]
             for cycle in previous:
-                if (model,cycle) not in planned and cycle >= policy.start_cycle(model,args.start_cycle):
+                if ((model,cycle) not in planned and cycle >= policy.start_cycle(model,args.start_cycle)
+                        and policy.source_check_due(cycle)):
                     plan.extend({"model":model,"cycle":cycle,"hour":hour} for hour in policy.hours(model))
         order = {model: index for index, model in enumerate(args.models)}
         plan.sort(key=lambda target: (order[target["model"]], -int(target["cycle"]), target["hour"]))
@@ -417,7 +419,7 @@ def run(args, store=None):
         planned = resolve_plan(args.models, args.cycle, args.hours, start_cycle=args.start_cycle)
         cycles = {(item["model"], item["cycle"]) for item in planned}
         for model, cycle in previous_cycles - cycles:
-            if cycle >= policy.start_cycle(model,args.start_cycle):
+            if cycle >= policy.start_cycle(model,args.start_cycle) and policy.source_check_due(cycle):
                 planned.extend({"model": model, "cycle": cycle, "hour": hour} for hour in policy.hours(model))
         order = {model: index for index, model in enumerate(args.models)}
         planned.sort(key=lambda target: (order[target["model"]], -int(target["cycle"]), target["hour"]))
@@ -430,6 +432,7 @@ def run(args, store=None):
                       "windows_available_memory_mib": round(windows_available_memory()/1024**2,1) if windows_available_memory() is not None else None,
                       "time_budget_minutes": minutes, "laptop_guard": lease.root is not None,
                       "same_model_parallelism": True, "source_refresh_seconds": getattr(args,"refresh_seconds",60),
+                      "automatic_cycle_check_delay_hours": policy.SOURCE_CHECK_DELAY.total_seconds()/3600,
                       "publication_interval_seconds": publication_interval, "streaming_images": not local}), flush=True)
     sampler.start()
     failure = None

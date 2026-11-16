@@ -8,6 +8,12 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
 - Public index: `data/public_charts_manifest.json`; refreshed without Pages builds.
 - Scheduling: Cloudflare calls `public_charts.yml` every ten minutes.
   There is intentionally no GitHub-native cron in this repository.
+- Automatic raw-source checks wait until initialization time + three hours:
+  00Z from 12:00 KST, 06Z from 18:00 KST, 12Z from 00:00 KST the next day,
+  and 18Z from 06:00 KST. The window applies to initial planning, continuous
+  refresh and restoration of incomplete cycles. Older eligible unfinished work
+  continues; Cloudflare itself is not paused. Explicit manual cycle requests
+  can override the delay. These are earliest check times, not guaranteed arrivals.
 - `PUBLIC_CHARTS_ENABLED=true` enables production; `false` blocks production
   dispatches while still allowing a non-mutating dry run.
 - `PUBLIC_CHARTS_START_CYCLE=2026111512` preserves the production start boundary.
