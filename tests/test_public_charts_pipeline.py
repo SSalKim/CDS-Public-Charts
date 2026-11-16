@@ -54,8 +54,8 @@ class PolicyTests(unittest.TestCase):
         for model in policy.RETENTION:
             timeline = policy.hours(model)
             self.assertEqual(timeline[0], 0)
-            self.assertEqual(timeline[-1], 144 if model == "ecmwf" else 240)
-            self.assertEqual(len(timeline), 35 if model == "ecmwf" else 29 if model in {"aifs", "aigfs"} else 43)
+            self.assertEqual(timeline[-1], 144 if model == "ecmwf" else 180 if model == "icon" else 240)
+            self.assertEqual(len(timeline), 35 if model == "ecmwf" else 38 if model == "icon" else 29 if model in {"aifs", "aigfs"} else 43)
             self.assertTrue({84, 90, 96, 108, 120} <= set(timeline))
             keys = policy.expected_keys(model, "2026111606" if model == "ecmwf" else "2026111500", 0)
             self.assertTrue(any("/surfce/" in key for key in keys))
@@ -101,11 +101,11 @@ class PolicyTests(unittest.TestCase):
         kst = timezone(timedelta(hours=9))
         for model in policy.RETENTION:
             for hour in (0, 6, 12, 18):
-                cycle = f"20261116{hour:02}"
+                cycle = f"20261117{hour:02}"
                 if not policy.supports_cycle(model, cycle):
                     continue
                 with self.subTest(model=model, cycle=cycle):
-                    start = (datetime(2026, 11, 16, hour, tzinfo=timezone.utc) + timedelta(hours=3)).astimezone(kst)
+                    start = (datetime(2026, 11, 17, hour, tzinfo=timezone.utc) + timedelta(hours=3)).astimezone(kst)
                     before = start - timedelta(microseconds=1)
                     self.assertFalse(policy.source_check_due(cycle, before))
                     self.assertTrue(policy.source_check_due(cycle, start))
@@ -138,6 +138,13 @@ class PolicyTests(unittest.TestCase):
         for cycle, hour in (("2026111600",0),("2026111612",0),("2026111606",156)):
             with self.assertRaises(ValueError):
                 policy.expected_keys("ecmwf", cycle, hour)
+
+    def test_icon_plan_respects_launch_and_shorter_off_cycle_horizon(self):
+        self.assertEqual(resolve_plan(["icon"], cycle="2026111618")[-1]["hour"], 120)
+        self.assertEqual(resolve_plan(["icon"], cycle="2026111612")[-1]["hour"], 180)
+        planned = resolve_plan(["icon"], now=datetime(2026,11,17,3,tzinfo=timezone.utc),
+                               start_cycle="2026111512")
+        self.assertTrue(all(item["cycle"] >= "2026111612" for item in planned))
 
     def test_automatic_plan_starts_at_the_configured_cycle_and_recovers_missed_cycles(self):
         now = datetime(2026, 11, 16, 3, tzinfo=timezone.utc)

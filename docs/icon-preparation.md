@@ -1,9 +1,24 @@
-# ICON Staging
+# ICON Production
 
-ICON is intentionally not in policy.RETENTION, the automatic production model
-roster. The shared existing Drive, published manifest and model time ranges are
-unchanged. The second Drive uses PUBLIC_CHARTS_DRIVE2_* secrets and can hold ICON
-and future models; it is not reserved exclusively for ICON.
+ICON joins the automatic roster from 2026111612 with nine retained cycles.
+The balanced-v1 workflow authenticates both separate Drives before downloading.
+The second Drive uses PUBLIC_CHARTS_DRIVE2_* secrets and can hold future models;
+it is not reserved exclusively for ICON. Older workflows without the layout flag
+remain primary-only and do not automatically add ICON.
+
+## Balanced Storage
+
+- Primary: GFS, CMC, ECMWF 06/18Z. Projected retained images: about 8.9GB.
+- Secondary: AIFS, AIGFS, ICON. Projected retained images: about 8-9.5GB.
+- Estimates use existing complete-lead mean sizes and a provisional ICON range,
+  not a guarantee of seasonal peak size. Each account has its own 14GB image cap.
+- Existing primary-account AIFS/AIGFS URLs remain valid. New files route to the
+  secondary account; legacy files age out under the existing cycle retention.
+  No mass transfer competes with incoming forecast production.
+- Private state and the combined public manifest have one primary coordinator.
+  Cleanup binds both folder IDs, verifies exact publication and protects cached
+  links for the existing grace period. Renderers receive neither Drive's secrets.
+- Retention tracks actual file ownership, not the target route, while transitioning.
 
 ## Inputs and Layout
 
@@ -42,10 +57,10 @@ manifest or choose a different cycle. It retains validated local raw data and
 remapping weights for repeated preview runs. Its local manifest is explicitly
 marked preview_only and published=false.
 
-After account preparation: verify the new account, test nonzero-lead rainfall
-and native snowfall, measure CPU/RAM/download/upload time, then connect isolated
-account storage, publication and scheduling. Do not simply append ICON to the
-current shared-account automatic roster.
+The production workflow installs requirements-icon-charts.txt and caches only
+the validated remapping weights separately. Forecast raw files remain temporary.
+ICON uses the same fair ready queue, streaming uploads and combined publication
+as the existing models, rather than a concurrent independent state writer.
 
 Sources:
 - https://opendata.dwd.de/weather/nwp/v1/m/icon/p/

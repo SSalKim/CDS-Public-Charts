@@ -58,7 +58,8 @@ def synchronized_renderer(model, cycle, hour, root, existing, emit, **kwargs):
     result = sample_renderer(model, cycle, hour, root, existing, emit, **kwargs)
     if model == "gfs":
         (work / "gfs-finished").touch()
-    result["secret_visible"] = "PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN" in os.environ
+    result["secret_visible"] = any(name in os.environ for name in (
+        "PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN", "PUBLIC_CHARTS_DRIVE2_REFRESH_TOKEN"))
     return result
 
 
@@ -453,7 +454,8 @@ class StagingTests(unittest.TestCase):
                     self.assertFalse((work / "gfs-finished").exists())
                     (work / "first-published").touch()
 
-            with patch.dict(os.environ, {"PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN": "test-not-a-real-token"}):
+            with patch.dict(os.environ, {"PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN": "test-not-a-real-token",
+                                         "PUBLIC_CHARTS_DRIVE2_REFRESH_TOKEN": "test-not-a-real-token"}):
                 execute_leads(LeadQueue([target(), target("gfs")], set(), 1), work, 2, consume,
                               renderer=synchronized_renderer)
             self.assertEqual(len(set(received)), 2)

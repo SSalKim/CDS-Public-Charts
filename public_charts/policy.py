@@ -5,11 +5,11 @@ import re
 from .dates import parse_cycle
 from .chart_style import ASIA_LAYOUT_CUTOVER
 
-RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 5}
-CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 12}
+RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 5, "icon": 9}
+CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 12, "icon": 6}
 SOURCE_CHECK_DELAY = timedelta(hours=3)
 ZERO_ACRAIN_CUTOVER = "2026111612"
-MODEL_START_CYCLE = {"ecmwf": "2026111606"}
+MODEL_START_CYCLE = {"ecmwf": "2026111606", "icon": "2026111612"}
 TITLES = {"aifs": "ECMWF AIFS-Single (N320)", "gfs": "NCEP GFS (C768 L127)",
           "aigfs": "NCEP AIGFS (0.25\u00b0)", "cmc": "CMC GDPS (GEM 0.135\u02da L84)",
           "ecmwf": "ECMWF IFS (TCo1279 L137)"}
@@ -115,7 +115,7 @@ def unique_bytes(rows):
     return sum(files.values())
 
 
-def retain(rows, max_bytes=MAX_IMAGE_BYTES):
+def retain(rows, max_bytes=MAX_IMAGE_BYTES, *, account_budgets=None):
     """Evict whole old cycles, deduplicating aliases and preserving latest per model."""
     by_key = {row_key(row): dict(row) for row in rows}
     cycles = {model: sorted({row["cycle"] for row in by_key.values() if row["model"] == model}, reverse=True)
@@ -125,9 +125,20 @@ def retain(rows, max_bytes=MAX_IMAGE_BYTES):
     def selected_rows():
         return [row for row in by_key.values() if (row["model"], row["cycle"]) in selected]
 
-    while unique_bytes(selected_rows()) > max_bytes:
+    def over_budget():
+        current = selected_rows()
+        if account_budgets is None:
+            return {None} if unique_bytes(current) > max_bytes else set()
+        if any(row.get("storage_account", "primary") not in account_budgets for row in current):
+            raise ValueError("Unknown image storage account")
+        return {account for account, budget in account_budgets.items()
+                if unique_bytes(row for row in current if row.get("storage_account", "primary") == account) > budget}
+
+    while exceeded := over_budget():
+        affected = {(row["model"], row["cycle"]) for row in selected_rows()
+                    if None in exceeded or row.get("storage_account", "primary") in exceeded}
         removable = [(cycle, model) for model, cycle in selected
-                     if sum(m == model for m, _ in selected) > 1]
+                     if (model, cycle) in affected and cycle != cycles[model][0]]
         if not removable:
             raise ValueError("Latest cycles alone exceed the image budget; cleanup refused")
         cycle, model = min(removable)

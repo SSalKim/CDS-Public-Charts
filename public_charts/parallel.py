@@ -48,7 +48,7 @@ def initialize_renderer(events=None, cancelled=None):
     if events is not None:
         events.cancel_join_thread()
     for name in list(os.environ):
-        if name.startswith("PUBLIC_CHARTS_DRIVE_") or name in {"GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN"}:
+        if name.startswith(("PUBLIC_CHARTS_DRIVE_", "PUBLIC_CHARTS_DRIVE2_", "PUBLIC_CHARTS_ICON_DRIVE_")) or name in {"GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN"}:
             os.environ.pop(name, None)
     for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
         os.environ[name] = "1"

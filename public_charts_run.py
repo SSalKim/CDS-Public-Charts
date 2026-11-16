@@ -63,7 +63,7 @@ def resolve_plan(models, cycle=None, requested_hours=None, now=None, start_cycle
         for selected in cycles:
             if not policy.supports_cycle(model, selected) and len(models)>1:
                 continue
-            for hour in requested_hours if requested_hours is not None else policy.hours(model):
+            for hour in requested_hours if requested_hours is not None else policy.hours(model, selected):
                 policy.expected_keys(model, selected, hour)
                 result.append({"model": model, "cycle": selected, "hour": hour})
     if not cycle:
@@ -96,10 +96,10 @@ def recover_rows(inventory):
     return rows
 
 
-def plan_cleanup(rows, inventory, budget, reserve_bytes=0):
+def plan_cleanup(rows, inventory, budget, reserve_bytes=0, *, account_budgets=None):
     if reserve_bytes >= budget:
         raise ValueError("One incoming image exceeds the image budget")
-    kept, _ = policy.retain(rows, budget - reserve_bytes)
+    kept, _ = policy.retain(rows, budget - reserve_bytes, account_budgets=account_budgets)
     retained = {row["file_id"] for row in kept}
     candidates = {item["id"] for item in inventory if item.get("appProperties", {}).get("kind") == "image"}
     candidates.update(row["file_id"] for row in rows)
@@ -109,6 +109,8 @@ def plan_cleanup(rows, inventory, budget, reserve_bytes=0):
 def finalize_cleanup(store, manifest, plan, published_payload, *, grace_seconds=600, now=None, max_files=300):
     if plan.get("namespace") != "cds-public-charts-v1" or plan.get("folder_id") != store.folder_id:
         raise ValueError("Cleanup target does not match the isolated chart folder")
+    if vars(store).get("storage_folders") != plan.get("storage_folders"):
+        raise ValueError("Cleanup account targets differ from the published plan")
     digest = hashlib.sha256(manifest_bytes(manifest)).hexdigest()
     if digest != plan.get("manifest_sha256") or manifest != published_payload:
         raise ValueError("The exact retained manifest must be published before cleanup")
@@ -182,12 +184,14 @@ def run(args, store=None):
         state = read_json(output / "manifest.json", {"charts": []})
         inventory = []
     else:
-        from public_charts_drive import ChartDriveStore
-        store = store or ChartDriveStore.from_environment()
+        from public_charts.storage import production_store
+        store = store or production_store()
         store.verify_account_and_folder()
         state = store.read_json("state.json", {"schema_version": 1, "rows": []})
         if state.get("schema_version") != 1:
             raise ValueError("Unknown private production state version")
+        if state.get("storage_layout") == "balanced-v1" and not hasattr(store, "storage_folders"):
+            raise ValueError("Balanced chart state requires the two-account coordinator")
         inventory = store.inventory()
         if hasattr(store, "prime_inventory"):
             store.prime_inventory(inventory)
@@ -196,6 +200,9 @@ def run(args, store=None):
         recover_rows(inventory)
         valid_ids = {item["id"] for item in inventory}
         rows = {key: row for key, row in rows.items() if row.get("file_id") in valid_ids}
+        if hasattr(store, "storage_folders"):
+            for row in rows.values():
+                row["storage_account"] = store.account_for_file(row["file_id"])
         # Uncommitted uploads are not public state. A retry reuses and verifies
         # them through upload_image rather than trusting their metadata alone.
     fresh = current_render_keys(rows)
@@ -206,13 +213,18 @@ def run(args, store=None):
             for cycle in previous:
                 if ((model,cycle) not in planned and cycle >= policy.start_cycle(model,args.start_cycle)
                         and policy.source_check_due(cycle)):
-                    plan.extend({"model":model,"cycle":cycle,"hour":hour} for hour in policy.hours(model))
+                    plan.extend({"model":model,"cycle":cycle,"hour":hour} for hour in policy.hours(model, cycle))
         order = {model: index for index, model in enumerate(args.models)}
         plan.sort(key=lambda target: (order[target["model"]], -int(target["cycle"]), target["hour"]))
     image_bytes = policy.unique_bytes(rows.values())
     if not local:
         image_bytes = sum(int(item.get("size", 0)) for item in inventory
                           if item.get("appProperties", {}).get("kind") == "image")
+    accounts = tuple(store.storage_folders) if not local and hasattr(store, "storage_folders") else ("primary",)
+    account_bytes = {account: sum(int(item.get("size", 0)) for item in inventory
+                                 if item.get("appProperties", {}).get("kind") == "image"
+                                 and item.get("storage_account", "primary") == account) for account in accounts}
+    pending_by_account, reserve_by_account = dict.fromkeys(accounts, 0), dict.fromkeys(accounts, 0)
     minutes = getattr(args, "time_budget_minutes", 0)
     cap = max(len(policy.hours(model))*policy.RETENTION[model] for model in args.models) if minutes else args.max_leads
     queue = LeadQueue(plan, fresh, cap, args.force)
@@ -239,13 +251,17 @@ def run(args, store=None):
             store.write_json("state.json", {"schema_version": 1, "pipeline_version": policy.PIPELINE_VERSION,
                              "rows": list(rows.values()), "errors": errors[-40:],
                              "verified_cycles": sorted(verified_cycles),
+                             **({"storage_layout": "balanced-v1", "storage_folders": store.storage_folders}
+                                if len(accounts) > 1 else {}),
                              "pending_delete_after": state.get("pending_delete_after", {})})
 
     def snapshot():
         nonlocal last_publication, publication_dirty
         if publication_dirty:
             save_state()
-        kept, delete_ids = plan_cleanup(list(rows.values()), inventory, args.max_bytes, reserve_bytes)
+        account_budgets = {account: args.max_bytes - reserve_by_account[account] for account in accounts}
+        kept, delete_ids = plan_cleanup(list(rows.values()), inventory, args.max_bytes, reserve_bytes,
+                                       account_budgets=account_budgets if len(accounts) > 1 else None)
         manifest = policy.public_manifest(kept)
         previous = read_json(args.manifest, {})
         if previous.get("charts") == manifest["charts"] and previous.get("models") == manifest["models"]:
@@ -253,7 +269,8 @@ def run(args, store=None):
         store.write_json("manifest.json", manifest)
         write_json(args.manifest, manifest)
         write_json(work / "cleanup-plan.json", {"namespace": "cds-public-charts-v1", "folder_id": store.folder_id,
-                   "manifest_sha256": hashlib.sha256(manifest_bytes(manifest)).hexdigest(), "delete_ids": delete_ids})
+                   "manifest_sha256": hashlib.sha256(manifest_bytes(manifest)).hexdigest(), "delete_ids": delete_ids,
+                   **({"storage_folders": store.storage_folders} if len(accounts) > 1 else {})})
         if args.publish_incremental:
             publish_manifest(ROOT)
         last_publication = time.monotonic()
@@ -288,11 +305,13 @@ def run(args, store=None):
                 verified_cycles.add(f"{model}/{cycle}")
             if info["file_id"] not in before_ids:
                 image_bytes += int(info["size"])
+                account_bytes[info.get("storage_account", "primary")] += int(info["size"])
                 before_ids.add(info["file_id"])
         rows[item["key"]] = {"model": model, "cycle": cycle, "hour": hour,
                              "product": item["product"], "domain": item["domain"],
                              "render_version": policy.render_version(cycle),
-                             **{key: info[key] for key in ("file_id", "url", "size", "sha256")}}
+                             **{key: info[key] for key in ("file_id", "url", "size", "sha256")},
+                             **({"storage_account": info["storage_account"]} if "storage_account" in info else {})}
         fresh.add(item["key"])
         uploading_keys.discard(item["key"])
         publication_metrics[item["key"]] = item
@@ -300,13 +319,19 @@ def run(args, store=None):
 
     def reserve(item):
         nonlocal pending_bytes
-        if image_bytes + pending_bytes + item["size"] > args.max_bytes:
-            raise UploadBudgetExceeded(item["size"])
+        account = store.account_for_key(item["key"]) if len(accounts) > 1 else "primary"
+        if account_bytes[account] + pending_by_account[account] + item["size"] > args.max_bytes:
+            exception = UploadBudgetExceeded(item["size"])
+            exception.storage_account = account
+            raise exception
         pending_bytes += item["size"]
+        pending_by_account[account] += item["size"]
 
     def release(item):
         nonlocal pending_bytes
         pending_bytes -= item["size"]
+        account = store.account_for_key(item["key"]) if len(accounts) > 1 else "primary"
+        pending_by_account[account] -= item["size"]
 
     stream = StreamingUploads(uploader, reserve, release, record) if uploader else None
 
@@ -326,6 +351,8 @@ def run(args, store=None):
             except UploadBudgetExceeded as exception:
                 budget_blocked = True
                 reserve_bytes = max(reserve_bytes, exception.size)
+                account = getattr(exception, "storage_account", "primary")
+                reserve_by_account[account] = max(reserve_by_account[account], exception.size)
                 errors.append({"status": "budget", "error": str(exception)})
                 raise BudgetReached from None
         resolve_aliases()
@@ -420,7 +447,7 @@ def run(args, store=None):
         cycles = {(item["model"], item["cycle"]) for item in planned}
         for model, cycle in previous_cycles - cycles:
             if cycle >= policy.start_cycle(model,args.start_cycle) and policy.source_check_due(cycle):
-                planned.extend({"model": model, "cycle": cycle, "hour": hour} for hour in policy.hours(model))
+                planned.extend({"model": model, "cycle": cycle, "hour": hour} for hour in policy.hours(model, cycle))
         order = {model: index for index, model in enumerate(args.models)}
         planned.sort(key=lambda target: (order[target["model"]], -int(target["cycle"]), target["hour"]))
         print(json.dumps({"event": "plan_refreshed", "candidates": len(planned)}), flush=True)
@@ -477,6 +504,8 @@ def run(args, store=None):
         print(f"Local preview: {output / 'index.html'}")
         return int(any(row["status"] == "error" for row in errors))
     print(json.dumps({"rendered_leads": counts, "retained_bytes": policy.unique_bytes(kept),
+                      "retained_bytes_by_account": {account: policy.unique_bytes(row for row in kept
+                          if row.get("storage_account", "primary") == account) for account in accounts},
                       "pending_delete_files": len(delete_ids), "budget_wait": budget_blocked,
                       "stop_reason": stop_reason, **resource_usage, "errors": errors[-40:]}))
     return int(any(row["status"] == "error" for row in errors))
@@ -484,7 +513,9 @@ def run(args, store=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", nargs="+", choices=policy.RETENTION, default=list(policy.RETENTION))
+    from public_charts.storage import balanced_enabled
+    default_models = [model for model in policy.RETENTION if model != "icon" or balanced_enabled()]
+    parser.add_argument("--models", nargs="+", choices=policy.RETENTION, default=default_models)
     parser.add_argument("--cycle")
     parser.add_argument("--start-cycle", help="Never produce initialization cycles before this UTC YYYYMMDDHH")
     parser.add_argument("--hours", nargs="+", type=int)
@@ -519,11 +550,13 @@ def main():
     if args.max_leads < 1 or args.max_bytes < 1 or args.cache_root and not args.local:
         parser.error("Invalid batch/budget; cache-root is local-only")
     if args.check_drive or args.finalize_cleanup:
-        from public_charts_drive import ChartDriveStore
-        store = ChartDriveStore.from_environment()
+        from public_charts.storage import production_store
+        store = production_store()
         if args.check_drive:
             store.verify_account_and_folder()
             print("Dedicated Drive account and owned folder verified; no files changed.")
+            if hasattr(store, "quota_summary"):
+                print(json.dumps({"storage_quota": store.quota_summary()}))
             return 0
         published = subprocess.check_output(["git", "-c", f"safe.directory={ROOT.as_posix()}", "show",
                                              "origin/main:data/public_charts_manifest.json"], cwd=ROOT)

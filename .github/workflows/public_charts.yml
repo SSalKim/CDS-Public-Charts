@@ -15,7 +15,7 @@ on:
         default: auto
       model:
         type: choice
-        options: [all, aifs, gfs, aigfs, cmc, ecmwf]
+        options: [all, aifs, gfs, aigfs, cmc, ecmwf, icon]
         default: all
       cycle:
         description: Optional UTC YYYYMMDDHH; blank checks recent cycles
@@ -75,6 +75,12 @@ jobs:
       PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN: ${{ secrets.PUBLIC_CHARTS_DRIVE_REFRESH_TOKEN }}
       PUBLIC_CHARTS_DRIVE_FOLDER_ID: ${{ secrets.PUBLIC_CHARTS_DRIVE_FOLDER_ID }}
       PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL: ${{ secrets.PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL }}
+      PUBLIC_CHARTS_DRIVE2_CLIENT_ID: ${{ secrets.PUBLIC_CHARTS_DRIVE2_CLIENT_ID }}
+      PUBLIC_CHARTS_DRIVE2_CLIENT_SECRET: ${{ secrets.PUBLIC_CHARTS_DRIVE2_CLIENT_SECRET }}
+      PUBLIC_CHARTS_DRIVE2_REFRESH_TOKEN: ${{ secrets.PUBLIC_CHARTS_DRIVE2_REFRESH_TOKEN }}
+      PUBLIC_CHARTS_DRIVE2_FOLDER_ID: ${{ secrets.PUBLIC_CHARTS_DRIVE2_FOLDER_ID }}
+      PUBLIC_CHARTS_DRIVE2_ACCOUNT_EMAIL: ${{ secrets.PUBLIC_CHARTS_DRIVE2_ACCOUNT_EMAIL }}
+      PUBLIC_CHARTS_STORAGE_LAYOUT: balanced-v1
       OPENBLAS_NUM_THREADS: '1'
       OMP_NUM_THREADS: '1'
       PYTHONUTF8: '1'
@@ -103,6 +109,7 @@ jobs:
             /public_charts_drive.py
             /vtg_drive_archive.py
             /requirements-public-charts.txt
+            /requirements-icon-charts.txt
             /data/public_charts_manifest.json
       - name: Configure isolated runtime paths
         shell: bash
@@ -110,21 +117,24 @@ jobs:
           printf '%s\n' \
             "CHART_WORK=$RUNNER_TEMP/cds-public-charts" \
             "PUBLIC_CHARTS_MAP_DIR=$RUNNER_TOOL_CACHE/cds-public-charts/maps-v1" \
+            "PUBLIC_CHARTS_ICON_GRID_DIR=$RUNNER_TOOL_CACHE/cds-public-charts/icon-grid-v1" \
             "MPLCONFIGDIR=$RUNNER_TEMP/public-charts-mpl" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12.15'
           cache: pip
-          cache-dependency-path: requirements-public-charts.txt
+          cache-dependency-path: |
+            requirements-public-charts.txt
+            requirements-icon-charts.txt
       - name: Install isolated rendering runtime
         if: env.DRY_RUN != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          hash="$(sha256sum requirements-public-charts.txt | cut -d ' ' -f 1)"
+          hash="$(sha256sum requirements-public-charts.txt requirements-icon-charts.txt | sha256sum | cut -d ' ' -f 1)"
           venv="$RUNNER_TOOL_CACHE/cds-public-charts/python-$hash"
           if [ ! -x "$venv/bin/python" ]; then python -m venv "$venv"; fi
-          "$venv/bin/python" -m pip install -r requirements-public-charts.txt
+          "$venv/bin/python" -m pip install -r requirements-icon-charts.txt
           echo "$venv/bin" >> "$GITHUB_PATH"
       - name: Verify separate Drive account before downloads
         if: env.DRY_RUN != 'true'
@@ -134,6 +144,11 @@ jobs:
         with:
           path: ${{ env.PUBLIC_CHARTS_MAP_DIR }}
           key: public-charts-maps-v1
+      - uses: actions/cache@v4
+        if: env.DRY_RUN != 'true'
+        with:
+          path: ${{ env.PUBLIC_CHARTS_ICON_GRID_DIR }}
+          key: public-charts-icon-grid-v1
       - uses: actions/cache/restore@v4
         id: prefix-cache
         if: env.DRY_RUN != 'true'

@@ -1,6 +1,6 @@
 """Isolated My Drive storage for public charts; orchestration owns scheduling.
 
-Only PUBLIC_CHARTS_DRIVE_* settings are read. Images are immutable versions;
+Only explicitly selected chart Drive settings are read. Images are immutable versions;
 state and manifest updates use an ETag precondition. Callers must serialize the
 first creation of those two JSON entries (Drive names are not unique).
 """
@@ -37,7 +37,7 @@ IMAGE_TYPES = {".webp": "image/webp", ".png": "image/png",
                ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 MULTIPART_LIMIT = 5 * 1024 * 1024
 KEY_PATTERN = re.compile(
-    r"(?:aifs|gfs|aigfs|cmc|ecmwf)/([0-9]{10})/([0-9]{3})/"
+    r"(?:aifs|gfs|aigfs|cmc|ecmwf|icon)/([0-9]{10})/([0-9]{3})/"
     r"[a-z][a-z0-9_]{0,39}/(?:asia|hkor)\Z"
 )
 
@@ -82,6 +82,7 @@ class ChartDriveStore:
         self._verified = False
         self._image_index = None
         self._upload_ids = deque()
+        self.env_prefix = ENV_PREFIX
 
     def prime_inventory(self, inventory):
         self._image_index = {}
@@ -91,22 +92,25 @@ class ChartDriveStore:
 
     def new_upload_worker(self):
         """Each IO thread owns its OAuth client and requests session."""
-        worker = type(self).from_environment()
+        worker = type(self).from_environment(self.env_prefix)
         if (worker.folder_id, worker.account_email) != (self.folder_id, self.account_email):
             raise ChartDriveError("Upload worker target differs from the verified coordinator.")
         worker._image_index = copy.deepcopy(self._image_index)
         return worker
 
     @classmethod
-    def from_environment(cls) -> ChartDriveStore:
+    def from_environment(cls, prefix=ENV_PREFIX) -> ChartDriveStore:
         """Load only the five dedicated variables, authenticate, then verify."""
+        if prefix not in (ENV_PREFIX, "PUBLIC_CHARTS_DRIVE2_"):
+            raise ChartDriveError("Unsupported chart Drive credentials namespace.")
         names = ("CLIENT_ID", "CLIENT_SECRET", "REFRESH_TOKEN", "FOLDER_ID", "ACCOUNT_EMAIL")
-        settings = {name: os.environ.get(ENV_PREFIX + name, "").strip() for name in names}
-        missing = [ENV_PREFIX + name for name in names if not settings[name]]
+        settings = {name: os.environ.get(prefix + name, "").strip() for name in names}
+        missing = [prefix + name for name in names if not settings[name]]
         if missing:
             raise ChartDriveError("Missing dedicated Drive settings: " + ", ".join(missing))
         # Validate targets before the client makes its initial OAuth request.
         store = cls(None, settings["FOLDER_ID"], settings["ACCOUNT_EMAIL"])
+        store.env_prefix = prefix
         try:
             store._client = DriveClient({
                 "mode": "oauth_refresh_token",
@@ -243,6 +247,20 @@ class ChartDriveStore:
         if not self._verified:
             self.verify_account_and_folder()
 
+    def storage_quota(self):
+        self._ensure_verified()
+        value = self._json(self._request("GET", f"{DRIVE_API}/about",
+                          params={"fields": "storageQuota(limit,usage,usageInDrive,usageInDriveTrash)"}))
+        try:
+            quota = value["storageQuota"]
+            result = {name: int(quota[name]) for name in ("usage", "usageInDrive", "usageInDriveTrash")}
+            result["limit"] = int(quota["limit"]) if "limit" in quota else None
+            if any(number is not None and number < 0 for number in result.values()):
+                raise ValueError("Negative quota")
+            return result
+        except (KeyError, TypeError, ValueError):
+            raise ChartDriveError("Google Drive returned invalid storage quota metadata.") from None
+
     def _managed(self, metadata: dict) -> bool:
         properties = metadata.get("appProperties")
         mime_type = metadata.get("mimeType")
@@ -307,6 +325,9 @@ class ChartDriveStore:
             raise ChartDriveError("Invalid public chart cycle.") from None
         if key.startswith("ecmwf/") and (cycle.hour not in (6,18) or int(match[2]) > 144):
             raise ChartDriveError("ECMWF generated charts require 06/18Z and leads through +144h.")
+        if key.startswith("icon/") and (cycle.hour not in (0,6,12,18) or
+                int(match[2]) > (120 if cycle.hour in (6,18) else 180)):
+            raise ChartDriveError("ICON charts require a native cycle and forecast horizon.")
 
     @staticmethod
     def _hash_stream(handle: BinaryIO) -> tuple[int, str, str]:
