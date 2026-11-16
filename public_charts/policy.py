@@ -5,13 +5,15 @@ import re
 from .dates import parse_cycle
 from .chart_style import ASIA_LAYOUT_CUTOVER
 
-RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5}
-CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12}
+RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 5}
+CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 12}
+MODEL_START_CYCLE = {"ecmwf": "2026111606"}
 TITLES = {"aifs": "ECMWF AIFS-Single (N320)", "gfs": "NCEP GFS (C768 L127)",
-          "aigfs": "NCEP AIGFS (0.25\u00b0)", "cmc": "CMC GDPS (GEM 0.135\u02da L84)"}
+          "aigfs": "NCEP AIGFS (0.25\u00b0)", "cmc": "CMC GDPS (GEM 0.135\u02da L84)",
+          "ecmwf": "ECMWF IFS (0.25\u00b0)"}
 MAX_IMAGE_BYTES = 14_000_000_000
 PIPELINE_VERSION = 3
-KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
+KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
 
 
 def render_version(cycle):
@@ -22,7 +24,17 @@ def hours(model):
     step = 6 if model in {"aifs", "aigfs"} else 3
     if model not in RETENTION:
         raise ValueError("Unknown model")
-    return tuple(range(0, 85, step)) + (90, 96) + tuple(range(108, 241, 12))
+    maximum = 144 if model == "ecmwf" else 240
+    return tuple(range(0, 85, step)) + (90, 96) + tuple(range(108, maximum + 1, 12))
+
+
+def supports_cycle(model, cycle):
+    hour = parse_cycle(cycle).hour
+    return hour in ((6, 18) if model == "ecmwf" else range(0, 24, CYCLE_STEP[model]))
+
+
+def start_cycle(model, configured=None):
+    return max(configured or "", MODEL_START_CYCLE.get(model, ""))
 
 
 def cycle_candidates(model, now=None, depth=2):
@@ -31,7 +43,9 @@ def cycle_candidates(model, now=None, depth=2):
         raise ValueError("Timezone-aware time required")
     now = now.astimezone(timezone.utc)
     step = CYCLE_STEP[model]
-    latest = now.replace(hour=now.hour // step * step, minute=0, second=0, microsecond=0)
+    offset = 6 if model == "ecmwf" else 0
+    latest = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(
+        hours=(now.hour - offset) // step * step + offset)
     return [(latest - timedelta(hours=step * n)).strftime("%Y%m%d%H") for n in range(depth)]
 
 
@@ -50,7 +64,7 @@ def key(model, cycle, hour, product, domain):
         raise ValueError("Invalid chart identity")
     if product not in set(products(cycle)) | {"surfce", "acptot", "acptot1", "acrain", "acrain1"}:
         raise ValueError("Product is outside the active nine-product catalog")
-    if parse_cycle(cycle).hour % CYCLE_STEP[model]:
+    if not supports_cycle(model, cycle):
         raise ValueError("Invalid model cycle")
     return value
 

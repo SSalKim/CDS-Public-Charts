@@ -15,7 +15,7 @@ on:
         default: auto
       model:
         type: choice
-        options: [all, aifs, gfs, aigfs, cmc]
+        options: [all, aifs, gfs, aigfs, cmc, ecmwf]
         default: all
       cycle:
         description: Optional UTC YYYYMMDDHH; blank checks recent cycles

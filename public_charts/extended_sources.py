@@ -160,7 +160,7 @@ def surface_moisture_fields(extra,base,hour):
         q=values("specific_humidity_2m")
         pressure=values("surface_pressure")
         dew=mpcalc.dewpoint_from_specific_humidity(pressure*units.Pa,np.maximum(q,1e-9)*units("kg/kg")).to("K").m
-    elif extra.model=="aifs":
+    elif extra.model in {"aifs","ecmwf"}:
         dew=values("dewpoint_2m")
     else:
         rh=values("relative_humidity_2m")
@@ -205,7 +205,7 @@ def near_surface_fields(extra,end):
         q=regional(extra.get(end,"specific_humidity_2m",sflux=True)).values
         pressure=regional(extra.get(end,"surface_pressure",sflux=True)).values
         rh=np.clip(mpcalc.relative_humidity_from_specific_humidity(pressure*units.Pa,t*units.K,q*units("kg/kg")).to("percent").m,0,100)
-    elif extra.model=="aifs":
+    elif extra.model in {"aifs","ecmwf"}:
         dew=regional(extra.get(end,"dewpoint_2m")).values
         rh=np.clip(mpcalc.relative_humidity_from_dewpoint(t*units.K,dew*units.K).to("percent").m,0,100)
         pressure=regional(extra.get(end,"surface_pressure")).values

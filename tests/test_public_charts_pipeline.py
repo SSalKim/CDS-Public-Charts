@@ -30,10 +30,10 @@ class PolicyTests(unittest.TestCase):
         for model in policy.RETENTION:
             timeline = policy.hours(model)
             self.assertEqual(timeline[0], 0)
-            self.assertEqual(timeline[-1], 240)
-            self.assertEqual(len(timeline), 29 if model in {"aifs", "aigfs"} else 43)
+            self.assertEqual(timeline[-1], 144 if model == "ecmwf" else 240)
+            self.assertEqual(len(timeline), 35 if model == "ecmwf" else 29 if model in {"aifs", "aigfs"} else 43)
             self.assertTrue({84, 90, 96, 108, 120} <= set(timeline))
-            keys = policy.expected_keys(model, "2026111500", 0)
+            keys = policy.expected_keys(model, "2026111606" if model == "ecmwf" else "2026111500", 0)
             self.assertTrue(any("/surfce/" in key for key in keys))
             self.assertFalse(any("/acrain" in key for key in keys))
 
@@ -55,6 +55,19 @@ class PolicyTests(unittest.TestCase):
         now = datetime(2026, 11, 16, 8, 20, tzinfo=timezone.utc)
         self.assertEqual(policy.cycle_candidates("aifs", now), ["2026111606", "2026111600"])
         self.assertEqual(policy.cycle_candidates("cmc", now), ["2026111600", "2026111512"])
+        self.assertEqual(policy.cycle_candidates("ecmwf", now), ["2026111606", "2026111518"])
+        self.assertEqual(policy.cycle_candidates("ecmwf", now.replace(hour=2)), ["2026111518", "2026111506"])
+
+    def test_ecmwf_only_off_cycles_and_no_backfill_before_launch(self):
+        now = datetime(2026, 11, 16, 19, tzinfo=timezone.utc)
+        planned = resolve_plan(["ecmwf"], now=now, start_cycle="2026111512")
+        self.assertEqual({item["cycle"] for item in planned}, {"2026111606", "2026111618"})
+        self.assertEqual({item["hour"] for item in planned}, set(policy.hours("ecmwf")))
+        self.assertEqual(resolve_plan(["ecmwf","gfs"],"2026111612",[0]),
+                         [{"model":"gfs","cycle":"2026111612","hour":0}])
+        for cycle, hour in (("2026111600",0),("2026111612",0),("2026111606",156)):
+            with self.assertRaises(ValueError):
+                policy.expected_keys("ecmwf", cycle, hour)
 
     def test_automatic_plan_starts_at_the_configured_cycle_and_recovers_missed_cycles(self):
         now = datetime(2026, 11, 16, 1, tzinfo=timezone.utc)
@@ -106,7 +119,7 @@ class PolicyTests(unittest.TestCase):
         kept, delete = policy.retain(rows)
         for model, count in policy.RETENTION.items():
             self.assertEqual(sum(r["model"] == model for r in kept), count)
-        self.assertEqual(len(delete), 12)
+        self.assertEqual(len(delete), 3*len(policy.RETENTION))
 
     def test_aliases_share_bytes_and_do_not_delete_shared_id(self):
         rows = [row(product="surfce", file_id="same", size=100), row(product="acptot", file_id="same", size=100)]

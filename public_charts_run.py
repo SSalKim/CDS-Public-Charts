@@ -56,9 +56,10 @@ def resolve_plan(models, cycle=None, requested_hours=None, now=None, start_cycle
     for model in models:
         depth = policy.RETENTION[model] if start_cycle else 2
         cycles = [cycle] if cycle else policy.cycle_candidates(model, now, depth)
-        cycles = [selected for selected in cycles if not start_cycle or selected >= start_cycle]
+        floor = policy.start_cycle(model, start_cycle)
+        cycles = [selected for selected in cycles if selected >= floor]
         for selected in cycles:
-            if parse_cycle(selected).hour % policy.CYCLE_STEP[model] and len(models)>1:
+            if not policy.supports_cycle(model, selected) and len(models)>1:
                 continue
             for hour in requested_hours if requested_hours is not None else policy.hours(model):
                 policy.expected_keys(model, selected, hour)
@@ -191,7 +192,7 @@ def run(args, store=None):
         for model in args.models:
             previous=sorted({row["cycle"] for row in rows.values() if row["model"]==model},reverse=True)[:policy.RETENTION[model]]
             for cycle in previous:
-                if (model,cycle) not in planned and (not args.start_cycle or cycle >= args.start_cycle):
+                if (model,cycle) not in planned and cycle >= policy.start_cycle(model,args.start_cycle):
                     plan.extend({"model":model,"cycle":cycle,"hour":hour} for hour in policy.hours(model))
         order = {model: index for index, model in enumerate(args.models)}
         plan.sort(key=lambda target: (order[target["model"]], target["hour"], -int(target["cycle"])))
@@ -355,7 +356,7 @@ def run(args, store=None):
         planned = resolve_plan(args.models, args.cycle, args.hours, start_cycle=args.start_cycle)
         cycles = {(item["model"], item["cycle"]) for item in planned}
         for model, cycle in previous_cycles - cycles:
-            if not args.start_cycle or cycle >= args.start_cycle:
+            if cycle >= policy.start_cycle(model,args.start_cycle):
                 planned.extend({"model": model, "cycle": cycle, "hour": hour} for hour in policy.hours(model))
         order = {model: index for index, model in enumerate(args.models)}
         planned.sort(key=lambda target: (order[target["model"]], target["hour"], -int(target["cycle"])))

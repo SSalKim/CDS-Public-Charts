@@ -1,6 +1,6 @@
 # CDS Public Charts
 
-Dedicated production repository for AIFS, GFS, AIGFS and CMC GDPS charts.
+Dedicated production repository for AIFS, GFS, AIGFS, CMC GDPS and ECMWF IFS off-cycle charts.
 The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
 [SSalKim/CDS](https://github.com/SSalKim/CDS).
 
@@ -17,6 +17,13 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   remains nine cycles for AIFS/GFS/AIGFS and five for CMC; the byte cap can
   still evict older cycles early. Metadata and other account usage need
   separate space within the dedicated Drive account's quota.
+- ECMWF IFS production starts at `2026111606`, only at 06/18 UTC. Official 0.25-degree
+  GRIB data are used for both surface and pressure levels, with the same nine
+  seasonal products and five retained cycles. The lead schedule is 000-084 by 3h,
+  090/096, then 108-144 by 12h; precipitation uses each displayed interval.
+  CDS keeps one ECMWF button: 00/12 UTC still uses the existing KMA image archive,
+  while 06/18 UTC resolves only the generated Drive manifest. No Open-Meteo or
+  0.1-degree data are mixed into these products.
 - Production is serialized in one concurrency group. Never enable the old CDS
   producer and this producer together: both use the same Drive state.
 - Inside that one job, isolated renderer processes work on different models.

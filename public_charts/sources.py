@@ -31,6 +31,8 @@ MODELS = {
               "attribution":"Data Sourced from NOAA NCEP","thermal_merge_version":3},
     "cmc": {"name": "CMC GDPS (GEM 0.135\u02da L84)", "grid": .15, "interval": 3, "rain": 3,
             "attribution":"Data Sourced from ECCC MSC"},
+    "ecmwf": {"name": "ECMWF IFS (0.25\u00b0)", "grid": .25, "interval": 3, "rain": 3,
+              "max_hour": 144, "attribution": "Data Sourced from ECMWF (CC BY 4.0)"},
 }
 FAMILIES = {"z": "geopotential", "gh": "geopotential", "HGT": "geopotential",
             "t": "temperature", "TMP": "temperature", "u": "wind_u", "UGRD": "wind_u",
@@ -44,7 +46,7 @@ class NotReady(RuntimeError):
 
 def forecast_hours(model):
     interval = MODELS[model]["interval"]
-    return tuple(range(0, 85, interval)) + (90, 96) + tuple(range(108, 241, 12))
+    return tuple(range(0, 85, interval)) + (90, 96) + tuple(range(108, MODELS[model].get("max_hour",240)+1, 12))
 
 
 def accumulation_hours(model,hour):
@@ -300,7 +302,7 @@ def decode(message, cycle, hour, key):
             if unit == "unknown" and (meta["discipline"], meta["parameterCategory"], meta["parameterNumber"]) == (0, 1, 8):
                 unit = "kg m**-2"
                 meta["units_resolved_from_wmo_4_2"] = unit
-            if unit == "m":
+            if unit == "m" or key == "snowfall_water_equivalent" and unit == "m of water equivalent":
                 values *= 1000
             elif unit not in ("kg m**-2", "mm", "kg m-2"):
                 raise ValueError(f"Unknown precipitation unit: {unit}")
@@ -310,7 +312,7 @@ def decode(message, cycle, hour, key):
             error = float(meta.get("packingError") or 0)
             if not np.isfinite(error) or error < 0:
                 raise ValueError("Invalid precipitation packing error")
-            meta["packing_error"] = error * (1000 if unit == "m" else 1)
+            meta["packing_error"] = error * (1000 if unit in {"m", "m of water equivalent"} else 1)
         if meta["numberOfMissing"] or not np.isfinite(values).all() or np.any(np.abs(values) >= 1e15):
             raise ValueError(f"Missing or invalid data in {key}")
         return Decoded(values, lat[yi], lon[xi], meta)
@@ -323,8 +325,8 @@ class Provider:
         self.model, self.client = model, client
 
     def fetch(self, cycle, hour, wanted):
-        if self.model == "aifs":
-            return self.aifs(cycle, hour, wanted)
+        if self.model in {"aifs", "ecmwf"}:
+            return self.ecmwf(cycle, hour, wanted)
         if self.model in ("gfs", "aigfs"):
             return self.noaa(cycle, hour, wanted)
         return self.canada(cycle, hour, wanted)
@@ -337,19 +339,26 @@ class Provider:
                 return retrieve(url)
             except (NotReady, requests.RequestException, ValueError, ec.CodesInternalError) as error:
                 failures.append(error)
+        transient = lambda error: isinstance(error, (requests.ConnectionError, requests.Timeout)) or (
+            isinstance(error, requests.HTTPError) and error.response is not None and
+            error.response.status_code in {429, 500, 502, 503, 504})
+        if any(isinstance(error, NotReady) for error in failures) and all(
+                isinstance(error, NotReady) or transient(error) for error in failures):
+            raise NotReady("Source mirrors are not ready; transient mirror errors will also be retried") from failures[-1]
         # A real data/permission failure must not turn into an ordinary pending run.
         raise next((error for error in failures if not isinstance(error, NotReady)), failures[-1])
 
     def _inventory(self, url):
         return self.client.get(url, cache=False, attempts=1, timeout=(5, 15))
 
-    def aifs(self, cycle, hour, wanted):
-        relative = (f"{cycle[:8]}/{cycle[8:]}z/aifs-single/0p25/oper/"
+    def ecmwf(self, cycle, hour, wanted):
+        family = "ifs" if self.model == "ecmwf" else "aifs-single"
+        relative = (f"{cycle[:8]}/{cycle[8:]}z/{family}/0p25/oper/"
                     f"{cycle}0000-{hour}h-oper-fc.grib2")
         return self._mirrors([f"{base}/{relative}" for base in ECMWF_BASES],
-                             lambda url: self._aifs_file(url, cycle, hour, wanted))
+                             lambda url: self._ecmwf_file(url, cycle, hour, wanted))
 
-    def _aifs_file(self, url, cycle, hour, wanted):
+    def _ecmwf_file(self, url, cycle, hour, wanted):
         entries = [json.loads(line) for line in self._inventory(url.replace(".grib2", ".index")).decode().splitlines() if line.strip()]
         selected = {}
         for item in entries:
@@ -364,15 +373,15 @@ class Provider:
             if key not in wanted:
                 continue
             if "_offset" not in item or "_length" not in item:
-                raise NotReady("AIFS index is incomplete")
+                raise NotReady("ECMWF index is incomplete")
             selected[key] = item
         if wanted - selected.keys():
-            raise NotReady(f"AIFS inventory lacks {sorted(wanted-selected.keys())}")
+            raise NotReady(f"ECMWF inventory lacks {sorted(wanted-selected.keys())}")
         result = {}
         for key, item in selected.items():
             offset, length = int(item["_offset"]), int(item["_length"])
             if offset < 0 or length <= 0:
-                raise NotReady("AIFS index has an incomplete byte range")
+                raise NotReady("ECMWF index has an incomplete byte range")
             result[key] = decode(self.client.get(url, (offset, offset+length-1)), cycle, hour, key)
         return result
 

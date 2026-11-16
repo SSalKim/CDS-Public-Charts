@@ -122,6 +122,15 @@ class MirrorTests(unittest.TestCase):
         self.assertTrue(all("ecmwf-forecasts.s3.eu-central-1.amazonaws.com" in call.args[0] for call in client.get.call_args_list))
         self.assertEqual(client.get.call_args_list[0].kwargs,{"cache":False,"attempts":1,"timeout":(5,15)})
 
+    def test_ifs_uses_same_indexed_reader_but_ifs_model_and_only_025_grid(self):
+        client=Mock()
+        client.get.side_effect=lambda url,*args,**kwargs:self.aifs_index() if url.endswith(".index") else b"GRIB"
+        with patch("public_charts.sources.decode",return_value="decoded"):
+            result=Provider("ecmwf",client).fetch("2026111606",24,{"pressure_msl"})
+        self.assertEqual(result,{"pressure_msl":"decoded"})
+        self.assertTrue(all("/20261116/06z/ifs/0p25/oper/" in call.args[0] for call in client.get.call_args_list))
+        self.assertTrue(client.get.call_args.args[0].endswith("20261116060000-24h-oper-fc.grib2"))
+
     def test_aifs_incomplete_primary_index_uses_complete_google_copy(self):
         client=Mock()
         def get(url,*args,**kwargs):
@@ -158,6 +167,16 @@ class MirrorTests(unittest.TestCase):
         client.reset_mock();client.get.side_effect=[requests.HTTPError("403"),NotReady("Missing"),NotReady("Missing")]
         with self.assertRaises(requests.HTTPError):
             Provider("aifs",client).fetch("2026111600",24,{"pressure_msl"})
+
+    def test_throttled_mirror_with_other_missing_copies_is_pending_not_failure(self):
+        response=requests.Response();response.status_code=503
+        error=requests.HTTPError("SlowDown",response=response)
+        client=Mock();client.get.side_effect=[error,NotReady("Missing"),NotReady("Missing")]
+        with self.assertRaises(NotReady):
+            Provider("ecmwf",client).fetch("2026111606",0,{"pressure_msl"})
+        client.get.side_effect=error
+        with self.assertRaises(requests.HTTPError):
+            Provider("ecmwf",client).fetch("2026111606",0,{"pressure_msl"})
 
     def test_wrong_cycle_primary_does_not_contaminate_secondary_result(self):
         client=Mock()
@@ -264,6 +283,24 @@ class PackingTests(unittest.TestCase):
             ec.codes_release(handle)
         self.assertAlmostEqual(field.metadata["packing_error"], error*1000)
         self.assertAlmostEqual(float(field.values.max()), 3., places=5)
+
+    def test_ifs_native_snowfall_water_equivalent_normalizes_to_kg_per_m2(self):
+        handle=ec.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+        try:
+            for key,value in {"Ni":2,"Nj":2,"dataDate":20261116,"dataTime":600,
+                              "latitudeOfFirstGridPointInDegrees":31.,"latitudeOfLastGridPointInDegrees":30.,
+                              "longitudeOfFirstGridPointInDegrees":120.,"longitudeOfLastGridPointInDegrees":121.,
+                              "iDirectionIncrementInDegrees":1.,"jDirectionIncrementInDegrees":1.,
+                              "paramId":144,"stepType":"accum","startStep":0,"endStep":3}.items():
+                ec.codes_set(handle,key,value)
+            ec.codes_set_values(handle,np.array([0.,.001,.002,.003]))
+            error=ec.codes_get(handle,"packingError")
+            self.assertEqual(ec.codes_get(handle,"units"),"m of water equivalent")
+            field=decode(ec.codes_get_message(handle),"2026111606",3,"snowfall_water_equivalent")
+        finally:
+            ec.codes_release(handle)
+        self.assertAlmostEqual(field.metadata["packing_error"],error*1000)
+        self.assertAlmostEqual(float(field.values.max()),3.,places=5)
 
 
 if __name__ == "__main__":
