@@ -376,7 +376,8 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 limit = queue.cmc_parallel_limit if target["model"] == "cmc" else workers
                                 running = sum(kind == "render" and item["model"] == target["model"]
                                               for kind, item in pending.values())
-                                if len(pending) < workers and running < limit:
+                                if (scheduling and (can_schedule is None or can_schedule())
+                                        and len(pending) < workers and running < limit):
                                     submit_render(target, preparation)
                                 else:
                                     prepared.append((target, preparation))
@@ -391,7 +392,8 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 else:
                                     submit_render(target)
                             if not pending:
-                                if not prepared and (not refresh or not scheduling or time.monotonic() - last_progress >= idle_seconds):
+                                if not scheduling or (not prepared and
+                                        (not refresh or time.monotonic() - last_progress >= idle_seconds)):
                                     break
                                 stop.wait(.2)
                                 continue
