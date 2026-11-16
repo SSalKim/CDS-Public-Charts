@@ -340,10 +340,10 @@ class DriveClient:
             return bool(self.credentials and self.credentials.expired)
         return time.time() >= self.access_token_expires_at - 60.0
 
-    def request(self, method: str, url: str, **kwargs):
+    def request(self, method: str, url: str, *, timeout=120, **kwargs):
         if self.token_is_stale():
             self.refresh()
-        response = self.session.request(method, url, timeout=120, **kwargs)
+        response = self.session.request(method, url, timeout=timeout, **kwargs)
         if response.status_code >= 400:
             details = response.text[:500]
             if response.status_code == 403 and "Service Accounts do not have storage quota" in response.text:
