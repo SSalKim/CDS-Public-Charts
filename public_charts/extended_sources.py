@@ -31,9 +31,6 @@ class ExtraFields:
         with (self.checkpoints/".writer.lock").open("a+b") as handle:
             if os.name=="nt":
                 import msvcrt
-                handle.seek(0,os.SEEK_END)
-                if handle.tell()==0:
-                    handle.write(b"0");handle.flush()
                 while True:
                     try:
                         handle.seek(0)
@@ -43,6 +40,10 @@ class ExtraFields:
                         if error.errno not in (errno.EACCES,errno.EAGAIN,errno.EDEADLK):
                             raise
                         time.sleep(.05)
+                # Initialize only after locking; simultaneous first writers otherwise race.
+                handle.seek(0,os.SEEK_END)
+                if handle.tell()==0:
+                    handle.write(b"0");handle.flush()
             else:
                 import fcntl
                 fcntl.flock(handle,fcntl.LOCK_EX)
@@ -94,6 +95,26 @@ class ExtraFields:
         field=(self.provider.sflux_surface(self.cycle,hour,{key}) if sflux else self.provider.fetch(self.cycle,hour,{key}))[key]
         self.save(path,field)
         return field
+
+    def prefetch(self,hour,keys,*,sflux=False):
+        """Share one source inventory lookup for a group of same-hour fields."""
+        missing=set()
+        for key in keys:
+            path=self.root/f"{hour:03}"/(("sflux_" if sflux else "")+key+".npz")
+            try:
+                meta=json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+                valid=((meta.get("model"),meta.get("cycle"),meta.get("field",{}).get("endStep"))
+                       ==(self.model,self.cycle,hour) and meta.get("sha256")==hashlib.sha256(path.read_bytes()).hexdigest())
+            except (OSError,ValueError):
+                valid=False
+            if not valid:
+                missing.add(key)
+        if not missing:
+            return
+        fields=(self.provider.sflux_surface(self.cycle,hour,missing) if sflux
+                else self.provider.fetch(self.cycle,hour,missing))
+        for key in missing:
+            self.save(self.root/f"{hour:03}"/(("sflux_" if sflux else "")+key+".npz"),fields[key])
 
     def save(self,path,field):
         path=Path(path)
@@ -198,6 +219,9 @@ def current_snowfall(extra,base,hour,interval):
 
 
 def near_surface_fields(extra,end):
+    keys=("temperature_2m","specific_humidity_2m","surface_pressure") if extra.model=="gfs" else (
+        "temperature_2m","dewpoint_2m" if extra.model in {"aifs","ecmwf"} else "relative_humidity_2m","surface_pressure")
+    extra.prefetch(end,keys,sflux=extra.model=="gfs")
     surface=regional(extra.get(end,"temperature_2m",sflux=extra.model=="gfs"))
     lat,lon=surface.latitude,surface.longitude
     t=surface.values
@@ -217,6 +241,8 @@ def near_surface_fields(extra,end):
 
 
 def snow_step(extra,end,cadence):
+    extra.prefetch(end,("temperature_850","categorical_snow") if extra.model=="gfs" else
+                   ("temperature_850","snowfall_water_equivalent"))
     surface=near_surface_fields(extra,end)
     lat,lon=surface["latitude"],surface["longitude"]
     t,rh,pressure=surface["temperature_2m"],surface["relative_humidity_2m"],surface["surface_pressure"]

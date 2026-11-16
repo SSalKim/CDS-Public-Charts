@@ -26,17 +26,24 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   0.1-degree data are mixed into these products.
 - Production is serialized in one concurrency group. Never enable the old CDS
   producer and this producer together: both use the same Drive state.
-- Inside that one job, isolated renderer processes work on different models.
-  CMC can fill spare slots with different forecast leads: two concurrent CMC leads
+- Inside that one job, isolated workers share download preparation and rendering.
+  Any model can borrow idle slots for different forecast leads; models rotate fairly
+  and each model's newest cycle is prioritized before historical backfill.
+  CMC keeps its memory-dependent rendering cap: two concurrent CMC leads
   on the laptop with about 6.4 GiB available, three at 8 GiB, or four at 12 GiB.
   Each lead has
   separate raw scratch files. Shared cumulative rain/snow checkpoints are protected
   by a per-cycle process lock; only prefix calculation is serialized, not rendering.
   Only the coordinator uploads to Drive, updates manifests, publishes Git commits,
-  and plans cleanup. Each completed lead is published immediately after upload
-  verification; it does not wait for the rest of the batch.
+  and plans cleanup. Completed images stream to the coordinator before the whole
+  lead finishes. One shared queue fills three independent upload slots across leads.
+  Verified URLs are coalesced into publications every 15 seconds (plus the final
+  flush); the first image is published immediately. Aliases wait for their source
+  image's verification, and staged files remain until all uploads drain.
 - Rendering defaults to `auto`: up to four processes, limited by effective CPU
-  and available memory (including WSL/container limits). Set
+  and available memory (including WSL/container limits). Windows host headroom is
+  also sampled: new scheduling stops below 1 GiB free on Windows or 512 MiB in Linux.
+  Already running work is drained, not killed. Set
   `PUBLIC_CHARTS_WORKERS=1` to restore sequential rendering.
   Total renderer caps are four at 8 GiB available, three at 6 GiB, two below that,
   and one below 3 GiB. Explicit worker requests cannot bypass these limits.
@@ -50,12 +57,19 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   verification remain mandatory. Larger images retain resumable uploads.
 - Automatic dispatches keep processing for a 20-minute dispatch budget instead
   of stopping after two leads per model. `PUBLIC_CHARTS_TIME_BUDGET_MINUTES`
-  changes that budget (maximum 30). Plans refresh every two minutes so a newly
-  available cycle can enter the queue. A fully idle queue exits early, and
+  changes that budget (maximum 30). Plans refresh every 60 seconds so a newly
+  available cycle can enter the queue. A continuous run waits for inputs until its
+  budget, and
   in-flight work is drained and published after the dispatch deadline.
-- A missing +000h, or two missing nonzero leads, pauses that model/cycle for ten
-  minutes. Two-minute plan refreshes preserve the pause, leaving workers free for
-  ready cycles and CMC backlog rather than repeatedly checking unavailable data.
+- A missing +000h, or two missing nonzero leads, pauses that model/cycle for two
+  minutes during lookahead. An unseen cycle gets one readiness probe at a time,
+  so absent data cannot occupy all four workers. Late rain postpones only that
+  lead's surface products, not subsequent upper-air leads.
+- Disk-backed lookahead prepares upcoming leads while ready leads render within
+  the same four-process budget. Each renderer fetches rain/winter inputs on one
+  background thread while drawing upper-air charts. Same-hour surface variables
+  share inventory lookups. Checkpoint format, native grids, winter equations and
+  lossless WebP encoding remain unchanged.
 - Raw-source failover validates the same cycle, lead and fields on each mirror.
   AIFS uses AWS, Google Cloud, then ECMWF; GFS (including native sflux) uses AWS
   then NOMADS; AIGFS uses NOMADS then AWS. CMC uses dated Datamart paths followed
@@ -159,3 +173,25 @@ py -3.12 -m venv .venv
 
 See [setup and retention details](docs/public-charts-setup.md).
 `vtg_drive_archive.py` is the shared Drive client snapshot, not a VTG workflow.
+
+## Latency Target And Measurements
+
+The target is publication within 15 minutes of the necessary inputs becoming
+available, with 3-5 minutes preferred. This is not a proven SLA. Cloudflare still
+starts jobs every ten minutes; source outages, cold cumulative prefixes, startup
+and bursts larger than capacity can add latency. CDS needs its next manifest check
+(20 seconds while viewing external models). There is no independent monitor of
+true first availability across all source mirrors.
+
+`prefetch_started`, `prefetch_ready`, `inputs_ready`, `render_finished` and
+`image_published` separate discovery, preparation, plotting/encoding and publication.
+`ready_to_publish_seconds` starts at our successful input observation;
+`source_last_modified_age_seconds` is only a selected-source timestamp proxy, not
+proof of first availability. `observed_ready_over_15m` flags observed-ready delays
+over 900 seconds. Check source history separately before claiming the target was
+met. Runtime summaries include peak process-tree RSS and minimum free memory on
+Linux and Windows.
+
+`--refresh-seconds` defaults to 60 and `--publish-interval-seconds` to 15. Cloudflare
+configuration is unchanged. `Test public chart pipeline` runs offline regressions
+on Linux when code changes; it has no Drive secrets and changes no operational data.

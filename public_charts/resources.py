@@ -1,7 +1,32 @@
 """Conservative worker sizing, laptop VTG priority, and read-only Linux metrics."""
 import os
 from pathlib import Path
-from threading import Event, Thread
+import subprocess
+from threading import Event, Thread, Lock
+import time
+
+_windows_memory_lock = Lock()
+_windows_memory = {"at": float("-inf"), "value": None}
+
+
+def windows_available_memory():
+    """A WSL VM's free allowance is not necessarily free physical RAM on its host."""
+    powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+    if not powershell.exists():
+        return None
+    with _windows_memory_lock:
+        now = time.monotonic()
+        if now - _windows_memory["at"] >= 10:
+            try:
+                value = subprocess.check_output(
+                    [str(powershell), "-NoProfile", "-NonInteractive", "-Command",
+                     "[Console]::Write([string]([long](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1024))"],
+                    text=True, timeout=5).strip()
+                _windows_memory["value"] = int(value)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                _windows_memory["value"] = None
+            _windows_memory["at"] = now
+        return _windows_memory["value"]
 
 
 def available_memory():
@@ -98,11 +123,15 @@ class ResourceSampler:
         self.thread = None
         self.peak_rss = 0
         self.lowest_free = available_memory()
+        self.lowest_windows_free = windows_available_memory()
 
     def sample(self):
         free = available_memory()
         if free is not None:
             self.lowest_free = free if self.lowest_free is None else min(self.lowest_free, free)
+        host = windows_available_memory()
+        if host is not None:
+            self.lowest_windows_free = host if self.lowest_windows_free is None else min(self.lowest_windows_free, host)
         processes = {}
         try:
             for directory in Path("/proc").iterdir():
@@ -135,4 +164,6 @@ class ResourceSampler:
         if self.thread:
             self.thread.join()
         return {"peak_process_tree_rss_mib": round(self.peak_rss/1024**2, 1),
-                "lowest_available_memory_mib": round(self.lowest_free/1024**2, 1) if self.lowest_free is not None else None}
+                "lowest_available_memory_mib": round(self.lowest_free/1024**2, 1) if self.lowest_free is not None else None,
+                "lowest_windows_available_memory_mib": round(self.lowest_windows_free/1024**2, 1)
+                                                       if self.lowest_windows_free is not None else None}

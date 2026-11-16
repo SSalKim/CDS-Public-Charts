@@ -14,10 +14,11 @@ import time
 
 from public_charts import policy
 from public_charts.dates import parse_cycle
-from public_charts.parallel import LeadQueue, child_path, cleanup_raw, execute_leads, model_workspace
+from public_charts.parallel import LeadQueue, child_path, cleanup_raw, cleanup_staging, execute_leads, model_workspace
 from public_charts_publish import publish_manifest
-from public_charts.uploads import UploadPool, UploadBudgetExceeded
-from public_charts.resources import LaptopLease, ResourceSampler, available_memory, cpu_capacity, worker_count, cmc_worker_count
+from public_charts.uploads import UploadPool, UploadBudgetExceeded, StreamingUploads
+from public_charts.resources import (LaptopLease, ResourceSampler, available_memory, windows_available_memory,
+                                     cpu_capacity, worker_count, cmc_worker_count)
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "data/public_charts_manifest.json"
@@ -66,7 +67,7 @@ def resolve_plan(models, cycle=None, requested_hours=None, now=None, start_cycle
                 result.append({"model": model, "cycle": selected, "hour": hour})
     if not cycle:
         order = {model: index for index, model in enumerate(models)}
-        result.sort(key=lambda target: (order[target["model"]], target["hour"], -int(target["cycle"])))
+        result.sort(key=lambda target: (order[target["model"]], -int(target["cycle"]), target["hour"]))
     return result
 
 
@@ -195,7 +196,7 @@ def run(args, store=None):
                 if (model,cycle) not in planned and cycle >= policy.start_cycle(model,args.start_cycle):
                     plan.extend({"model":model,"cycle":cycle,"hour":hour} for hour in policy.hours(model))
         order = {model: index for index, model in enumerate(args.models)}
-        plan.sort(key=lambda target: (order[target["model"]], target["hour"], -int(target["cycle"])))
+        plan.sort(key=lambda target: (order[target["model"]], -int(target["cycle"]), target["hour"]))
     image_bytes = policy.unique_bytes(rows.values())
     if not local:
         image_bytes = sum(int(item.get("size", 0)) for item in inventory
@@ -213,6 +214,11 @@ def run(args, store=None):
     before_ids = {item["id"] for item in inventory} | {row["file_id"] for row in rows.values()}
     upload_workers = getattr(args, "upload_workers", 1)
     uploader = UploadPool(store, upload_workers) if not local else None
+    pending_bytes = 0
+    publication_dirty = False
+    publication_metrics, pending_aliases, uploading_keys = {}, [], set()
+    last_publication = 0.
+    publication_interval = getattr(args, "publish_interval_seconds", 15)
 
     def save_state():
         if local:
@@ -224,6 +230,9 @@ def run(args, store=None):
                              "pending_delete_after": state.get("pending_delete_after", {})})
 
     def snapshot():
+        nonlocal last_publication, publication_dirty
+        if publication_dirty:
+            save_state()
         kept, delete_ids = plan_cleanup(list(rows.values()), inventory, args.max_bytes, reserve_bytes)
         manifest = policy.public_manifest(kept)
         previous = read_json(args.manifest, {})
@@ -235,42 +244,84 @@ def run(args, store=None):
                    "manifest_sha256": hashlib.sha256(manifest_bytes(manifest)).hexdigest(), "delete_ids": delete_ids})
         if args.publish_incremental:
             publish_manifest(ROOT)
+        last_publication = time.monotonic()
+        publication_dirty = False
+        now = datetime.now(timezone.utc)
+        retained_keys = {policy.row_key(row) for row in kept}
+        for entry_key, item in list(publication_metrics.items()):
+            if entry_key not in retained_keys:
+                continue
+            event = {"event": "image_published", **item["target"], "product": item["product"],
+                     "domain": item["domain"], "published_at": now.isoformat(),
+                     "upload_seconds": item.get("upload_seconds", 0)}
+            for source, label in (("observed_at", "ready_to_publish_seconds"),
+                                  ("created_at", "encoded_to_publish_seconds"),
+                                  ("source_last_modified_at", "source_last_modified_age_seconds")):
+                if item.get(source):
+                    event[label] = round(max(0, (now - datetime.fromisoformat(item[source])).total_seconds()), 3)
+            event["observed_ready_over_15m"] = event.get("ready_to_publish_seconds", 0) > 900
+            print(json.dumps(event), flush=True)
+        publication_metrics.clear()
         return kept, delete_ids
 
     class BudgetReached(Exception):
         pass
 
+    def record(item, info):
+        nonlocal image_bytes, publication_dirty
+        model, cycle, hour = (item["target"][key] for key in ("model", "cycle", "hour"))
+        if not local:
+            if f"{model}/{cycle}" not in verified_cycles:
+                verify_public_url(info["url"])
+                verified_cycles.add(f"{model}/{cycle}")
+            if info["file_id"] not in before_ids:
+                image_bytes += int(info["size"])
+                before_ids.add(info["file_id"])
+        rows[item["key"]] = {"model": model, "cycle": cycle, "hour": hour,
+                             "product": item["product"], "domain": item["domain"],
+                             "render_version": policy.render_version(cycle),
+                             **{key: info[key] for key in ("file_id", "url", "size", "sha256")}}
+        fresh.add(item["key"])
+        uploading_keys.discard(item["key"])
+        publication_metrics[item["key"]] = item
+        publication_dirty = True
+
+    def reserve(item):
+        nonlocal pending_bytes
+        if image_bytes + pending_bytes + item["size"] > args.max_bytes:
+            raise UploadBudgetExceeded(item["size"])
+        pending_bytes += item["size"]
+
+    def release(item):
+        nonlocal pending_bytes
+        pending_bytes -= item["size"]
+
+    stream = StreamingUploads(uploader, reserve, release, record) if uploader else None
+
+    def resolve_aliases():
+        for item in list(pending_aliases):
+            target = item["target"]
+            source = policy.key(target["model"], target["cycle"], target["hour"], *item["alias_of"])
+            if source in rows and source not in uploading_keys:
+                record(item, rows[source])
+                pending_aliases.remove(item)
+
+    def tick(*, block=False):
+        nonlocal reserve_bytes, budget_blocked
+        if stream:
+            try:
+                stream.poll(block=block)
+            except UploadBudgetExceeded as exception:
+                budget_blocked = True
+                reserve_bytes = max(reserve_bytes, exception.size)
+                errors.append({"status": "budget", "error": str(exception)})
+                raise BudgetReached from None
+        resolve_aliases()
+        if not local and publication_dirty and time.monotonic() - last_publication >= publication_interval:
+            snapshot()
+
     def consume(target, staged):
-        nonlocal image_bytes, reserve_bytes, budget_blocked
         model, cycle, hour = target["model"], target["cycle"], target["hour"]
-        uploading = time.monotonic()
-        pending_bytes = 0
-
-        def record(item, info):
-            nonlocal image_bytes
-            if not local:
-                if f"{model}/{cycle}" not in verified_cycles:
-                    verify_public_url(info["url"])
-                    verified_cycles.add(f"{model}/{cycle}")
-                if info["file_id"] not in before_ids:
-                    image_bytes += int(info["size"])
-                    before_ids.add(info["file_id"])
-            rows[item["key"]] = {"model": model, "cycle": cycle, "hour": hour,
-                                 "product": item["product"], "domain": item["domain"],
-                                 "render_version": policy.render_version(cycle),
-                                 **{key: info[key] for key in ("file_id", "url", "size", "sha256")}}
-            fresh.add(item["key"])
-
-        def reserve(item):
-            nonlocal pending_bytes
-            size = item["size"]
-            if image_bytes + pending_bytes + size > args.max_bytes:
-                raise UploadBudgetExceeded(size)
-            pending_bytes += size
-
-        def release(item):
-            nonlocal pending_bytes
-            pending_bytes -= item["size"]
 
         try:
             images, aliases, seen = [], [], set()
@@ -280,7 +331,7 @@ def run(args, store=None):
                 if entry_key not in policy.expected_keys(model, cycle, hour) or entry_key in seen:
                     raise ValueError("Unexpected renderer output")
                 seen.add(entry_key)
-                item = {**artifact, "key": entry_key}
+                item = {**artifact, "key": entry_key, "target": target}
                 if artifact["alias_of"]:
                     aliases.append(item)
                 else:
@@ -298,21 +349,17 @@ def run(args, store=None):
                     record(item, {"file_id": item["key"], "url": destination.relative_to(output).as_posix(),
                                   "size": item["size"], "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
             else:
-                uploader.run(images, reserve, release, record)
-            for item in aliases:
-                source = rows[policy.key(model, cycle, hour, *item["alias_of"])]
-                record(item, source)
-        except OverflowError as exception:
-            budget_blocked = True
-            reserve_bytes = max(reserve_bytes, getattr(exception, "size", 0))
-            errors.append({**target, "status": "budget", "error": str(exception)})
-            raise BudgetReached from None
-        finally:
+                uploading_keys.update(item["key"] for item in images)
+                stream.enqueue(images)
+            pending_aliases.extend(aliases)
+            tick()
+            while stream and len(stream.waiting) + len(stream.pending) > args.workers * 24:
+                tick(block=True)
+        except BaseException:
             save_state()
-        upload_seconds = time.monotonic() - uploading
-        publishing = time.monotonic()
-        if not local and staged["artifacts"]:
-            snapshot()
+            raise
+        if staged.get("partial"):
+            return
         error = staged["error"]
         if error:
             errors.append({**target, "status": "pending" if error["pending"] else "error", "error": error["type"],
@@ -322,8 +369,8 @@ def run(args, store=None):
                 raise RuntimeError("Renderer failed: " + error["type"])
         else:
             print(json.dumps({**target, **staged["result"], "render_seconds": staged["render_seconds"],
-                              "upload_seconds": round(upload_seconds, 3),
-                              "publish_seconds": round(time.monotonic() - publishing, 3),
+                              "event": "render_finished", "prefetch_seconds": staged.get("prefetch_seconds", 0),
+                              "publication_pending": bool(uploading_keys or publication_dirty),
                               "upload_workers": upload_workers,
                               "renderer_pid": staged["pid"]}), flush=True)
 
@@ -350,6 +397,10 @@ def run(args, store=None):
         if free_memory is not None and free_memory < 512*1024**2:
             stop_reason = "memory_headroom"
             return False
+        host_memory = windows_available_memory()
+        if host_memory is not None and host_memory < 1024**3:
+            stop_reason = "windows_memory_headroom"
+            return False
         return True
 
     def refresh_plan():
@@ -359,29 +410,50 @@ def run(args, store=None):
             if cycle >= policy.start_cycle(model,args.start_cycle):
                 planned.extend({"model": model, "cycle": cycle, "hour": hour} for hour in policy.hours(model))
         order = {model: index for index, model in enumerate(args.models)}
-        planned.sort(key=lambda target: (order[target["model"]], target["hour"], -int(target["cycle"])))
+        planned.sort(key=lambda target: (order[target["model"]], -int(target["cycle"]), target["hour"]))
         print(json.dumps({"event": "plan_refreshed", "candidates": len(planned)}), flush=True)
         return planned
 
     print(json.dumps({"event": "runtime_profile", "workers": args.workers, "upload_workers": upload_workers,
                       "cmc_workers": cmc_worker_count(args.workers),
                       "cpu_capacity": cpu_capacity(), "available_memory_mib": round(available_memory()/1024**2, 1) if available_memory() is not None else None,
-                      "time_budget_minutes": minutes, "laptop_guard": lease.root is not None}), flush=True)
+                      "windows_available_memory_mib": round(windows_available_memory()/1024**2,1) if windows_available_memory() is not None else None,
+                      "time_budget_minutes": minutes, "laptop_guard": lease.root is not None,
+                      "same_model_parallelism": True, "source_refresh_seconds": getattr(args,"refresh_seconds",60),
+                      "publication_interval_seconds": publication_interval, "streaming_images": not local}), flush=True)
     sampler.start()
+    failure = None
     try:
         execute_leads(queue, work, args.workers, consume, force=args.force,
                       raw_override=args.cache_root, started=started, can_schedule=can_schedule,
-                      refresh=refresh_plan if minutes else None)
+                      refresh=refresh_plan if minutes else None,
+                      refresh_seconds=getattr(args, "refresh_seconds", 60),
+                      idle_seconds=max(120, minutes * 60), streaming=not local, prefetch=not local,
+                      progress=lambda event: print(json.dumps(event), flush=True), on_idle=tick,
+                      cleanup_staged=False)
     except BudgetReached:
         pass
+    except BaseException as exception:
+        failure = exception
     finally:
+        try:
+            while stream:
+                tick(block=True)
+        except BudgetReached:
+            pass
+        except BaseException as exception:
+            failure = failure or exception
         if uploader:
             uploader.close()
+        cleanup_staging(work, args.models)
+        resolve_aliases()
         lease.close()
         resource_usage = sampler.finish()
         save_state()
         if not local:
             kept, delete_ids = snapshot()
+    if failure is not None:
+        raise failure
     if local:
         manifest = policy.public_manifest(list(rows.values()))
         write_json(output / "manifest.json", manifest)
@@ -410,6 +482,9 @@ def main():
     parser.add_argument("--time-budget-minutes", type=float, default=0,
                         help="Continuously refresh ready work until the dispatch budget expires")
     parser.add_argument("--publish-incremental", action="store_true", help="Push each completed lead's verified manifest")
+    parser.add_argument("--publish-interval-seconds", type=float, default=15,
+                        help="Coalesce completed-image URL publication without waiting for an entire lead")
+    parser.add_argument("--refresh-seconds", type=float, default=60)
     parser.add_argument("--max-bytes", type=int, default=policy.MAX_IMAGE_BYTES)
     parser.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
     parser.add_argument("--workdir", type=Path, default=ROOT / "outputs/public-charts-work")
@@ -422,6 +497,8 @@ def main():
     parser.add_argument("--finalize-cleanup", action="store_true")
     args = parser.parse_args()
     args.workers = worker_count(args.workers, local=args.local)
+    if not 1 <= args.publish_interval_seconds <= 60 or not 5 <= args.refresh_seconds <= 120:
+        parser.error("Publication must use 1-60 seconds and source-plan refresh 5-120 seconds")
     if not 0 <= args.time_budget_minutes <= 30 or args.time_budget_minutes and (args.force or args.local):
         parser.error("Continuous production allows 0-30 minutes; force and local mode require a bounded batch")
     if args.cache_root and args.workers != 1 or args.local and args.publish_incremental:

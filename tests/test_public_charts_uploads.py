@@ -2,7 +2,7 @@ from threading import Barrier, Lock, get_ident
 import time
 import unittest
 
-from public_charts.uploads import UploadPool, UploadBudgetExceeded
+from public_charts.uploads import UploadPool, UploadBudgetExceeded, StreamingUploads
 
 
 class Worker:
@@ -36,6 +36,55 @@ class Store:
 
 
 class UploadTests(unittest.TestCase):
+    def test_streaming_uses_all_upload_slots_across_different_leads(self):
+        store, recorded, parent = Store(3), [], get_ident()
+        pool = UploadPool(store, 3)
+        self.addCleanup(pool.close)
+        def record(item, info):
+            self.assertEqual(get_ident(), parent)
+            self.assertGreater(item["upload_seconds"], 0)
+            recorded.append(info["key"])
+        stream = StreamingUploads(pool, lambda item: None, lambda item: None, record)
+        for i in range(3):
+            stream.enqueue([{"key": str(i), "path": str(i)}])
+            stream.poll()
+        stream.drain()
+        self.assertEqual(store.maximum, 3)
+        self.assertEqual(set(recorded), {"0", "1", "2"})
+
+    def test_streaming_failure_drains_verified_inflight_images(self):
+        store, recorded, released = Store(3, fail="1"), [], []
+        pool = UploadPool(store, 3)
+        self.addCleanup(pool.close)
+        stream = StreamingUploads(pool, lambda item: None, lambda item: released.append(item["key"]),
+                                  lambda item, info: recorded.append(info["key"]))
+        stream.enqueue([{"key": str(i), "path": str(i)} for i in range(3)])
+        with self.assertRaisesRegex(RuntimeError, "upload failed"):
+            stream.drain()
+        self.assertEqual(set(recorded), {"0", "2"})
+        self.assertEqual(set(released), {"0", "1", "2"})
+        self.assertEqual(store.active, 0)
+
+    def test_streaming_budget_does_not_discard_inflight_successes(self):
+        store, recorded = Store(2), []
+        pool = UploadPool(store, 3)
+        self.addCleanup(pool.close)
+        used = {"bytes": 0, "reserved": 0}
+        def reserve(item):
+            if used["bytes"] + used["reserved"] + 10 > 20:
+                raise UploadBudgetExceeded(10)
+            used["reserved"] += 10
+        def record(item, info):
+            used["bytes"] += 10
+            recorded.append(info["key"])
+        stream = StreamingUploads(pool, reserve,
+                                  lambda item: used.update(reserved=used["reserved"]-10), record)
+        stream.enqueue([{"key": str(i), "path": str(i)} for i in range(3)])
+        with self.assertRaises(UploadBudgetExceeded):
+            stream.drain()
+        self.assertEqual(used, {"bytes": 20, "reserved": 0})
+        self.assertEqual(len(recorded), 2)
+
     def test_three_independent_upload_threads_but_callbacks_stay_on_coordinator(self):
         store, parent, recorded = Store(3), get_ident(), []
         pool = UploadPool(store, 3)

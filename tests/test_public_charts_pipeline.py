@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -79,7 +80,8 @@ class PolicyTests(unittest.TestCase):
                          {"2026111512", "2026111518", "2026111600"})
         self.assertEqual({item["cycle"] for item in planned if item["model"] == "cmc"},
                          {"2026111512", "2026111600"})
-        self.assertEqual([item["hour"] for item in planned[:3]], [0, 0, 0])
+        self.assertEqual([(item["cycle"],item["hour"]) for item in planned[:3]],
+                         [("2026111600",0),("2026111600",24),("2026111518",0)])
 
     def test_explicit_cycle_cannot_bypass_the_start_floor(self):
         with self.assertRaises(ValueError):
@@ -177,6 +179,27 @@ class RunnerTests(unittest.TestCase):
 
 
 class ProductionTests(unittest.TestCase):
+    def test_rain_input_preparation_overlaps_upper_air_rendering(self):
+        downloading, drawing = threading.Event(), threading.Event()
+        emitted = []
+        def prepare(model, cycle, hour, root, base, *args):
+            downloading.set()
+            if not drawing.wait(5):
+                raise TimeoutError("Upper-air drawing waited for surface inputs")
+            base = {**base, "precipitation": np.zeros((2,2))}
+            return base, base, None
+        def picture(*args, **kwargs):
+            drawing.set()
+            self.assertTrue(downloading.wait(5))
+            return self.picture()
+        with patch.object(producer,"collect",return_value=(self.base,{},{})), \
+             patch.object(producer,"prepare_surface",side_effect=prepare), \
+             patch.object(producer,"render",side_effect=picture):
+            result=producer.produce_lead("aigfs","2026111606",0,self.root,set(),
+                                        lambda *args,**kwargs:emitted.append(args))
+        self.assertTrue(result["complete"])
+        self.assertEqual(len(emitted),18)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -268,6 +291,17 @@ class ProductionTests(unittest.TestCase):
             again = extra.total_rain(12)
             self.assertEqual(collect.call_count, 4)
             np.testing.assert_array_equal(second.values, again.values)
+
+    def test_surface_prefetch_batches_inventory_and_reuses_verified_fields(self):
+        extra = ExtraFields(self.root,"gfs","2026111606")
+        keys={"temperature_2m","specific_humidity_2m","surface_pressure"}
+        fields={key:Decoded(np.ones((2,2)),self.base["latitude"],self.base["longitude"],{"endStep":6}) for key in keys}
+        with patch.object(extra.provider,"sflux_surface",return_value=fields) as fetch:
+            extra.prefetch(6,keys,sflux=True)
+            extra.prefetch(6,keys,sflux=True)
+            for key in keys:
+                np.testing.assert_array_equal(extra.get(6,key,sflux=True).values,fields[key].values)
+        fetch.assert_called_once_with("2026111606",6,keys)
 
     def test_checksum_corruption_rejects_checkpoint(self):
         extra = ExtraFields(self.root, "gfs", "2026111500")

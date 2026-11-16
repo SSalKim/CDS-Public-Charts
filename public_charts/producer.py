@@ -1,5 +1,8 @@
 """Render one ready lead, publishing completed products without waiting for rain."""
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
+import time
 
 import numpy as np
 from PIL import Image
@@ -60,11 +63,45 @@ def encode(frame, path):
     temporary.replace(path)
 
 
-def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, checkpoint_root=None):
+def prepare_surface(model, cycle, hour, root, base, completed, force, checkpoint_root, progress):
+    """Fetch winter/rain inputs while the main renderer draws upper-air charts."""
+    started = time.monotonic()
+    interval = accumulation_hours(model, hour) or 0
+    metadata = {}
+    if hour:
+        base, metadata, _ = collect(model, cycle, hour, root)
+    else:
+        base = {**base, "precipitation": np.zeros_like(base["pressure_msl"], dtype=np.float64)}
+    extra = ExtraFields(root, model, cycle)
+    if checkpoint_root is not None:
+        extra.checkpoints = Path(checkpoint_root) / cycle / model
+    selected = crop(base, "hkor")
+    def done(product):
+        return not force and policy.key(model, cycle, hour, product, "hkor") in completed
+    needs_total = hour and not (done("acrain") and done("acrain1"))
+    winter_products = ("acptot", "acptot1", "acrain", "acrain1") if hour else ("acptot", "acptot1")
+    needs_winter = policy.winter(model, cycle) and not all(done(name) for name in winter_products)
+    total = None
+    if needs_total or needs_winter:
+        with extra.checkpoint_lock():
+            if needs_total:
+                total = extra.total_rain(hour)
+            if needs_winter:
+                selected, _ = winter_fields(extra, base, hour, interval)
+    if progress:
+        progress("surface", {"observed_at": datetime.now(timezone.utc).isoformat(),
+                             "seconds": round(time.monotonic() - started, 3),
+                             "sources": metadata.get("sources", []) + extra.client.records})
+    return base, selected, total
+
+
+def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, checkpoint_root=None,
+                 progress=None):
     """publish(product, domain, path, alias_of=None) commits one verified image."""
     root = Path(root)
     completed = set(existing)
     interval = accumulation_hours(model, hour) or 0
+    timings = {"plot_seconds": 0., "encode_seconds": 0.}
 
     def done(product, domain):
         return not force and policy.key(model, cycle, hour, product, domain) in completed
@@ -74,49 +111,60 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
             return
         path = root / "images" / model / f"{cycle}_{hour:03}_{product}_{domain}.webp"
         if frame is not None:
+            started = time.monotonic()
             encode(frame, path)
+            timings["encode_seconds"] += time.monotonic() - started
         publish(product, domain, path if frame is not None else None, alias_of=alias_of)
         completed.add(policy.key(model, cycle, hour, product, domain))
         if path.exists():
             path.unlink()
 
     def draw(arrays, product, domain, *, accumulation=None, pressure_only=False):
-        return render(arrays, cycle, hour, product, domain, None, accumulation,
+        started = time.monotonic()
+        frame = render(arrays, cycle, hour, product, domain, None, accumulation,
                       model_name=MODELS[model]["name"], precipitation_hours=interval,
                       precipitation_field="precipitation", source_note=MODELS[model]["attribution"],
                       pressure_only=pressure_only, upper_level_override=200 if product == "gph200" else None,
                       physical_barb_spacing=True, profile=PUBLIC_PROFILE, model_id=model,
                       contour_filter=closed_contour_predicate(arrays), diagnostic_snowfall=model == "gfs",
                       return_frame=True)
+        timings["plot_seconds"] += time.monotonic() - started
+        return frame
 
-    base, _, _ = collect(model, cycle, hour, root, include_precipitation=False)
-    for domain in ("asia", "hkor"):
-        selected = crop(base, domain)
+    started = time.monotonic()
+    base, metadata, _ = collect(model, cycle, hour, root, include_precipitation=False)
+    if progress:
+        progress("base", {"observed_at": datetime.now(timezone.utc).isoformat(),
+                          "seconds": round(time.monotonic() - started, 3),
+                          "sources": metadata.get("sources", [])})
+    surface_needed = any(key not in completed or force for key in policy.expected_keys(model, cycle, hour)
+                         if key.split("/")[-2] not in policy.products(cycle))
+    # Only immutable arrays are shared; all HTTP and checkpoint writes stay on one thread.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="chart-rain-prefetch") as downloads:
+        surface = (downloads.submit(prepare_surface, model, cycle, hour, root, base, set(completed),
+                                    force, checkpoint_root, progress) if surface_needed else None)
+        cropped = {domain: crop(base, domain) for domain in ("asia", "hkor")}
         for product in policy.products(cycle):
-            if not done(product, domain):
-                emit(product, domain, draw(selected, product, domain))
-    if hour == 0:
-        base = {**base, "precipitation": np.zeros_like(base["pressure_msl"], dtype=np.float64)}
+            for domain, selected in cropped.items():
+                if not done(product, domain):
+                    emit(product, domain, draw(selected, product, domain))
+        if surface is None:
+            return {"complete": True, **{key: round(value, 3) for key, value in timings.items()}}
+        try:
+            base, selected, total = surface.result()
+        except NotReady as error:
+            return {"complete": False, "pending": str(error),
+                    **{key: round(value, 3) for key, value in timings.items()}}
 
     try:
-        if hour:
-            base, _, _ = collect(model, cycle, hour, root)
         if not done("surfce", "asia"):
             emit("surfce", "asia", draw(base, "surfce", "asia"))
-        extra = ExtraFields(root, model, cycle)
-        if checkpoint_root is not None:
-            extra.checkpoints = Path(checkpoint_root) / cycle / model
-        selected = crop(base, "hkor")
         winter = policy.winter(model, cycle)
         if winter:
             required = ("acptot", "acptot1", "acrain", "acrain1") if hour else ("acptot", "acptot1")
             if all(done(name, "hkor") for name in required):
                 emit("surfce", "hkor", alias_of=("acptot", "hkor"))
                 return {"complete": policy.expected_keys(model, cycle, hour) <= completed}
-        with extra.checkpoint_lock():
-            total = None if not hour or done("acrain", "hkor") and done("acrain1", "hkor") else extra.total_rain(hour)
-            if winter:
-                selected, _ = winter_fields(extra, base, hour, interval)
         if winter:
             amount = interpolate(total, selected["latitude"], selected["longitude"]) if total is not None else None
             for name, components in (("acptot", ("acptot", "acptot_snow", "acptot_snowdepth")),
@@ -143,4 +191,5 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
                 emit("acrain1", "hkor", alias_of=("acrain", "hkor"))
     except NotReady as error:
         return {"complete": False, "pending": str(error)}
-    return {"complete": policy.expected_keys(model, cycle, hour) <= completed}
+    return {"complete": policy.expected_keys(model, cycle, hour) <= completed,
+            **{key: round(value, 3) for key, value in timings.items()}}
