@@ -35,7 +35,7 @@ IMAGE_TYPES = {".webp": "image/webp", ".png": "image/png",
                ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 MULTIPART_LIMIT = 5 * 1024 * 1024
 KEY_PATTERN = re.compile(
-    r"(?:aifs|gfs|aigfs|cmc)/([0-9]{10})/([0-9]{3})/"
+    r"(?:aifs|gfs|aigfs|cmc|ecmwf)/([0-9]{10})/([0-9]{3})/"
     r"[a-z][a-z0-9_]{0,39}/(?:asia|hkor)\Z"
 )
 
@@ -285,9 +285,11 @@ class ChartDriveStore:
         if not match or int(match[2]) > 240:
             raise ChartDriveError("Invalid public chart key.")
         try:
-            datetime.strptime(match[1], "%Y%m%d%H")
+            cycle = datetime.strptime(match[1], "%Y%m%d%H")
         except ValueError:
             raise ChartDriveError("Invalid public chart cycle.") from None
+        if key.startswith("ecmwf/") and (cycle.hour not in (6,18) or int(match[2]) > 144):
+            raise ChartDriveError("ECMWF generated charts require 06/18Z and leads through +144h.")
 
     @staticmethod
     def _hash_stream(handle: BinaryIO) -> tuple[int, str, str]:

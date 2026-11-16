@@ -46,6 +46,7 @@ class PolicyTests(unittest.TestCase):
     def test_exact_model_names(self):
         self.assertEqual(policy.TITLES["aifs"], "ECMWF AIFS-Single (N320)")
         self.assertEqual(policy.TITLES["cmc"], "CMC GDPS (GEM 0.135\u02da L84)")
+        self.assertEqual(policy.TITLES["ecmwf"], "ECMWF IFS (TCo1279 L137)")
 
     def test_common_six_utc_run_skips_cmc_instead_of_substituting_cycle(self):
         planned=resolve_plan(["gfs","cmc"],"2026111506",[0])

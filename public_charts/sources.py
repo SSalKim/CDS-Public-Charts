@@ -31,7 +31,7 @@ MODELS = {
               "attribution":"Data Sourced from NOAA NCEP","thermal_merge_version":3},
     "cmc": {"name": "CMC GDPS (GEM 0.135\u02da L84)", "grid": .15, "interval": 3, "rain": 3,
             "attribution":"Data Sourced from ECCC MSC"},
-    "ecmwf": {"name": "ECMWF IFS (0.25\u00b0)", "grid": .25, "interval": 3, "rain": 3,
+    "ecmwf": {"name": "ECMWF IFS (TCo1279 L137)", "grid": .25, "interval": 3, "rain": 3,
               "max_hour": 144, "attribution": "Data Sourced from ECMWF (CC BY 4.0)"},
 }
 FAMILIES = {"z": "geopotential", "gh": "geopotential", "HGT": "geopotential",

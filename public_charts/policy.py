@@ -10,7 +10,7 @@ CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 12}
 MODEL_START_CYCLE = {"ecmwf": "2026111606"}
 TITLES = {"aifs": "ECMWF AIFS-Single (N320)", "gfs": "NCEP GFS (C768 L127)",
           "aigfs": "NCEP AIGFS (0.25\u00b0)", "cmc": "CMC GDPS (GEM 0.135\u02da L84)",
-          "ecmwf": "ECMWF IFS (0.25\u00b0)"}
+          "ecmwf": "ECMWF IFS (TCo1279 L137)"}
 MAX_IMAGE_BYTES = 14_000_000_000
 PIPELINE_VERSION = 3
 KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")

@@ -377,6 +377,19 @@ class PublicChartDriveTests(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(key, self.store.upload_image(self.path, key)["key"])
 
+    def test_ecmwf_off_cycle_uploads_keep_isolated_namespace_and_verified_urls(self):
+        for cycle in ("2026111606","2026111618"):
+            for hour in (0,24,144):
+                key=f"ecmwf/{cycle}/{hour:03}/gph500/asia"
+                with self.subTest(key=key):
+                    result=self.store.upload_image(self.path,key)
+                    self.assertEqual(result["key"],key)
+                    self.assertEqual(result,self.store.upload_image(self.path,key))
+                    self.assertEqual(self.client.files[result["file_id"]]["appProperties"]["namespace"],charts.NAMESPACE)
+        for cycle,hour in (("2026111600",24),("2026111612",24),("2026111606",156)):
+            with self.subTest(cycle=cycle,hour=hour),self.assertRaises(charts.ChartDriveError):
+                self.store.upload_image(self.path,f"ecmwf/{cycle}/{hour:03}/gph500/asia")
+
     def test_zero_hour_instantaneous_fields_preserve_keys_and_image_metadata(self):
         for model in ("aifs", "gfs", "aigfs", "cmc"):
             for domain in ("asia", "hkor"):
