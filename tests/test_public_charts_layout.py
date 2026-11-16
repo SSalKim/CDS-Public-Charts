@@ -9,7 +9,8 @@ from matplotlib.font_manager import FontProperties
 from matplotlib.textpath import TextPath
 import cartopy.crs as ccrs
 
-from public_charts.chart_style import MAPS, ASIA_KIM_MAP, PUBLIC_PROFILE, heading_style, map_spec, source_note_alpha
+from public_charts.chart_style import (MAPS, ASIA_KIM_MAP, KOREA_KIM_MAP, GRID_BOUNDS,
+                                       PUBLIC_PROFILE, heading_style, map_spec, source_note_alpha)
 from public_charts.plotter import tracked_title, fit_heading
 from public_charts import plotter
 
@@ -21,11 +22,30 @@ class LayoutTests(unittest.TestCase):
         self.assertIs(map_spec("asia", "2026111606", PUBLIC_PROFILE), ASIA_KIM_MAP)
         self.assertIs(map_spec("asia", "2026111700", PUBLIC_PROFILE), ASIA_KIM_MAP)
 
-    def test_korea_and_local_weathermesh_maps_are_unchanged(self):
-        self.assertIs(map_spec("hkor", "2026111606", PUBLIC_PROFILE), MAPS["hkor"])
+    def test_korea_cutover_preserves_old_cycles_and_local_weathermesh(self):
+        for cycle in ("2026111512", "2026111518", "2026111600"):
+            self.assertIs(map_spec("hkor", cycle, PUBLIC_PROFILE), MAPS["hkor"])
+        for cycle in ("2026111606", "2026111700"):
+            self.assertIs(map_spec("hkor", cycle, PUBLIC_PROFILE), KOREA_KIM_MAP)
+        self.assertIs(map_spec("hkor", "2026111606"), MAPS["hkor"])
         self.assertIs(map_spec("asia", "2026111606"), MAPS["asia"])
         self.assertEqual(heading_style("hkor", "2026111606", PUBLIC_PROFILE),
                          heading_style("hkor", "2026111600", PUBLIC_PROFILE))
+
+    def test_revised_korea_viewport_stays_inside_available_grid(self):
+        spec = KOREA_KIM_MAP
+        globe = ccrs.Globe(ellipse=None, semimajor_axis=spec["radius"], semiminor_axis=spec["radius"])
+        projection = ccrs.LambertConformal(central_longitude=126, central_latitude=38,
+                                         standard_parallels=(30, 60), globe=globe)
+        x = np.linspace(*spec["xlim"], 50)
+        y = np.linspace(*spec["ylim"], 50)
+        xx, yy = np.meshgrid(x, y)
+        points = ccrs.PlateCarree().transform_points(projection, xx, yy)
+        south, north, west, east = GRID_BOUNDS["hkor"]
+        self.assertGreater(points[:, :, 0].min(), west)
+        self.assertLess(points[:, :, 0].max(), east)
+        self.assertGreater(points[:, :, 1].min(), south)
+        self.assertLess(points[:, :, 1].max(), north)
 
     def test_asia_title_and_model_sizes_are_exact_not_scaled_twice(self):
         self.assertEqual(heading_style("asia", "2026111606", PUBLIC_PROFILE),

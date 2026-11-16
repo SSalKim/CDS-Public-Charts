@@ -1,7 +1,8 @@
 """Lightweight rendering contract, shared with the image cache."""
-STYLE_VERSION = 14
+STYLE_VERSION = 15
 PUBLIC_PROFILE = "cds-public-v6"
 ASIA_LAYOUT_CUTOVER = "2026111606"
+KOREA_LAYOUT_CUTOVER = "2026111606"
 PUBLIC_IMAGE_SIZES = {"asia": (910, 660), "hkor": (640, 730)}
 PUBLIC_MAP_AXES = {"hkor": (.004, .052, .926, .896)}
 
@@ -45,13 +46,25 @@ ASIA_KIM_MAP = {
     "axes": (.001, 41 / 660, .944, 599 / 660),
 }
 
+# First-panel KIM acptot coastline/graticule fit, independent of canvas size.
+KOREA_KIM_MAP = {
+    "figsize": (6.4, 7.35), "center": (126, 38), "parallels": (30, 60),
+    "radius": 6371229,
+    "xlim": (-619431, 583701), "ylim": (-721281, 601288),
+    "axes": (.001, .050, .944, .902),
+}
+
 
 def revised_asia(domain, cycle, profile):
     return profile == PUBLIC_PROFILE and domain == "asia" and cycle >= ASIA_LAYOUT_CUTOVER
 
 
 def map_spec(domain, cycle, profile=None):
-    return ASIA_KIM_MAP if revised_asia(domain, cycle, profile) else MAPS[domain]
+    if revised_asia(domain, cycle, profile):
+        return ASIA_KIM_MAP
+    if profile == PUBLIC_PROFILE and domain == "hkor" and cycle >= KOREA_LAYOUT_CUTOVER:
+        return KOREA_KIM_MAP
+    return MAPS[domain]
 
 
 def heading_style(domain, cycle, profile=None):
