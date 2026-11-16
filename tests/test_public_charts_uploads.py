@@ -1,4 +1,4 @@
-from threading import Barrier, Lock, get_ident
+from threading import Barrier, Event, Lock, get_ident
 import time
 import unittest
 
@@ -36,6 +36,49 @@ class Store:
 
 
 class UploadTests(unittest.TestCase):
+    def test_bounded_uploads_keep_running_while_coordinator_is_publishing(self):
+        gate, completed, lock = Event(), Event(), Lock()
+        counts = {"active": 0, "peak": 0, "finished": 0}
+        parent, reserved, released, recorded = get_ident(), [], [], []
+
+        class IndependentWorker:
+            def new_upload_worker(self):
+                return self
+
+            def upload_image(self, path, key):
+                with lock:
+                    counts["active"] += 1
+                    counts["peak"] = max(counts["peak"], counts["active"])
+                if not gate.wait(10):
+                    raise TimeoutError("Coordinator did not begin publication")
+                time.sleep(.01)
+                with lock:
+                    counts["active"] -= 1
+                    counts["finished"] += 1
+                    if counts["finished"] == 24:
+                        completed.set()
+                return {"key": key}
+
+        pool = UploadPool(IndependentWorker(), 3)
+        self.addCleanup(pool.close)
+        self.addCleanup(gate.set)
+        def record(item, info):
+            self.assertEqual(get_ident(), parent)
+            recorded.append(info["key"])
+        stream = StreamingUploads(pool, lambda item: reserved.append(item["key"]),
+                                  lambda item: released.append(item["key"]), record)
+        stream.enqueue([{"key": str(i), "path": str(i)} for i in range(27)])
+        stream.poll()
+        self.assertEqual(len(reserved), 24)
+        self.assertEqual(len(stream.waiting), 3)
+        gate.set()
+        self.assertTrue(completed.wait(10))
+        self.assertEqual(recorded, [])
+        stream.drain()
+        self.assertEqual(counts["peak"], 3)
+        self.assertEqual(len(recorded), 27)
+        self.assertEqual(set(reserved), set(released))
+
     def test_streaming_uses_all_upload_slots_across_different_leads(self):
         store, recorded, parent = Store(3), [], get_ident()
         pool = UploadPool(store, 3)

@@ -40,6 +40,10 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   Verified URLs are coalesced into publications every 15 seconds (plus the final
   flush); the first image is published immediately. Aliases wait for their source
   image's verification, and staged files remain until all uploads drain.
+  The upload executor also accepts a bounded lookahead of eight reserved files
+  per IO thread, so those same three threads keep transferring while the
+  coordinator saves and publishes the manifest. Network concurrency is unchanged;
+  only the coordinator reserves bytes, records results and publishes URLs.
 - Rendering defaults to `auto`: up to four processes, limited by effective CPU
   and available memory (including WSL/container limits). Windows host headroom is
   also sampled: new scheduling stops below 1 GiB free on Windows or 512 MiB in Linux.

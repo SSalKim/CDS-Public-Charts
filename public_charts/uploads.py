@@ -96,7 +96,8 @@ class StreamingUploads:
     def poll(self, *, block=False):
         if self.failure:
             self.waiting.clear()
-        while self.waiting and len(self.pending) < self.pool.workers and self.failure is None:
+        # Keep the IO threads fed while the coordinator saves/publishes a manifest.
+        while self.waiting and len(self.pending) < self.pool.workers * 8 and self.failure is None:
             item = self.waiting[0]
             try:
                 self.reserve(item)
