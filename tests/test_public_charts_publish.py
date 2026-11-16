@@ -85,6 +85,25 @@ class PublicationTests(unittest.TestCase):
             publish_manifest(self.local)
         self.assertEqual(self.remote_manifest(), {"charts": []})
 
+    def test_shallow_runner_can_publish_when_code_advances_during_render(self):
+        (self.local / "baseline.py").write_text("baseline = 1\n", encoding="utf-8")
+        git(self.local, "add", "baseline.py")
+        git(self.local, "commit", "-m", "Existing renderer code")
+        git(self.local, "push", "origin", "main")
+        shallow = self.local.parent / "shallow-runner"
+        git(self.local.parent, "clone", "--depth=1", self.remote.as_uri(), str(shallow))
+        self.assertEqual(git(shallow, "rev-parse", "--is-shallow-repository").strip(), "true")
+        (self.local / "code.py").write_text("value = 2\n", encoding="utf-8")
+        git(self.local, "add", "code.py")
+        git(self.local, "commit", "-m", "Code update while charts render")
+        git(self.local, "push", "origin", "main")
+        expected = {"charts": [{"hour": 72}]}
+        (shallow / MANIFEST).write_text(json.dumps(expected), encoding="utf-8")
+        with patch("public_charts_publish.time.sleep"):
+            self.assertEqual(publish_manifest(shallow), expected)
+        self.assertEqual(self.remote_manifest(), expected)
+        self.assertEqual(git(self.remote, "show", "main:code.py").strip(), "value = 2")
+
 
 if __name__ == "__main__":
     unittest.main()

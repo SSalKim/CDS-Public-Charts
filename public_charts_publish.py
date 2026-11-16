@@ -31,7 +31,8 @@ def publish_manifest(root):
             git("-c", "user.name=github-actions[bot]", "-c",
                 "user.email=41898282+github-actions[bot]@users.noreply.github.com",
                 "commit", "--only", "-m", "Update public chart availability", "--", MANIFEST)
-        git("fetch", "origin", "main", "--depth=1")
+        # Preserve the path back to the runner's shallow boundary when main moves.
+        git("fetch", "origin", "main")
         published = json.loads(git("show", f"origin/main:{MANIFEST}").stdout)
         if expected != published:
             files = set(git("log", "--format=", "--name-only", "origin/main..HEAD").stdout.split())
@@ -44,7 +45,7 @@ def publish_manifest(root):
                     raise PublicationError("Public manifest push failed; cleanup is blocked")
                 git("pull", "--rebase", "origin", "main")
                 time.sleep(3)
-            git("fetch", "origin", "main", "--depth=1")
+            git("fetch", "origin", "main")
             published = json.loads(git("show", f"origin/main:{MANIFEST}").stdout)
         if expected != published:
             raise PublicationError("Remote manifest differs; cleanup is blocked")
