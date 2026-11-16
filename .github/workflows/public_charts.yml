@@ -80,6 +80,7 @@ jobs:
       HOURS_INPUT: ${{ inputs.hours }}
       LIMIT_INPUT: ${{ inputs.max_leads || 2 }}
       WORKERS_INPUT: ${{ vars.PUBLIC_CHARTS_WORKERS || 2 }}
+      UPLOAD_WORKERS_INPUT: ${{ vars.PUBLIC_CHARTS_UPLOAD_WORKERS || 3 }}
       FORCE_INPUT: ${{ inputs.force }}
     steps:
       - uses: actions/checkout@v4
@@ -144,7 +145,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          args=(--workdir "$CHART_WORK" --max-leads "$LIMIT_INPUT" --workers "$WORKERS_INPUT")
+          args=(--workdir "$CHART_WORK" --max-leads "$LIMIT_INPUT" --workers "$WORKERS_INPUT" --upload-workers "$UPLOAD_WORKERS_INPUT")
           if [ "$DRY_RUN" = 'true' ]; then args+=(--dry-run); fi
           if [ "$DRY_RUN" != 'true' ]; then args+=(--publish-incremental); fi
           if [ "$MODEL_INPUT" != 'all' ]; then args+=(--models "$MODEL_INPUT"); fi

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import uuid
+import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -32,6 +33,7 @@ FILE_FIELDS = (
 )
 IMAGE_TYPES = {".webp": "image/webp", ".png": "image/png",
                ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+MULTIPART_LIMIT = 5 * 1024 * 1024
 KEY_PATTERN = re.compile(
     r"(?:aifs|gfs|aigfs|cmc)/([0-9]{10})/([0-9]{3})/"
     r"[a-z][a-z0-9_]{0,39}/(?:asia|hkor)\Z"
@@ -71,6 +73,21 @@ class ChartDriveStore:
         self.account_email = account_email.strip().casefold()
         self._client = client
         self._verified = False
+        self._image_index = None
+
+    def prime_inventory(self, inventory):
+        self._image_index = {}
+        for item in inventory:
+            if self._managed(item) and item["appProperties"].get("kind") == "image":
+                self._image_index.setdefault(item["appProperties"].get("key"), []).append(copy.deepcopy(item))
+
+    def new_upload_worker(self):
+        """Each IO thread owns its OAuth client and requests session."""
+        worker = type(self).from_environment()
+        if (worker.folder_id, worker.account_email) != (self.folder_id, self.account_email):
+            raise ChartDriveError("Upload worker target differs from the verified coordinator.")
+        worker._image_index = copy.deepcopy(self._image_index)
+        return worker
 
     @classmethod
     def from_environment(cls) -> ChartDriveStore:
@@ -324,16 +341,26 @@ class ChartDriveStore:
 
     def _upload_image(self, handle: BinaryIO, key: str, suffix: str,
                       size: int, sha256: str) -> str:
+        metadata = {"name": key.replace("/", "_") + "_" + sha256[:16] + suffix,
+                    "parents": [self.folder_id], "mimeType": IMAGE_TYPES[suffix],
+                    "appProperties": {"namespace": NAMESPACE, "kind": "image", "key": key, "sha256": sha256}}
+        if size <= MULTIPART_LIMIT:
+            boundary = "chart_" + uuid.uuid4().hex
+            body = (f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".encode()
+                    + json.dumps(metadata).encode("utf-8")
+                    + f"\r\n--{boundary}\r\nContent-Type: {IMAGE_TYPES[suffix]}\r\n\r\n".encode()
+                    + handle.read() + f"\r\n--{boundary}--\r\n".encode())
+            uploaded = self._json(self._request("POST", f"{DRIVE_UPLOAD_API}/files",
+                                  params={"uploadType": "multipart", "fields": "id"}, data=body,
+                                  headers={"Content-Type": f"multipart/related; boundary={boundary}"}))
+            return _file_id(uploaded.get("id"))
         response = self._request(
             "POST", f"{DRIVE_UPLOAD_API}/files",
             params={"uploadType": "resumable", "fields": "id"},
             headers={"Content-Type": "application/json; charset=UTF-8",
                      "X-Upload-Content-Type": IMAGE_TYPES[suffix],
                      "X-Upload-Content-Length": str(size)},
-            json={"name": key.replace("/", "_") + "_" + sha256[:16] + suffix,
-                  "parents": [self.folder_id], "mimeType": IMAGE_TYPES[suffix],
-                  "appProperties": {"namespace": NAMESPACE, "kind": "image",
-                                    "key": key, "sha256": sha256}},
+            json=metadata,
         )
         location = response.headers.get("Location", "")
         try:
@@ -374,7 +401,7 @@ class ChartDriveStore:
             query = self._base_query() + (
                 f" and appProperties has {{ key='key' and value='{_query_literal(key)}' }}"
             )
-            candidates = self._list(query)
+            candidates = self._list(query) if self._image_index is None else self._image_index.get(key, [])
             file_id = None
             for candidate in sorted(candidates, key=lambda item: str(item.get("id", ""))):
                 if (not self._managed(candidate) or candidate["appProperties"].get("key") != key
@@ -395,6 +422,8 @@ class ChartDriveStore:
                 if current.get("mimeType") != IMAGE_TYPES[suffix]:
                     raise ChartDriveError("Google Drive returned an unexpected image type.")
             self._ensure_public_reader(file_id)
+            if self._image_index is not None:
+                self._image_index.setdefault(key, []).append(copy.deepcopy(current))
             return {"file_id": file_id, "url": drive_url(file_id), "size": size,
                     "md5": md5, "sha256": sha256, "key": key}
 

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -61,6 +62,13 @@ def synchronized_renderer(model, cycle, hour, root, existing, emit, **kwargs):
     return result
 
 
+def ahead_renderer(model, cycle, hour, root, existing, emit, **kwargs):
+    result = sample_renderer(model, cycle, hour, root, existing, emit, **kwargs)
+    if hour == 6:
+        (Path(root).parents[2] / "next-rendered").touch()
+    return result
+
+
 class QueueTests(unittest.TestCase):
     def test_model_round_robin_and_same_model_serialization(self):
         queue = LeadQueue([target("aifs", 0), target("aifs", 6), target("gfs", 0)], set(), 2)
@@ -102,6 +110,24 @@ class QueueTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    def test_next_lead_renders_while_coordinator_uploads_previous_lead(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work, parent, hours = Path(directory), threading.get_ident(), []
+
+            def consume(item, staged):
+                self.assertEqual(threading.get_ident(), parent)
+                self.assertIsNone(staged["error"])
+                if item["hour"] == 0:
+                    deadline = time.monotonic() + 30
+                    while not (work / "next-rendered").exists() and time.monotonic() < deadline:
+                        time.sleep(.02)
+                    self.assertTrue((work / "next-rendered").exists())
+                hours.append(item["hour"])
+
+            execute_leads(LeadQueue([target(), target(hour=6)], set(), 2), work, 2, consume,
+                          renderer=ahead_renderer)
+            self.assertEqual(hours, [0, 6])
+
     def test_validated_image_survives_producer_deletion_and_checkpoint_is_shared(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

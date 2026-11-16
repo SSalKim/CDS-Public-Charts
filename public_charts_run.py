@@ -16,6 +16,7 @@ from public_charts import policy
 from public_charts.dates import parse_cycle
 from public_charts.parallel import LeadQueue, child_path, cleanup_raw, execute_leads, model_workspace
 from public_charts_publish import publish_manifest
+from public_charts.uploads import UploadPool, UploadBudgetExceeded
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "data/public_charts_manifest.json"
@@ -172,6 +173,8 @@ def run(args, store=None):
         if state.get("schema_version") != 1:
             raise ValueError("Unknown private production state version")
         inventory = store.inventory()
+        if hasattr(store, "prime_inventory"):
+            store.prime_inventory(inventory)
     rows = {policy.row_key(row): row for row in state.get("rows", state.get("charts", []))}
     if not local:
         recover_rows(inventory)
@@ -202,6 +205,8 @@ def run(args, store=None):
     budget_blocked = False
     reserve_bytes = 0
     before_ids = {item["id"] for item in inventory} | {row["file_id"] for row in rows.values()}
+    upload_workers = getattr(args, "upload_workers", 1)
+    uploader = UploadPool(store, upload_workers) if not local else None
 
     def save_state():
         if local:
@@ -233,43 +238,67 @@ def run(args, store=None):
         nonlocal image_bytes, reserve_bytes, budget_blocked
         model, cycle, hour = target["model"], target["cycle"], target["hour"]
         uploading = time.monotonic()
+        pending_bytes = 0
+
+        def record(item, info):
+            nonlocal image_bytes
+            if not local:
+                if f"{model}/{cycle}" not in verified_cycles:
+                    verify_public_url(info["url"])
+                    verified_cycles.add(f"{model}/{cycle}")
+                if info["file_id"] not in before_ids:
+                    image_bytes += int(info["size"])
+                    before_ids.add(info["file_id"])
+            rows[item["key"]] = {"model": model, "cycle": cycle, "hour": hour,
+                                 "product": item["product"], "domain": item["domain"],
+                                 "render_version": policy.PIPELINE_VERSION,
+                                 **{key: info[key] for key in ("file_id", "url", "size", "sha256")}}
+            fresh.add(item["key"])
+
+        def reserve(item):
+            nonlocal pending_bytes
+            size = item["size"]
+            if image_bytes + pending_bytes + size > args.max_bytes:
+                raise UploadBudgetExceeded(size)
+            pending_bytes += size
+
+        def release(item):
+            nonlocal pending_bytes
+            pending_bytes -= item["size"]
+
         try:
+            images, aliases, seen = [], [], set()
             for artifact in staged["artifacts"]:
                 product, domain = artifact["product"], artifact["domain"]
                 entry_key = policy.key(model, cycle, hour, product, domain)
-                if entry_key not in policy.expected_keys(model, cycle, hour):
+                if entry_key not in policy.expected_keys(model, cycle, hour) or entry_key in seen:
                     raise ValueError("Unexpected renderer output")
+                seen.add(entry_key)
+                item = {**artifact, "key": entry_key}
                 if artifact["alias_of"]:
-                    source = rows[policy.key(model, cycle, hour, *artifact["alias_of"])]
-                    info = {key: source[key] for key in ("file_id", "url", "size", "sha256")}
+                    aliases.append(item)
                 else:
                     path = Path(artifact["path"])
                     directory = child_path(model_workspace(work, model), "staged", cycle, f"{hour:03}")
                     if path.is_symlink() or not path.resolve().is_relative_to(directory.resolve()) or path.suffix != ".webp":
                         raise ValueError("Unsafe staged image")
-                    if local:
-                        destination = output / "images" / model / path.name
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copyfile(path, destination)
-                        info = {"file_id": entry_key, "url": destination.relative_to(output).as_posix(),
-                                "size": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-                    else:
-                        if image_bytes + path.stat().st_size > args.max_bytes:
-                            reserve_bytes = max(reserve_bytes, path.stat().st_size)
-                            raise OverflowError("Image budget reached; publish retention cleanup before continuing")
-                        info = store.upload_image(path, entry_key)
-                        if f"{model}/{cycle}" not in verified_cycles:
-                            verify_public_url(info["url"])
-                            verified_cycles.add(f"{model}/{cycle}")
-                        if info["file_id"] not in before_ids:
-                            image_bytes += int(info["size"])
-                            before_ids.add(info["file_id"])
-                rows[entry_key] = {"model": model, "cycle": cycle, "hour": hour, "product": product,
-                                   "domain": domain, "render_version": policy.PIPELINE_VERSION,
-                                   **{key: info[key] for key in ("file_id", "url", "size", "sha256")}}
-                fresh.add(entry_key)
+                    images.append({**item, "path": path, "size": path.stat().st_size})
+            if local:
+                for item in images:
+                    path = item["path"]
+                    destination = output / "images" / model / path.name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, destination)
+                    record(item, {"file_id": item["key"], "url": destination.relative_to(output).as_posix(),
+                                  "size": item["size"], "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+            else:
+                uploader.run(images, reserve, release, record)
+            for item in aliases:
+                source = rows[policy.key(model, cycle, hour, *item["alias_of"])]
+                record(item, source)
         except OverflowError as exception:
             budget_blocked = True
+            reserve_bytes = max(reserve_bytes, getattr(exception, "size", 0))
             errors.append({**target, "status": "budget", "error": str(exception)})
             raise BudgetReached from None
         finally:
@@ -289,6 +318,7 @@ def run(args, store=None):
             print(json.dumps({**target, **staged["result"], "render_seconds": staged["render_seconds"],
                               "upload_seconds": round(upload_seconds, 3),
                               "publish_seconds": round(time.monotonic() - publishing, 3),
+                              "upload_workers": upload_workers,
                               "renderer_pid": staged["pid"]}), flush=True)
 
     def started(target, active):
@@ -300,6 +330,8 @@ def run(args, store=None):
     except BudgetReached:
         pass
     finally:
+        if uploader:
+            uploader.close()
         save_state()
         if not local:
             kept, delete_ids = snapshot()
@@ -325,6 +357,7 @@ def main():
     parser.add_argument("--hours", nargs="+", type=int)
     parser.add_argument("--max-leads", type=int, default=2)
     parser.add_argument("--workers", type=int, choices=(1, 2), help="Separate renderer processes; defaults to two in production")
+    parser.add_argument("--upload-workers", type=int, choices=(1, 2, 3, 4), default=3)
     parser.add_argument("--publish-incremental", action="store_true", help="Push each completed lead's verified manifest")
     parser.add_argument("--max-bytes", type=int, default=policy.MAX_IMAGE_BYTES)
     parser.add_argument("--manifest", type=Path, default=MANIFEST_PATH)

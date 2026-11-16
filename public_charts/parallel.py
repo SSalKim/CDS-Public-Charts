@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import time
 import traceback
+from queue import Queue, Empty, Full
+from threading import Event, Thread
 from urllib.parse import urlsplit
 
 from . import policy
@@ -161,30 +163,66 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                 consume(target, result)
                 queue.finished(target, result["error"])
             return
-        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
-                                 initializer=initialize_renderer) as executor:
-            pending, active = {}, set()
+        queue.existing = frozenset(queue.existing)
+        ready, stop = Queue(maxsize=workers), Event()
+
+        def deliver(value):
+            while not stop.is_set():
+                try:
+                    ready.put(value, timeout=.2)
+                    return
+                except Full:
+                    pass
+
+        def schedule():
             try:
-                while True:
-                    while len(pending) < workers and (target := queue.next(active)) is not None:
-                        known = policy.expected_keys(target["model"], target["cycle"], target["hour"]) & queue.existing
-                        future = executor.submit(stage_lead, target, work, known, force, None, renderer)
-                        pending[future] = target
-                        active.add(target["model"])
-                        if started:
-                            started(target, len(pending))
-                    if not pending:
-                        break
-                    completed, _ = wait(pending, return_when=FIRST_COMPLETED)
-                    for future in completed:
-                        target = pending.pop(future)
-                        active.remove(target["model"])
-                        result = future.result()
-                        consume(target, result)
-                        queue.finished(target, result["error"])
+                with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
+                                         initializer=initialize_renderer) as executor:
+                    pending, active = {}, set()
+                    try:
+                        while not stop.is_set():
+                            while len(pending) < workers and (target := queue.next(active)) is not None:
+                                known = policy.expected_keys(target["model"], target["cycle"], target["hour"]) & queue.existing
+                                future = executor.submit(stage_lead, target, work, known, force, None, renderer)
+                                pending[future] = target
+                                active.add(target["model"])
+                                if started:
+                                    started(target, len(pending))
+                            if not pending:
+                                break
+                            completed, _ = wait(pending, timeout=.2, return_when=FIRST_COMPLETED)
+                            for future in completed:
+                                target = pending.pop(future)
+                                active.remove(target["model"])
+                                result = future.result()
+                                queue.finished(target, result["error"])
+                                deliver(("lead", target, result))
+                    finally:
+                        for future in pending:
+                            future.cancel()
+            except BaseException as exception:
+                deliver(("error", exception, None))
             finally:
-                for future in pending:
-                    future.cancel()
+                deliver(("done", None, None))
+
+        scheduler = Thread(target=schedule, name="chart-render-scheduler")
+        scheduler.start()
+        try:
+            while True:
+                try:
+                    kind, target, result = ready.get(timeout=.5)
+                except Empty:
+                    if not scheduler.is_alive():
+                        raise RuntimeError("Renderer scheduler exited without a result")
+                    continue
+                if kind == "done":
+                    break
+                if kind == "error":
+                    raise target
+                consume(target, result)
+        finally:
+            stop.set()
+            scheduler.join()
     finally:
         # Executor shutdown has joined running renderers before staged files vanish.
         for model in queue.queues:

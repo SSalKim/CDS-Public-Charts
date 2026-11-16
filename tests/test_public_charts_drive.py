@@ -136,7 +136,7 @@ class FakeDriveClient:
             metadata = json.loads(parts[0].get_payload(decode=True))
             content = parts[1].get_payload(decode=True)
             if method == "POST":
-                file_id = "json_" + str(len(self.files))
+                file_id = ("uploaded_" if metadata["appProperties"]["kind"] == "image" else "json_") + str(len(self.files))
                 self.add(file_id, content, mime=metadata["mimeType"], name=metadata["name"],
                          key=metadata["name"], appProperties=metadata["appProperties"],
                          parents=metadata["parents"])
@@ -419,6 +419,7 @@ class PublicChartDriveTests(unittest.TestCase):
         self.assertEqual("existing", self.store.upload_image(self.path, KEY)["file_id"])
         self.assertFalse(self.methods("POST"))
 
+    @patch.object(charts, "MULTIPART_LIMIT", 0)
     def test_untrusted_upload_destination_is_rejected_before_sending_bytes(self):
         for url in ("https://example.invalid/upload", "http://www.googleapis.com/upload/drive/v3/files",
                     "https://www.googleapis.com@evil.invalid/upload/drive/v3/files",
