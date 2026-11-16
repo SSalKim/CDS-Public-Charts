@@ -498,6 +498,12 @@ def run(args, store=None):
         if not local:
             kept, delete_ids = snapshot()
     if failure is not None:
+        print(json.dumps({"event": "production_failed", "error": type(failure).__name__,
+                          "chart_key": getattr(failure, "chart_key", None),
+                          "http_status": getattr(failure, "http_status", None),
+                          "reason": getattr(failure, "reason", None),
+                          "transport_error_type": getattr(failure, "error_type", None),
+                          "rendered_leads": counts, **resource_usage}), flush=True)
         raise failure
     if local:
         manifest = policy.public_manifest(list(rows.values()))

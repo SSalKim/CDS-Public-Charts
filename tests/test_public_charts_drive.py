@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 import os
+import io
 import tempfile
 import traceback
 import unittest
@@ -175,6 +176,70 @@ class FakeDriveClient:
 
 
 class PublicChartDriveTests(unittest.TestCase):
+    def test_tls_proxy_and_response_stream_errors_retry_without_duplicate_uploads(self):
+        from requests.exceptions import SSLError, ProxyError, ChunkedEncodingError, ContentDecodingError
+        for error_type in (SSLError, ProxyError, ChunkedEncodingError, ContentDecodingError):
+            for committed in (False, True):
+                with self.subTest(error_type=error_type.__name__, committed=committed):
+                    client = FakeDriveClient()
+                    store = charts.ChartDriveStore(client, FOLDER, EMAIL)
+                    attempts = []
+                    def request(method, url, **kwargs):
+                        if method == "POST" and kwargs.get("params", {}).get("uploadType") == "multipart":
+                            attempts.append(kwargs["data"])
+                            if len(attempts) == 1:
+                                if committed:
+                                    client.dispatch(method, url, **kwargs)
+                                raise error_type("private-refresh-token")
+                        return client.dispatch(method, url, **kwargs)
+                    client.request.side_effect = request
+                    with patch.object(charts.time, "sleep"), patch("sys.stdout", new_callable=io.StringIO) as output:
+                        result = store.upload_image(self.path, KEY)
+                    self.assertEqual(len(attempts), 2)
+                    self.assertEqual(attempts[0], attempts[1])
+                    self.assertEqual(len(client.files), 2)
+                    self.assertIn(result["file_id"], client.files)
+                    event = json.loads(output.getvalue())
+                    self.assertEqual(event["event"], "drive_upload_retry")
+                    self.assertEqual(event["error_type"], error_type.__name__)
+                    self.assertNotIn("private-refresh-token", output.getvalue())
+
+    def test_tls_retries_are_bounded_and_keep_safe_failure_details(self):
+        from requests.exceptions import SSLError
+        attempts = []
+        def request(method, url, **kwargs):
+            if method == "POST" and kwargs.get("params", {}).get("uploadType") == "multipart":
+                attempts.append(kwargs["data"])
+                raise SSLError("private-refresh-token")
+            return self.client.dispatch(method, url, **kwargs)
+        self.client.request.side_effect = request
+        with patch.object(charts.time, "sleep"), patch("sys.stdout", new_callable=io.StringIO) as output, \
+                self.assertRaises(charts.ChartDriveError) as caught:
+            self.store.upload_image(self.path, KEY)
+        self.assertEqual(len(attempts), 3)
+        self.assertTrue(all(item == attempts[0] for item in attempts))
+        self.assertEqual(caught.exception.error_type, "SSLError")
+        self.assertEqual(caught.exception.reason, "tls")
+        self.assertEqual(caught.exception.chart_key, KEY)
+        self.assertNotIn("private-refresh-token", str(caught.exception) + output.getvalue())
+
+    def test_local_programming_and_invalid_request_errors_are_not_retried(self):
+        from requests.exceptions import InvalidHeader
+        for error_type in (ValueError, TypeError, InvalidHeader):
+            with self.subTest(error_type=error_type.__name__):
+                client = FakeDriveClient()
+                store = charts.ChartDriveStore(client, FOLDER, EMAIL)
+                attempts = []
+                def request(method, url, **kwargs):
+                    if method == "POST" and kwargs.get("params", {}).get("uploadType") == "multipart":
+                        attempts.append(1)
+                        raise error_type("private-refresh-token")
+                    return client.dispatch(method, url, **kwargs)
+                client.request.side_effect = request
+                with patch.object(charts.time, "sleep"), self.assertRaises(charts.ChartDriveError):
+                    store.upload_image(self.path, KEY)
+                self.assertEqual(len(attempts), 1)
+
     def test_explicit_chart_timeout_keeps_shared_client_default_unchanged(self):
         client=object.__new__(charts.DriveClient)
         client.token_is_stale=lambda:False
