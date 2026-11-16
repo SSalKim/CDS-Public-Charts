@@ -1,7 +1,11 @@
 """Cached additional fields and interval-by-interval experimental winter diagnostics."""
+from contextlib import contextmanager
+import errno
 import hashlib
 import json
+import os
 from pathlib import Path
+import time
 import numpy as np
 import metpy.calc as mpcalc
 from metpy.units import units
@@ -19,6 +23,37 @@ class ExtraFields:
         self.provider=Provider(model,self.client)
         self.notes=[]
         self.checkpoints=Path(root)/"checkpoints"/cycle/model
+
+    @contextmanager
+    def checkpoint_lock(self):
+        """Only cumulative-prefix calculation is serialized, not map rendering."""
+        self.checkpoints.mkdir(parents=True,exist_ok=True)
+        with (self.checkpoints/".writer.lock").open("a+b") as handle:
+            if os.name=="nt":
+                import msvcrt
+                handle.seek(0,os.SEEK_END)
+                if handle.tell()==0:
+                    handle.write(b"0");handle.flush()
+                while True:
+                    try:
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
+                        break
+                    except OSError as error:
+                        if error.errno not in (errno.EACCES,errno.EAGAIN,errno.EDEADLK):
+                            raise
+                        time.sleep(.05)
+            else:
+                import fcntl
+                fcntl.flock(handle,fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if os.name=="nt":
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(),msvcrt.LK_UNLCK,1)
+                else:
+                    fcntl.flock(handle,fcntl.LOCK_UN)
 
     def checkpoint(self,name):
         path=self.checkpoints/name

@@ -19,8 +19,11 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   separate space within the dedicated Drive account's quota.
 - Production is serialized in one concurrency group. Never enable the old CDS
   producer and this producer together: both use the same Drive state.
-- Inside that one job, two isolated renderer processes work on different models.
-  Leads within a model stay ordered so cumulative checkpoints remain reusable.
+- Inside that one job, isolated renderer processes work on different models.
+  CMC can fill spare slots with different forecast leads: up to three simultaneous
+  CMC leads below 8 GiB available memory, or four with more memory. Each lead has
+  separate raw scratch files. Shared cumulative rain/snow checkpoints are protected
+  by a per-cycle process lock; only prefix calculation is serialized, not rendering.
   Only the coordinator uploads to Drive, updates manifests, publishes Git commits,
   and plans cleanup. Each completed lead is published immediately after upload
   verification; it does not wait for the rest of the batch.
@@ -38,6 +41,15 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   changes that budget (maximum 30). Plans refresh every two minutes so a newly
   available cycle can enter the queue. A fully idle queue exits early, and
   in-flight work is drained and published after the dispatch deadline.
+- A missing +000h, or two missing nonzero leads, pauses that model/cycle for ten
+  minutes. Two-minute plan refreshes preserve the pause, leaving workers free for
+  ready cycles and CMC backlog rather than repeatedly checking unavailable data.
+- Raw-source failover validates the same cycle, lead and fields on each mirror.
+  AIFS uses AWS, Google Cloud, then ECMWF; GFS (including native sflux) uses AWS
+  then NOMADS; AIGFS uses NOMADS then AWS. CMC uses dated Datamart paths followed
+  by HPFX. Inventories and byte offsets are reloaded from each selected mirror;
+  offsets from one host are never reused on another. Missing data stays pending,
+  but corrupt data or permission errors are not hidden if every mirror fails.
 - The dedicated laptop label is `cds-public-charts`. Routing checks both this
   repository and the original CDS runner status. A busy VTG runner causes
   GitHub-hosted routing. On the shared laptop, chart production also holds a

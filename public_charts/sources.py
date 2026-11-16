@@ -15,6 +15,13 @@ from urllib3.util.retry import Retry
 GRAVITY = 9.80665
 LEVELS = (200, 300, 500, 700, 850, 925)
 BOUNDS = (-5, 85, 20, 220)
+ECMWF_BASES = ("https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com",
+               "https://storage.googleapis.com/ecmwf-open-data", "https://data.ecmwf.int/forecasts")
+GFS_BASES = ("https://noaa-gfs-bdp-pds.s3.amazonaws.com",
+             "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod")
+AIGFS_BASES = ("https://nomads.ncep.noaa.gov/pub/data/nccf/com/aigfs/prod",
+               "https://noaa-nws-graphcastgfs-pds.s3.amazonaws.com")
+CANADA_BASES = ("https://dd.weather.gc.ca", "https://hpfx.collab.science.gc.ca")
 MODELS = {
     "aifs": {"name": "ECMWF AIFS-Single (N320)", "grid": .25, "interval": 6, "rain": 6,
              "attribution":"Data Sourced from ECMWF (CC BY 4.0)"},
@@ -100,7 +107,9 @@ class HttpCache:
                     raise
                 time.sleep(2 ** attempt)
 
-    def get(self, url, byte_range=None, *, cache=True):
+    def get(self, url, byte_range=None, *, cache=True, attempts=3, timeout=(15, 120)):
+        if attempts < 1:
+            raise ValueError("At least one HTTP attempt is required")
         key = hashlib.sha256(f"{url}|{byte_range}".encode()).hexdigest()
         path = self.root / (key + ".bin")
         meta = path.with_suffix(".json")
@@ -119,19 +128,19 @@ class HttpCache:
                 return value
         headers = {} if byte_range is None else {"Range": f"bytes={byte_range[0]}-{byte_range[1]}",
                                                 "Accept-Encoding": "identity"}
-        for attempt in range(3):
+        for attempt in range(attempts):
             try:
-                response = self.session.get(url, headers=headers, timeout=(15, 120))
+                response = self.session.get(url, headers=headers, timeout=timeout)
                 self.requests += 1
                 if response.status_code in (404, 410):
                     raise NotReady(f"HTTP {response.status_code}: {url}")
-                if response.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                if response.status_code in (429, 500, 502, 503, 504) and attempt < attempts-1:
                     time.sleep(min(30,max(2,Retry().get_retry_after(response) or 3)))
                     continue
                 response.raise_for_status()
                 break
             except (requests.ConnectionError, requests.Timeout):
-                if attempt == 2:
+                if attempt == attempts-1:
                     raise
                 time.sleep(2 ** attempt)
         value = response.content
@@ -320,11 +329,29 @@ class Provider:
             return self.noaa(cycle, hour, wanted)
         return self.canada(cycle, hour, wanted)
 
+    @staticmethod
+    def _mirrors(urls, retrieve):
+        failures = []
+        for url in urls:
+            try:
+                return retrieve(url)
+            except (NotReady, requests.RequestException, ValueError, ec.CodesInternalError) as error:
+                failures.append(error)
+        # A real data/permission failure must not turn into an ordinary pending run.
+        raise next((error for error in failures if not isinstance(error, NotReady)), failures[-1])
+
+    def _inventory(self, url):
+        return self.client.get(url, cache=False, attempts=1, timeout=(5, 15))
+
     def aifs(self, cycle, hour, wanted):
-        url = (f"https://data.ecmwf.int/forecasts/{cycle[:8]}/{cycle[8:]}z/aifs-single/0p25/oper/"
-               f"{cycle}0000-{hour}h-oper-fc.grib2")
-        entries = [json.loads(line) for line in self.client.get(url.replace(".grib2", ".index"),cache=False).decode().splitlines() if line.strip()]
-        result = {}
+        relative = (f"{cycle[:8]}/{cycle[8:]}z/aifs-single/0p25/oper/"
+                    f"{cycle}0000-{hour}h-oper-fc.grib2")
+        return self._mirrors([f"{base}/{relative}" for base in ECMWF_BASES],
+                             lambda url: self._aifs_file(url, cycle, hour, wanted))
+
+    def _aifs_file(self, url, cycle, hour, wanted):
+        entries = [json.loads(line) for line in self._inventory(url.replace(".grib2", ".index")).decode().splitlines() if line.strip()]
+        selected = {}
         for item in entries:
             parameter = item.get("param")
             key = {"msl": "pressure_msl", "tp": "precipitation","sp":"surface_pressure",
@@ -336,51 +363,58 @@ class Provider:
                 key = f"{FAMILIES[parameter]}_{item.get('levelist')}"
             if key not in wanted:
                 continue
+            if "_offset" not in item or "_length" not in item:
+                raise NotReady("AIFS index is incomplete")
+            selected[key] = item
+        if wanted - selected.keys():
+            raise NotReady(f"AIFS inventory lacks {sorted(wanted-selected.keys())}")
+        result = {}
+        for key, item in selected.items():
             offset, length = int(item["_offset"]), int(item["_length"])
+            if offset < 0 or length <= 0:
+                raise NotReady("AIFS index has an incomplete byte range")
             result[key] = decode(self.client.get(url, (offset, offset+length-1)), cycle, hour, key)
-        if wanted - result.keys():
-            raise NotReady(f"AIFS inventory lacks {sorted(wanted-result.keys())}")
         return result
 
     def noaa(self, cycle, hour, wanted):
         if self.model == "gfs":
-            urls = [f"https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.{cycle[:8]}/{cycle[8:]}/atmos/"
-                    f"gfs.t{cycle[8:]}z.pgrb2.0p25.f{hour:03}"]
+            files = [(f"gfs.{cycle[:8]}/{cycle[8:]}/atmos/gfs.t{cycle[8:]}z.pgrb2.0p25.f{hour:03}", wanted)]
+            bases = GFS_BASES
         else:
-            base = (f"https://noaa-nws-graphcastgfs-pds.s3.amazonaws.com/aigfs.{cycle[:8]}/"
-                    f"{cycle[8:]}/model/atmos/grib2/")
-            urls = [base+f"aigfs.t{cycle[8:]}z.{kind}.f{hour:03}.grib2" for kind in ("pres", "sfc")]
+            relative = f"aigfs.{cycle[:8]}/{cycle[8:]}/model/atmos/grib2/"
+            files = [(relative+f"aigfs.t{cycle[8:]}z.{kind}.f{hour:03}.grib2",
+                      {key for key in wanted if (key.startswith(("pressure_", "precip")) or key.endswith(("_2m","_10m"))) == (kind == "sfc")})
+                     for kind in ("pres", "sfc")]
+            bases = AIGFS_BASES
         result = {}
-        for url in urls:
-            subset = {key for key in wanted if (key.startswith(("pressure_", "precip")) or key.endswith(("_2m","_10m"))) == (".sfc." in url)} if self.model == "aigfs" else wanted
+        for relative, subset in files:
             if not subset:
                 continue
-            if self.model=="aigfs":
-                try:
-                    inventory=self.client.get(url+".idx",cache=False)
-                except (NotReady,requests.RequestException):
-                    url=url.replace("https://noaa-nws-graphcastgfs-pds.s3.amazonaws.com/",
-                                    "https://nomads.ncep.noaa.gov/pub/data/nccf/com/aigfs/prod/")
-                    inventory=self.client.get(url+".idx",cache=False)
-            else:
-                inventory=self.client.get(url+".idx",cache=False)
-            entries = ncep_index(inventory.decode())
-            selected = choose_ncep(entries, subset)
-            for key, item in selected.items():
-                if "length" not in item:
-                    item["length"] = self.client.file_size(url)-item["offset"]
-                    if item["length"] <= 0:
-                        raise NotReady("NCEP final inventory offset exceeds the published GRIB size")
-                first, length = item["offset"], item["length"]
-                result[key] = decode(self.client.get(url, (first, first+length-1)), cycle, hour, key)
+            result.update(self._mirrors([f"{base}/{relative}" for base in bases],
+                                       lambda url: self._noaa_file(url, cycle, hour, subset)))
+        return result
+
+    def _noaa_file(self, url, cycle, hour, wanted):
+        selected = choose_ncep(ncep_index(self._inventory(url+".idx").decode()), wanted)
+        result = {}
+        for key, item in selected.items():
+            if "length" not in item:
+                item["length"] = self.client.file_size(url)-item["offset"]
+            if item["length"] <= 0:
+                raise NotReady("NCEP final inventory offset exceeds the published GRIB size")
+            first, length = item["offset"], item["length"]
+            result[key] = decode(self.client.get(url, (first, first+length-1)), cycle, hour, key)
         return result
 
     def sflux(self, cycle, hour):
         if self.model!="gfs":
             raise ValueError("Only GFS provides this surface-flux source")
-        url=(f"https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.{cycle[:8]}/{cycle[8:]}/atmos/"
-             f"gfs.t{cycle[8:]}z.sfluxgrbf{hour:03}.grib2")
-        entries=ncep_index(self.client.get(url+".idx",cache=False).decode())
+        relative=f"gfs.{cycle[:8]}/{cycle[8:]}/atmos/gfs.t{cycle[8:]}z.sfluxgrbf{hour:03}.grib2"
+        return self._mirrors([f"{base}/{relative}" for base in GFS_BASES],
+                             lambda url: self._sflux_file(url, cycle, hour))
+
+    def _sflux_file(self, url, cycle, hour):
+        entries=ncep_index(self._inventory(url+".idx").decode())
         choices=[item for item in entries if item["parameter"]=="PRATE" and item["level"]=="surface"]
         if not choices:
             raise NotReady("GFS sflux inventory lacks surface PRATE")
@@ -393,22 +427,15 @@ class Provider:
     def sflux_surface(self,cycle,hour,wanted):
         if self.model!="gfs":
             raise ValueError("GFS surface flux cannot replace another model's fields")
-        url=(f"https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.{cycle[:8]}/{cycle[8:]}/atmos/"
-             f"gfs.t{cycle[8:]}z.sfluxgrbf{hour:03}.grib2")
-        selected=choose_ncep(ncep_index(self.client.get(url+".idx",cache=False).decode()),wanted)
-        result={}
-        for key,item in selected.items():
-            if "length" not in item:
-                raise NotReady(f"Incomplete sflux index for {key}")
-            first,length=item["offset"],item["length"]
-            result[key]=decode(self.client.get(url,(first,first+length-1)),cycle,hour,key)
-        return result
+        relative=f"gfs.{cycle[:8]}/{cycle[8:]}/atmos/gfs.t{cycle[8:]}z.sfluxgrbf{hour:03}.grib2"
+        return self._mirrors([f"{base}/{relative}" for base in GFS_BASES],
+                             lambda url: self._noaa_file(url, cycle, hour, wanted))
 
     def canada(self, cycle, hour, wanted, *, total_precipitation=False):
         geml = self.model == "geml"
         model, resolution = ("GDPS-GEML", "0.25") if geml else ("GDPS", "0.15")
         root = "model_gdps-geml/25km" if geml else "model_gdps/15km"
-        base = f"https://dd.weather.gc.ca/{cycle[:8]}/WXO-DD/{root}/{cycle[8:]}/{hour:03}/"
+        relative = f"{cycle[:8]}/WXO-DD/{root}/{cycle[8:]}/{hour:03}/"
         variables = {"geopotential": "Geopotential" if geml else "GeopotentialHeight",
                      "temperature": "AirTemp", "specific_humidity": "SpecificHumidity",
                      "wind_u": "WindU", "wind_v": "WindV"}
@@ -434,15 +461,17 @@ class Provider:
                     variables[family]="VerticalVelocity"
                 part = f"{variables[family]}_IsbL-{int(level):04}"
             name = f"{cycle[:8]}T{cycle[8:]}Z_MSC_{model}_{part}_LatLon{resolution}_PT{hour:03}H.grib2"
+            def retrieve(filename):
+                return self._mirrors([f"{base}/{relative}{filename}" for base in CANADA_BASES],
+                                     lambda url: decode(self.client.get(url), cycle, hour, key))
             try:
-                value = self.client.get(base+name)
+                result[key] = retrieve(name)
             except NotReady:
                 if key != "precipitation" or geml:
                     raise
                 # Long GDPS leads omit the standalone 3h field but retain run totals.
                 name = name.replace("Precip-Accum3h_Sfc", "Precip-Accum_Sfc")
-                value = self.client.get(base+name)
-            result[key] = decode(value, cycle, hour, key)
+                result[key] = retrieve(name)
         return result
 
 

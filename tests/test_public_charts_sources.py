@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -92,13 +93,127 @@ class CanadaPathTests(unittest.TestCase):
 
     def test_total_rain_fallback_stays_in_the_requested_run_date(self):
         client = Mock()
-        client.get.side_effect = [NotReady("No standalone three-hour rain"), b"GRIB"]
+        def get(url, *args, **kwargs):
+            if "Precip-Accum3h_Sfc" in url:
+                raise NotReady("No standalone three-hour rain")
+            return b"GRIB"
+        client.get.side_effect = get
         with patch("public_charts.sources.decode", return_value="decoded"):
             Provider("cmc", client).fetch("2026111512", 120, {"precipitation"})
-        first, second = [call.args[0] for call in client.get.call_args_list]
+        first, mirror, second = [call.args[0] for call in client.get.call_args_list]
         self.assertIn("Precip-Accum3h_Sfc", first)
+        self.assertIn("Precip-Accum3h_Sfc", mirror)
+        self.assertIn("hpfx.collab.science.gc.ca", mirror)
         self.assertIn("Precip-Accum_Sfc", second)
         self.assertTrue(all("/20261115/WXO-DD/model_gdps/15km/12/120/" in url for url in (first, second)))
+
+
+class MirrorTests(unittest.TestCase):
+    @staticmethod
+    def aifs_index(offset=100, parameter="msl"):
+        return json.dumps({"param":parameter,"levtype":"sfc","_offset":offset,"_length":40}).encode()
+
+    def test_aifs_prefers_aws_and_uses_short_single_attempt_inventory_probe(self):
+        client=Mock()
+        client.get.side_effect=lambda url,*args,**kwargs:self.aifs_index() if url.endswith(".index") else b"GRIB"
+        with patch("public_charts.sources.decode",return_value="decoded"):
+            result=Provider("aifs",client).fetch("2026111600",24,{"pressure_msl"})
+        self.assertEqual(result,{"pressure_msl":"decoded"})
+        self.assertTrue(all("ecmwf-forecasts.s3.eu-central-1.amazonaws.com" in call.args[0] for call in client.get.call_args_list))
+        self.assertEqual(client.get.call_args_list[0].kwargs,{"cache":False,"attempts":1,"timeout":(5,15)})
+
+    def test_aifs_incomplete_primary_index_uses_complete_google_copy(self):
+        client=Mock()
+        def get(url,*args,**kwargs):
+            if url.endswith(".index"):
+                return self.aifs_index(parameter="2t") if "amazonaws" in url else self.aifs_index(200)
+            return b"GRIB"
+        client.get.side_effect=get
+        with patch("public_charts.sources.decode",return_value="decoded"):
+            Provider("aifs",client).fetch("2026111600",24,{"pressure_msl"})
+        data_calls=[call for call in client.get.call_args_list if len(call.args)>1]
+        self.assertEqual(len(data_calls),1)
+        self.assertIn("storage.googleapis.com/ecmwf-open-data",data_calls[0].args[0])
+        self.assertEqual(data_calls[0].args[1],(200,239))
+
+    def test_data_failure_reloads_secondary_index_never_reuses_primary_offsets(self):
+        client=Mock()
+        def get(url,*args,**kwargs):
+            if url.endswith(".index"):
+                return self.aifs_index(100 if "amazonaws" in url else 300)
+            if "amazonaws" in url:
+                raise NotReady("Data has not followed the index yet")
+            return b"GRIB"
+        client.get.side_effect=get
+        with patch("public_charts.sources.decode",return_value="decoded"):
+            Provider("aifs",client).fetch("2026111600",24,{"pressure_msl"})
+        self.assertEqual(client.get.call_args.args[1],(300,339))
+        self.assertIn("storage.googleapis.com",client.get.call_args.args[0])
+
+    def test_all_missing_is_pending_but_real_errors_are_not_hidden(self):
+        client=Mock();client.get.side_effect=NotReady("Missing")
+        with self.assertRaises(NotReady):
+            Provider("aifs",client).fetch("2026111600",24,{"pressure_msl"})
+        self.assertEqual(client.get.call_count,3)
+        client.reset_mock();client.get.side_effect=[requests.HTTPError("403"),NotReady("Missing"),NotReady("Missing")]
+        with self.assertRaises(requests.HTTPError):
+            Provider("aifs",client).fetch("2026111600",24,{"pressure_msl"})
+
+    def test_wrong_cycle_primary_does_not_contaminate_secondary_result(self):
+        client=Mock()
+        client.get.side_effect=lambda url,*args,**kwargs:self.aifs_index() if url.endswith(".index") else b"GRIB"
+        with patch("public_charts.sources.decode",side_effect=[ValueError("Wrong cycle"),"decoded"]):
+            self.assertEqual(Provider("aifs",client).fetch("2026111600",24,{"pressure_msl"}),{"pressure_msl":"decoded"})
+        self.assertIn("storage.googleapis.com",client.get.call_args.args[0])
+
+    def test_gfs_missing_aws_field_falls_back_to_nomads(self):
+        client=Mock()
+        def get(url,*args,**kwargs):
+            if url.endswith(".idx"):
+                name="TMP:surface" if "amazonaws" in url else "PRMSL:mean sea level"
+                return f"1:0:d=2026111600:{name}:anl:\n2:100:d=2026111600:TMP:surface:anl:\n".encode()
+            return b"GRIB"
+        client.get.side_effect=get
+        with patch("public_charts.sources.decode",return_value="decoded"):
+            self.assertEqual(Provider("gfs",client).fetch("2026111600",0,{"pressure_msl"}),{"pressure_msl":"decoded"})
+        self.assertIn("nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.20261116/00/",client.get.call_args.args[0])
+
+    def test_aigfs_prefers_nomads_then_uses_s3_when_missing(self):
+        client=Mock()
+        def get(url,*args,**kwargs):
+            if "nomads.ncep" in url:raise NotReady("Not published")
+            return b"1:0:d=2026111600:PRMSL:mean sea level:anl:\n2:100:d=2026111600:TMP:surface:anl:\n" if url.endswith(".idx") else b"GRIB"
+        client.get.side_effect=get
+        with patch("public_charts.sources.decode",return_value="decoded"):
+            Provider("aigfs",client).fetch("2026111600",0,{"pressure_msl"})
+        self.assertIn("nomads.ncep",client.get.call_args_list[0].args[0])
+        self.assertIn("noaa-nws-graphcastgfs-pds.s3.amazonaws.com",client.get.call_args.args[0])
+
+    def test_sflux_falls_back_without_changing_model_grid_or_filename(self):
+        client=Mock()
+        def get(url,*args,**kwargs):
+            if "amazonaws" in url:raise NotReady("Not published")
+            return b"1:0:d=2026111600:PRATE:surface:0-3 hour ave fcst:\n2:100:d=2026111600:TMP:surface:anl:\n" if url.endswith(".idx") else b"GRIB"
+        client.get.side_effect=get
+        with patch("public_charts.sources.decode",return_value="decoded") as decode_field:
+            self.assertEqual(Provider("gfs",client).sflux("2026111600",3),"decoded")
+        self.assertIn("nomads.ncep",client.get.call_args.args[0])
+        self.assertTrue(client.get.call_args.args[0].endswith("gfs.t00z.sfluxgrbf003.grib2"))
+        self.assertEqual(decode_field.call_args.args[-1],"precipitation_rate")
+
+    def test_cmc_primary_failure_uses_same_dated_hpfx_file(self):
+        client=Mock()
+        client.get.side_effect=[NotReady("Not published"),b"GRIB"]
+        with patch("public_charts.sources.decode",return_value="decoded"):
+            Provider("cmc",client).fetch("2026111600",24,{"geopotential_500"})
+        self.assertIn("hpfx.collab.science.gc.ca/20261116/WXO-DD/",client.get.call_args.args[0])
+
+    def test_cmc_wrong_cycle_primary_tries_validated_hpfx_copy(self):
+        client=Mock();client.get.return_value=b"GRIB"
+        with patch("public_charts.sources.decode",side_effect=[ValueError("Wrong cycle"),"decoded"]):
+            self.assertEqual(Provider("cmc",client).fetch("2026111600",24,{"geopotential_500"}),
+                             {"geopotential_500":"decoded"})
+        self.assertIn("hpfx.collab.science.gc.ca/20261116/WXO-DD/",client.get.call_args.args[0])
 
 
 class PackingTests(unittest.TestCase):

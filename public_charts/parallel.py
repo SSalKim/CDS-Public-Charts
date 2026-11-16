@@ -12,6 +12,7 @@ from threading import Event, Thread
 from urllib.parse import urlsplit
 
 from . import policy
+from .resources import available_memory
 
 
 def child_path(root, *parts):
@@ -53,10 +54,11 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
 
     model, cycle, hour = target["model"], target["cycle"], target["hour"]
     expected = policy.expected_keys(model, cycle, hour)
-    workspace = model_workspace(work, model)
+    model_root = model_workspace(work, model)
+    workspace = child_path(model_root, "leads", cycle, f"{hour:03}") if model == "cmc" and not raw_override else model_root
     raw = Path(raw_override) if raw_override else child_path(workspace, "raw-cache")
     checkpoints = Path(raw_override) / "checkpoints" if raw_override else child_path(work, "raw-cache", "checkpoints")
-    staged = child_path(workspace, "staged", cycle, f"{hour:03}")
+    staged = child_path(model_root, "staged", cycle, f"{hour:03}")
     staged.mkdir(parents=True, exist_ok=True)
     artifacts = []
     started = time.monotonic()
@@ -99,7 +101,7 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
 
 
 class LeadQueue:
-    """One active lead per model protects cumulative checkpoint ordering."""
+    """Fair model rotation, with isolated CMC leads filling spare render slots."""
 
     def __init__(self, targets, existing, max_leads, force=False):
         self.queues = {}
@@ -111,6 +113,8 @@ class LeadQueue:
         self.blocked, self.misses = set(), {}
         self.failures, self.model_attempts = {}, dict.fromkeys(self.queues, 0)
         self.attempts = 0
+        self.retry_after = {}
+        self.cmc_parallel_limit = 3
 
     def next(self, active):
         if self.attempts >= self.max_leads * len(self.queues) * 4:
@@ -118,13 +122,16 @@ class LeadQueue:
         for _ in range(len(self.order)):
             model = self.order[0]
             self.order.rotate(-1)
-            if (model in active or self.counts[model] >= self.max_leads
+            active_count = sum(item == model if isinstance(item,str) else item[0] == model for item in active)
+            limit = self.cmc_parallel_limit if model == "cmc" else 1
+            if (active_count >= limit or self.counts[model] + active_count >= self.max_leads
                     or self.model_attempts[model] >= self.max_leads * 4):
                 continue
             while self.queues[model]:
                 target = self.queues[model].popleft()
                 cycle, hour = target["cycle"], target["hour"]
-                if (model, cycle) in self.blocked:
+                if ((model, cycle) in self.blocked or (model, cycle, hour) in active
+                        or self.retry_after.get((model,cycle),0) > time.monotonic()):
                     continue
                 if not self.force and policy.expected_keys(model, cycle, hour) <= self.existing:
                     continue
@@ -141,7 +148,7 @@ class LeadQueue:
             key = model, cycle
             self.misses[key] = self.misses.get(key, 0) + 1
             if target["hour"] == 0 or self.misses[key] >= 2:
-                self.blocked.add(key)
+                self.retry_after[key] = time.monotonic() + 600
         else:
             key = model, cycle
             self.failures[key] = self.failures.get(key, 0) + 1
@@ -153,8 +160,9 @@ class LeadQueue:
         for target in targets:
             self.queues.setdefault(target["model"], deque()).append(target)
         self.order = deque(self.queues)
-        self.blocked = {key for key in self.blocked if self.failures.get(key, 0) >= 2}
-        self.misses.clear()
+        now = time.monotonic()
+        self.retry_after = {key:deadline for key,deadline in self.retry_after.items() if deadline > now}
+        self.misses = {key:count for key,count in self.misses.items() if key in self.retry_after}
 
     def rendered(self, target, staged):
         self.existing.update(policy.key(target["model"], target["cycle"], target["hour"],
@@ -168,6 +176,8 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
     if workers not in (1, 2, 3, 4) or workers > 1 and raw_override:
         raise ValueError("Use one to four workers; a local cache override requires one")
     cleanup_models = set(queue.queues)
+    memory = available_memory()
+    queue.cmc_parallel_limit = min(workers, 3 if memory is not None and memory < 8*1024**3 else 4)
     try:
         if workers == 1 and not refresh:
             while (target := queue.next(set())) is not None:
@@ -208,7 +218,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 known = policy.expected_keys(target["model"], target["cycle"], target["hour"]) & queue.existing
                                 future = executor.submit(stage_lead, target, work, known, force, None, renderer)
                                 pending[future] = target
-                                active.add(target["model"])
+                                active.add((target["model"],target["cycle"],target["hour"]))
                                 if started:
                                     started(target, len(pending))
                             if not pending:
@@ -219,7 +229,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                             completed, _ = wait(pending, timeout=.2, return_when=FIRST_COMPLETED)
                             for future in completed:
                                 target = pending.pop(future)
-                                active.remove(target["model"])
+                                active.remove((target["model"],target["cycle"],target["hour"]))
                                 result = future.result()
                                 queue.rendered(target, result)
                                 queue.finished(target, result["error"])
@@ -255,6 +265,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
     finally:
         # Executor shutdown has joined running renderers before staged files vanish.
         for model in cleanup_models:
-            staged = child_path(model_workspace(work, model), "staged")
-            if staged.exists():
-                shutil.rmtree(staged)
+            for name in ("staged","leads"):
+                scratch = child_path(model_workspace(work, model), name)
+                if scratch.exists():
+                    shutil.rmtree(scratch)

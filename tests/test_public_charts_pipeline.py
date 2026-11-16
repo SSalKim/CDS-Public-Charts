@@ -150,7 +150,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(choose({"runners": [{**good, **changed}]}), "ubuntu-24.04")
         self.assertEqual(choose({}), "ubuntu-24.04")
 
-    def test_aigfs_uses_operational_s3_prefix_not_legacy_graphcast(self):
+    def test_aigfs_uses_operational_nomads_prefix_not_legacy_graphcast(self):
         from unittest.mock import Mock
         client=Mock()
         client.get.side_effect=lambda url,*args,**kwargs: b"1:0:d=2026111500:PRMSL:mean sea level:anl:\n2:100:d=2026111500:TMP:surface:anl:\n" if url.endswith('.idx') else b'GRIB'
@@ -158,7 +158,7 @@ class RunnerTests(unittest.TestCase):
         with patch("public_charts.sources.decode",return_value=expected):
             result=Provider("aigfs",client).noaa("2026111500",0,{"pressure_msl"})
         self.assertIs(result["pressure_msl"],expected)
-        self.assertTrue(all("noaa-nws-graphcastgfs-pds.s3.amazonaws.com/aigfs.20261115/" in call.args[0] for call in client.get.call_args_list))
+        self.assertTrue(all("nomads.ncep.noaa.gov/pub/data/nccf/com/aigfs/prod/aigfs.20261115/" in call.args[0] for call in client.get.call_args_list))
         self.assertTrue(all("forecast_13_levels" not in call.args[0] for call in client.get.call_args_list))
 
 

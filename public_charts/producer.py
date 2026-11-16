@@ -107,13 +107,17 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
         if checkpoint_root is not None:
             extra.checkpoints = Path(checkpoint_root) / cycle / model
         selected = crop(base, "hkor")
-        total = None if not hour or done("acrain", "hkor") and done("acrain1", "hkor") else extra.total_rain(hour)
-        if policy.winter(model, cycle):
+        winter = policy.winter(model, cycle)
+        if winter:
             required = ("acptot", "acptot1", "acrain", "acrain1") if hour else ("acptot", "acptot1")
             if all(done(name, "hkor") for name in required):
                 emit("surfce", "hkor", alias_of=("acptot", "hkor"))
                 return {"complete": policy.expected_keys(model, cycle, hour) <= completed}
-            selected, _ = winter_fields(extra, base, hour, interval)
+        with extra.checkpoint_lock():
+            total = None if not hour or done("acrain", "hkor") and done("acrain1", "hkor") else extra.total_rain(hour)
+            if winter:
+                selected, _ = winter_fields(extra, base, hour, interval)
+        if winter:
             amount = interpolate(total, selected["latitude"], selected["longitude"]) if total is not None else None
             for name, components in (("acptot", ("acptot", "acptot_snow", "acptot_snowdepth")),
                                      ("acrain", ("acrain", "acrain_snow", "acrain_snowdepth"))):

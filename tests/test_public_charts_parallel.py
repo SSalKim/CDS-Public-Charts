@@ -84,6 +84,32 @@ def every_product_renderer(model, cycle, hour, root, existing, emit, **kwargs):
     return {"complete": True}
 
 
+def concurrent_cmc_renderer(model, cycle, hour, root, existing, emit, *, checkpoint_root=None, **kwargs):
+    import numpy as np
+    from public_charts.extended_sources import ExtraFields
+
+    work = Path(checkpoint_root).parents[1]
+    marker = Path(root) / "fields" / f"{hour}.txt"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    (work / f"cmc-started-{hour}").touch()
+    deadline = time.monotonic() + 30
+    while len(list(work.glob("cmc-started-*"))) < 3:
+        if time.monotonic() > deadline:
+            raise TimeoutError("CMC leads did not start concurrently")
+        time.sleep(.02)
+    extra = ExtraFields(root, model, cycle)
+    extra.checkpoints = Path(checkpoint_root) / cycle / model
+    with extra.checkpoint_lock():
+        total = extra.checkpoint("sample.npz")
+        value = int(total["values"][0]) if total else 0
+        time.sleep(.1)
+        extra.save_checkpoint("sample.npz", {"values": np.array([value + hour])})
+    if not marker.exists():
+        raise RuntimeError("Another lead removed this lead's scratch files")
+    return every_product_renderer(model, cycle, hour, root, existing, emit, **kwargs)
+
+
 class QueueTests(unittest.TestCase):
     def test_model_round_robin_and_same_model_serialization(self):
         queue = LeadQueue([target("aifs", 0), target("aifs", 6), target("gfs", 0)], set(), 2)
@@ -123,8 +149,81 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(queue.next(set()), target(cycle="2026111506"))
         self.assertEqual(queue.counts["aifs"], 0)
 
+    def test_pending_cycle_backoff_survives_plan_refresh_and_expires(self):
+        targets = [target(), target(hour=6), target(cycle="2026111506")]
+        with patch("public_charts.parallel.time.monotonic", return_value=100) as clock:
+            queue = LeadQueue(targets, set(), 10)
+            queue.finished(queue.next(set()), {"type": "NotReady", "pending": True})
+            clock.return_value = 220
+            queue.refresh(targets)
+            self.assertEqual(queue.next(set()), target(cycle="2026111506"))
+            self.assertIsNone(queue.next(set()))
+            clock.return_value = 701
+            queue.refresh(targets)
+            self.assertEqual(queue.next(set()), target())
+
+    def test_cmc_uses_spare_slots_without_repeating_active_leads_after_refresh(self):
+        targets = [target("cmc", h) for h in (72, 75, 78, 81)]
+        queue = LeadQueue(targets, set(), 10)
+        active = set()
+        for expected in targets[:3]:
+            queue.refresh(targets)
+            self.assertEqual(queue.next(active), expected)
+            active.add(("cmc", CYCLE, expected["hour"]))
+        self.assertIsNone(queue.next(active))
+        active.remove(("cmc", CYCLE, 72))
+        queue.finished(targets[0], None)
+        queue.refresh(targets)
+        queue.existing.update(policy.expected_keys("cmc", CYCLE, 72))
+        self.assertEqual(queue.next(active), targets[3])
+
+    def test_parallel_cmc_respects_total_quota_and_other_model_rotation(self):
+        queue = LeadQueue([target("cmc", h) for h in (72, 75, 78)] + [target("gfs")], set(), 2)
+        self.assertEqual(queue.next(set()), target("cmc", 72))
+        active = {("cmc", CYCLE, 72)}
+        self.assertEqual(queue.next(active), target("gfs"))
+        active.add(("gfs", CYCLE, 0))
+        self.assertEqual(queue.next(active), target("cmc", 75))
+        active.add(("cmc", CYCLE, 75))
+        self.assertIsNone(queue.next(active))
+
 
 class StagingTests(unittest.TestCase):
+    def test_cmc_backlog_fills_three_slots_and_preserves_shared_checkpoints(self):
+        from public_charts.extended_sources import ExtraFields
+        with tempfile.TemporaryDirectory() as directory:
+            work, received, starts = Path(directory), [], []
+            pending = [target(model) for model in ("aifs", "gfs", "aigfs")]
+            queue = LeadQueue(pending + [target("cmc", h) for h in (72, 75, 78)], set(), 10)
+            for item in pending:
+                queue.finished(item, {"type": "NotReady", "pending": True})
+
+            def consume(item, staged):
+                self.assertIsNone(staged["error"])
+                self.assertEqual(item["model"], "cmc")
+                self.assertTrue(all(Path(row["path"]).exists() for row in staged["artifacts"]))
+                received.append(staged["pid"])
+
+            with patch("public_charts.parallel.available_memory", return_value=6*1024**3):
+                execute_leads(queue, work, 4, consume, renderer=concurrent_cmc_renderer,
+                              started=lambda item, active: starts.append(active))
+            self.assertEqual(starts, [1, 2, 3])
+            self.assertEqual(len(set(received)), 3)
+            extra = ExtraFields(work, "cmc", CYCLE)
+            extra.checkpoints = work / "raw-cache/checkpoints" / CYCLE / "cmc"
+            self.assertEqual(extra.checkpoint("sample.npz")["values"].tolist(), [225])
+            self.assertFalse((work / "render-workers/cmc/leads").exists())
+
+    def test_checkpoint_lock_releases_after_error(self):
+        from public_charts.extended_sources import ExtraFields
+        with tempfile.TemporaryDirectory() as directory:
+            extra = ExtraFields(directory, "cmc", CYCLE)
+            with self.assertRaisesRegex(RuntimeError, "test"):
+                with extra.checkpoint_lock():
+                    raise RuntimeError("test")
+            with extra.checkpoint_lock():
+                self.assertTrue((extra.checkpoints / ".writer.lock").exists())
+
     def test_continuous_refresh_adds_new_lead_without_repeating_prepared_lead(self):
         with tempfile.TemporaryDirectory() as directory:
             hours, refreshed = [], []
