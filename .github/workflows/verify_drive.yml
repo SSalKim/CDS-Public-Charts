@@ -25,4 +25,33 @@ jobs:
           python-version: '3.12.15'
       - run: python -m pip install requests==2.32.4
       - name: Verify account and folder without modifying Drive
-        run: python public_charts_run.py --check-drive
+        run: |
+          python - <<'PY'
+          from collections import Counter
+          from datetime import datetime, timezone
+          import json
+          from pathlib import Path
+          from public_charts_drive import ChartDriveStore, DRIVE_API
+
+          store = ChartDriveStore.from_environment()
+          quota = store._json(store._request("GET", f"{DRIVE_API}/about",
+                              params={"fields": "storageQuota"}))["storageQuota"]
+          inventory = store.inventory()
+          images = [item for item in inventory if item["appProperties"].get("kind") == "image"]
+          manifest = json.loads(Path("data/public_charts_manifest.json").read_text())
+          rows = {row["file_id"]: row for row in manifest["charts"]}
+          referenced = set(rows)
+          counts, sizes = Counter(), Counter()
+          for item in images:
+              model = item["appProperties"].get("key", "").split("/")[0]
+              counts[model] += 1
+              sizes[model] += int(item["size"])
+          print(json.dumps({"read_only": True, "observed_utc": datetime.now(timezone.utc).isoformat(),
+              "account_storage_quota": quota, "managed_images": len(images),
+              "managed_image_bytes": sum(int(item["size"]) for item in images),
+              "managed_metadata_bytes": sum(int(item.get("size", 0)) for item in inventory if item not in images),
+              "image_counts_by_model": counts, "image_bytes_by_model": sizes,
+              "manifest_generated_at": manifest["generated_at"], "manifest_unique_files": len(rows),
+              "manifest_bytes": sum(int(row["size"]) for row in rows.values()),
+              "images_not_in_manifest_snapshot": sum(item["id"] not in referenced for item in images)}))
+          PY
