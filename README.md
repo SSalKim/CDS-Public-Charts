@@ -19,14 +19,28 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   Only the coordinator uploads to Drive, updates manifests, publishes Git commits,
   and plans cleanup. Each completed lead is published immediately after upload
   verification; it does not wait for the rest of the batch.
-- Set the optional repository variable `PUBLIC_CHARTS_WORKERS=1` to fall back to
-  sequential rendering (default: `2`). No Cloudflare Worker changes are needed.
+- Rendering defaults to `auto`: up to four processes, limited by effective CPU
+  and available memory (including WSL/container limits). Set
+  `PUBLIC_CHARTS_WORKERS=1` to restore sequential rendering.
 - A bounded renderer scheduler keeps working while the coordinator uploads.
   `PUBLIC_CHARTS_UPLOAD_WORKERS` controls independent image-upload sessions
   (default `3`; `1` restores sequential uploads). Only the coordinator changes
   state, manifests, aliases, budget reservations, cleanup plans, and Git.
   Small images use one multipart upload; MD5/size, ownership and public-reader
   verification remain mandatory. Larger images retain resumable uploads.
+- Automatic dispatches keep processing for a 20-minute dispatch budget instead
+  of stopping after two leads per model. `PUBLIC_CHARTS_TIME_BUDGET_MINUTES`
+  changes that budget (maximum 30). Plans refresh every two minutes so a newly
+  available cycle can enter the queue. A fully idle queue exits early, and
+  in-flight work is drained and published after the dispatch deadline.
+- The dedicated laptop label is `cds-public-charts`. Routing checks both this
+  repository and the original CDS runner status. A busy VTG runner causes
+  GitHub-hosted routing. On the shared laptop, chart production also holds a
+  host lock and yields to a newly started VTG worker after current renders.
+  The original VTG automation takes the same lock before rendering.
+- `run_minutes` is an optional manual validation input; explicit cycle/hour
+  batches still use their lead limit unless a positive budget is supplied.
+  No Cloudflare Worker changes are required for these defaults.
 - The renderer and model schedules are unchanged. Completed products are reused;
   no existing Drive images need to be copied or regenerated for the migration.
 

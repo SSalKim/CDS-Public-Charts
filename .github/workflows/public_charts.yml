@@ -31,6 +31,10 @@ on:
         description: Explicitly rerender published charts
         type: boolean
         default: false
+      run_minutes:
+        description: Continuous dispatch budget, 0 uses normal defaults; no force
+        type: number
+        default: 0
 
 permissions:
   contents: write
@@ -79,8 +83,10 @@ jobs:
       START_CYCLE_INPUT: ${{ vars.PUBLIC_CHARTS_START_CYCLE }}
       HOURS_INPUT: ${{ inputs.hours }}
       LIMIT_INPUT: ${{ inputs.max_leads || 2 }}
-      WORKERS_INPUT: ${{ vars.PUBLIC_CHARTS_WORKERS || 2 }}
+      WORKERS_INPUT: ${{ vars.PUBLIC_CHARTS_WORKERS || 'auto' }}
       UPLOAD_WORKERS_INPUT: ${{ vars.PUBLIC_CHARTS_UPLOAD_WORKERS || 3 }}
+      TIME_BUDGET_INPUT: ${{ vars.PUBLIC_CHARTS_TIME_BUDGET_MINUTES || 20 }}
+      MINUTES_INPUT: ${{ inputs.run_minutes || 0 }}
       FORCE_INPUT: ${{ inputs.force }}
     steps:
       - uses: actions/checkout@v4
@@ -154,6 +160,11 @@ jobs:
           if [ -n "$HOURS_INPUT" ]; then
             read -ra hours <<< "${HOURS_INPUT//,/ }"
             args+=(--hours "${hours[@]}")
+          fi
+          if [ -n "$MINUTES_INPUT" ] && [ "$MINUTES_INPUT" != '0' ]; then
+            args+=(--time-budget-minutes "$MINUTES_INPUT")
+          elif [ -z "$CYCLE_INPUT" ] && [ -z "$HOURS_INPUT" ] && [ "$FORCE_INPUT" != 'true' ]; then
+            args+=(--time-budget-minutes "$TIME_BUDGET_INPUT")
           fi
           if [ "$FORCE_INPUT" = 'true' ]; then args+=(--force); fi
           python public_charts_run.py "${args[@]}"

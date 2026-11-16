@@ -148,22 +148,38 @@ class LeadQueue:
             if self.failures[key] >= 2:
                 self.blocked.add(key)
 
+    def refresh(self, targets):
+        self.queues = {}
+        for target in targets:
+            self.queues.setdefault(target["model"], deque()).append(target)
+        self.order = deque(self.queues)
+        self.blocked = {key for key in self.blocked if self.failures.get(key, 0) >= 2}
+        self.misses.clear()
+
+    def rendered(self, target, staged):
+        self.existing.update(policy.key(target["model"], target["cycle"], target["hour"],
+                                        item["product"], item["domain"]) for item in staged["artifacts"])
+
 
 def execute_leads(queue, work, workers, consume, *, force=False, raw_override=None,
-                  renderer=None, started=None):
+                  renderer=None, started=None, refresh=None, refresh_seconds=120,
+                  can_schedule=None, idle_seconds=120):
     """consume runs only on the main process, including after renderer failures."""
-    if workers not in (1, 2) or workers > 1 and raw_override:
-        raise ValueError("Use one or two workers; a local cache override requires one")
+    if workers not in (1, 2, 3, 4) or workers > 1 and raw_override:
+        raise ValueError("Use one to four workers; a local cache override requires one")
+    cleanup_models = set(queue.queues)
     try:
-        if workers == 1:
+        if workers == 1 and not refresh:
             while (target := queue.next(set())) is not None:
+                if can_schedule and not can_schedule():
+                    break
                 if started:
                     started(target, 1)
                 result = stage_lead(target, work, queue.existing, force, raw_override, renderer)
                 consume(target, result)
                 queue.finished(target, result["error"])
             return
-        queue.existing = frozenset(queue.existing)
+        queue.existing = set(queue.existing)
         ready, stop = Queue(maxsize=workers), Event()
 
         def deliver(value):
@@ -179,9 +195,16 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                 with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
                                          initializer=initialize_renderer) as executor:
                     pending, active = {}, set()
+                    next_refresh = time.monotonic() + refresh_seconds
+                    last_progress = time.monotonic()
                     try:
                         while not stop.is_set():
-                            while len(pending) < workers and (target := queue.next(active)) is not None:
+                            scheduling = can_schedule is None or can_schedule()
+                            if refresh and scheduling and time.monotonic() >= next_refresh:
+                                queue.refresh(refresh())
+                                cleanup_models.update(queue.queues)
+                                next_refresh = time.monotonic() + refresh_seconds
+                            while scheduling and (can_schedule is None or can_schedule()) and len(pending) < workers and (target := queue.next(active)) is not None:
                                 known = policy.expected_keys(target["model"], target["cycle"], target["hour"]) & queue.existing
                                 future = executor.submit(stage_lead, target, work, known, force, None, renderer)
                                 pending[future] = target
@@ -189,13 +212,19 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 if started:
                                     started(target, len(pending))
                             if not pending:
-                                break
+                                if not refresh or not scheduling or time.monotonic() - last_progress >= idle_seconds:
+                                    break
+                                stop.wait(.2)
+                                continue
                             completed, _ = wait(pending, timeout=.2, return_when=FIRST_COMPLETED)
                             for future in completed:
                                 target = pending.pop(future)
                                 active.remove(target["model"])
                                 result = future.result()
+                                queue.rendered(target, result)
                                 queue.finished(target, result["error"])
+                                if result["artifacts"]:
+                                    last_progress = time.monotonic()
                                 deliver(("lead", target, result))
                     finally:
                         for future in pending:
@@ -225,7 +254,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
             scheduler.join()
     finally:
         # Executor shutdown has joined running renderers before staged files vanish.
-        for model in queue.queues:
+        for model in cleanup_models:
             staged = child_path(model_workspace(work, model), "staged")
             if staged.exists():
                 shutil.rmtree(staged)

@@ -5,11 +5,19 @@ import os
 from urllib.request import Request, urlopen
 
 
-def choose(payload):
+def choose(payload, vtg_payload=None):
+    if vtg_payload is not None:
+        for runner in vtg_payload.get("runners", []):
+            labels = {str(label.get("name", "")).lower() for label in runner.get("labels", [])}
+            if runner.get("busy") and "cds-vtg" in labels:
+                return "ubuntu-24.04"
     for runner in payload.get("runners", []):
         labels = {str(label.get("name", "")).lower() for label in runner.get("labels", [])}
-        if runner.get("status") == "online" and not runner.get("busy", True) and "cds-vtg" in labels and "linux" in labels:
-            return ["self-hosted", "linux", "cds-vtg"]
+        if runner.get("status") == "online" and not runner.get("busy", True) and "linux" in labels:
+            if "cds-public-charts" in labels:
+                return ["self-hosted", "linux", "cds-public-charts"]
+            if "cds-vtg" in labels:
+                return ["self-hosted", "linux", "cds-vtg"]
     return "ubuntu-24.04"
 
 
@@ -23,11 +31,13 @@ def main():
         token = os.environ.get("GH_TOKEN", "")
         if repository and token:
             try:
-                request = Request(f"https://api.github.com/repos/{repository}/actions/runners?per_page=100",
-                                  headers={"Authorization": "Bearer " + token,
-                                           "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
-                with urlopen(request, timeout=20) as response:
-                    result = choose(json.load(response))
+                def runners(repo):
+                    request = Request(f"https://api.github.com/repos/{repo}/actions/runners?per_page=100",
+                                      headers={"Authorization": "Bearer " + token,
+                                               "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+                    with urlopen(request, timeout=20) as response:
+                        return json.load(response)
+                result = choose(runners(repository), runners("SSalKim/CDS"))
             except Exception:
                 print("Runner status unavailable; using GitHub-hosted.")
     print("Selected runner:", json.dumps(result))

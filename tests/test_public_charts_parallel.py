@@ -69,6 +69,21 @@ def ahead_renderer(model, cycle, hour, root, existing, emit, **kwargs):
     return result
 
 
+def every_product_renderer(model, cycle, hour, root, existing, emit, **kwargs):
+    from public_charts.producer import encode
+    path = Path(root) / "images/sample.webp"
+    image = Image.new("RGB", (32, 32), "white")
+    for x in range(16):
+        for y in range(32):
+            image.putpixel((x, y), (0, 0, 0))
+    encode(image, path)
+    for key in sorted(policy.expected_keys(model, cycle, hour) - existing):
+        product, domain = key.split("/")[-2:]
+        emit(product, domain, path)
+    path.unlink()
+    return {"complete": True}
+
+
 class QueueTests(unittest.TestCase):
     def test_model_round_robin_and_same_model_serialization(self):
         queue = LeadQueue([target("aifs", 0), target("aifs", 6), target("gfs", 0)], set(), 2)
@@ -110,6 +125,28 @@ class QueueTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    def test_continuous_refresh_adds_new_lead_without_repeating_prepared_lead(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hours, refreshed = [], []
+
+            def refresh():
+                refreshed.append(True)
+                return [target(), target(hour=6)]
+
+            execute_leads(LeadQueue([target()], set(), 10), directory, 4,
+                          lambda item, staged: hours.append(item["hour"]), renderer=every_product_renderer,
+                          refresh=refresh, refresh_seconds=.1, idle_seconds=.2)
+            self.assertEqual(hours, [0, 6])
+            self.assertTrue(refreshed)
+
+    def test_stop_condition_drains_started_work_without_submitting_more(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stop, hours = threading.Event(), []
+            execute_leads(LeadQueue([target(hour=h) for h in (0, 6, 12, 18)], set(), 10), directory, 4,
+                          lambda item, staged: hours.append(item["hour"]), renderer=every_product_renderer,
+                          started=lambda item, active: stop.set(), can_schedule=lambda: not stop.is_set())
+            self.assertEqual(hours, [0])
+
     def test_next_lead_renders_while_coordinator_uploads_previous_lead(self):
         with tempfile.TemporaryDirectory() as directory:
             work, parent, hours = Path(directory), threading.get_ident(), []
