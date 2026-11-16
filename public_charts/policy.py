@@ -8,6 +8,7 @@ from .chart_style import ASIA_LAYOUT_CUTOVER
 RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 5}
 CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 12}
 SOURCE_CHECK_DELAY = timedelta(hours=3)
+ZERO_ACRAIN_CUTOVER = "2026111612"
 MODEL_START_CYCLE = {"ecmwf": "2026111606"}
 TITLES = {"aifs": "ECMWF AIFS-Single (N320)", "gfs": "NCEP GFS (C768 L127)",
           "aigfs": "NCEP AIGFS (0.25\u00b0)", "cmc": "CMC GDPS (GEM 0.135\u02da L84)",
@@ -66,6 +67,10 @@ def winter(model, cycle):
     return model != "aigfs" and int(cycle[4:6]) in (10, 11, 12, 1, 2, 3, 4)
 
 
+def supports_acrain(cycle, hour):
+    return hour > 0 or cycle >= ZERO_ACRAIN_CUTOVER
+
+
 def key(model, cycle, hour, product, domain):
     value = f"{model}/{cycle}/{hour:03}/{product}/{domain}"
     if not KEY_PATTERN.fullmatch(value) or hour not in hours(model):
@@ -81,10 +86,10 @@ def expected_keys(model, cycle, hour):
     keys = {key(model, cycle, hour, product, domain)
             for product in products(cycle) for domain in ("asia", "hkor")}
     keys.add(key(model, cycle, hour, "surfce", "asia"))
-    # Korea's rain-only aliases share one physical file. +000h is MSLP only.
+    # Korea's rain-only aliases share one physical file.
     for product in ("surfce", "acptot", "acptot1"):
         keys.add(key(model, cycle, hour, product, "hkor"))
-    if hour:
+    if supports_acrain(cycle, hour):
         for product in ("acrain", "acrain1"):
             keys.add(key(model, cycle, hour, product, "hkor"))
     return keys

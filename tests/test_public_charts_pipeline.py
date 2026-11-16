@@ -67,6 +67,20 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(policy.winter("gfs", "2026101500"))
         self.assertFalse(policy.winter("aigfs", "2026111500"))
 
+    def test_zero_total_accumulation_starts_at_twelve_utc_cutover(self):
+        for model in policy.RETENTION:
+            before, after = (("2026111606", "2026111618") if model == "ecmwf" else
+                             ("2026111600", "2026111612"))
+            for cycle, expected in ((before, False), (after, True)):
+                with self.subTest(model=model, cycle=cycle):
+                    keys = policy.expected_keys(model, cycle, 0)
+                    for product in ("acrain", "acrain1"):
+                        self.assertEqual(policy.key(model, cycle, 0, product, "hkor") in keys, expected)
+            self.assertEqual(policy.render_version(after), 3)
+        self.assertFalse(policy.supports_acrain("2026111606", 0))
+        self.assertTrue(policy.supports_acrain("2026111612", 0))
+        self.assertTrue(policy.supports_acrain("2026111600", 24))
+
     def test_exact_model_names(self):
         self.assertEqual(policy.TITLES["aifs"], "ECMWF AIFS-Single (N320)")
         self.assertEqual(policy.TITLES["cmc"], "CMC GDPS (GEM 0.135\u02da L84)")
@@ -304,9 +318,69 @@ class ProductionTests(unittest.TestCase):
         self.assertFalse(np.any(fields["snowfall_depth_diagnostic"]))
         self.assertIn("zero-length",metadata["snowfall_source"])
 
+    def test_zero_total_winter_composites_are_empty_and_use_no_accumulation_requests(self):
+        for model in ("aifs", "gfs", "cmc", "ecmwf"):
+            cycle = "2026111618" if model == "ecmwf" else "2026111612"
+            entries, sizes = [], {}
+            def winter(extra, base, hour, interval):
+                return {**base, "total_snowfall_water_equivalent": np.zeros((2, 2)),
+                        "total_snowfall_depth_diagnostic": np.zeros((2, 2))}, {}
+            def publish(product, domain, path, alias_of=None):
+                entries.append((product, domain, alias_of))
+                if path and product.startswith("acrain"):
+                    with Image.open(path) as frame:
+                        sizes[product] = frame.size
+            with self.subTest(model=model), \
+                    patch.object(producer, "collect", return_value=(self.base, {}, {})), \
+                    patch.object(producer, "winter_fields", side_effect=winter), \
+                    patch.object(ExtraFields, "total_rain", side_effect=AssertionError("No accumulation at zero")), \
+                    patch.object(producer, "render", side_effect=self.picture) as render:
+                result = producer.produce_lead(model, cycle, 0, self.root, set(), publish)
+            self.assertTrue(result["complete"])
+            self.assertEqual(len(entries), 20)
+            self.assertEqual(sizes, {"acrain": (1750, 660), "acrain1": (600, 2000)})
+            calls = [call for call in render.call_args_list if call.args[3].startswith("acrain")]
+            self.assertEqual([call.args[3] for call in calls], ["acrain", "acrain_snow", "acrain_snowdepth"])
+            self.assertFalse(np.any(calls[0].args[6]))
+            self.assertFalse(np.any(calls[1].args[0]["total_snowfall_water_equivalent"]))
+            self.assertFalse(np.any(calls[2].args[0]["total_snowfall_depth_diagnostic"]))
+            self.assertTrue(all(call.kwargs["precipitation_hours"] == 0 for call in calls))
+
+    def test_zero_total_rain_only_and_summer_keep_single_frame_alias(self):
+        for model, cycle in (("aigfs", "2026111612"), ("gfs", "2027070100")):
+            entries = []
+            with self.subTest(model=model, cycle=cycle), \
+                    patch.object(producer, "collect", return_value=(self.base, {}, {})), \
+                    patch.object(producer, "winter_fields", side_effect=AssertionError("Not a winter composite")), \
+                    patch.object(ExtraFields, "total_rain", side_effect=AssertionError("No accumulation at zero")), \
+                    patch.object(producer, "render", side_effect=self.picture) as render:
+                result = producer.produce_lead(model, cycle, 0, self.root, set(),
+                    lambda product, domain, path, alias_of=None: entries.append((product, domain, alias_of)))
+            self.assertTrue(result["complete"])
+            self.assertIn(("acrain1", "hkor", ("acrain", "hkor")), entries)
+            calls = [call for call in render.call_args_list if call.args[3] == "acrain"]
+            self.assertEqual(len(calls), 1)
+            self.assertFalse(np.any(calls[0].args[6]))
+
+    def test_zero_total_backfill_does_not_redraw_published_products(self):
+        cycle = "2026111612"
+        existing = {key for key in policy.expected_keys("aifs", cycle, 0) if "/acrain" not in key}
+        entries = []
+        with patch.object(producer, "collect", return_value=(self.base, {}, {})), \
+                patch.object(producer, "winter_fields", side_effect=lambda extra,base,hour,interval:(base,{})), \
+                patch.object(ExtraFields, "total_rain", side_effect=AssertionError("No accumulation at zero")), \
+                patch.object(producer, "render", side_effect=self.picture) as render:
+            result = producer.produce_lead("aifs", cycle, 0, self.root, existing,
+                lambda product, domain, path, alias_of=None: entries.append(product))
+        self.assertTrue(result["complete"])
+        self.assertEqual(entries, ["acrain", "acrain1"])
+        self.assertEqual([call.args[3] for call in render.call_args_list],
+                         ["acrain", "acrain_snow", "acrain_snowdepth"])
+
     def test_zero_precipitation_title_uses_the_standard_empty_window(self):
         from public_charts.chart_titles import product_title
-        for product in ("surfce","acptot","acptot_snow","acptot_snowdepth"):
+        for product in ("surfce","acptot","acptot_snow","acptot_snowdepth",
+                        "acrain","acrain_snow","acrain_snowdepth"):
             self.assertTrue(product_title(product,"hkor",0,0).endswith("[000-000]"))
 
     def test_pending_rain_does_not_suppress_upper_and_streamline_charts(self):
