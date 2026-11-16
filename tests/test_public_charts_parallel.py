@@ -44,7 +44,7 @@ def sample_renderer(model, cycle, hour, root, existing, emit, *, force=False, ch
 
 
 def synchronized_renderer(model, cycle, hour, root, existing, emit, **kwargs):
-    work = Path(root).parents[2]
+    work = Path(kwargs["checkpoint_root"]).parents[1]
     if model == "gfs":
         (work / "gfs-started").touch()
         waiting = work / "first-published"
@@ -65,7 +65,7 @@ def synchronized_renderer(model, cycle, hour, root, existing, emit, **kwargs):
 def ahead_renderer(model, cycle, hour, root, existing, emit, **kwargs):
     result = sample_renderer(model, cycle, hour, root, existing, emit, **kwargs)
     if hour == 6:
-        (Path(root).parents[2] / "next-rendered").touch()
+        (Path(kwargs["checkpoint_root"]).parents[1] / "next-rendered").touch()
     return result
 
 
@@ -112,7 +112,69 @@ def concurrent_cmc_renderer(model, cycle, hour, root, existing, emit, *, checkpo
     return every_product_renderer(model, cycle, hour, root, existing, emit, **kwargs)
 
 
+def streaming_renderer(model, cycle, hour, root, existing, emit, **kwargs):
+    work = Path(kwargs["checkpoint_root"]).parents[1]
+    result = sample_renderer(model, cycle, hour, root, existing, emit, **kwargs)
+    deadline = time.monotonic() + 30
+    while not (work / "image-public").exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError("Completed image waited for the whole lead")
+        time.sleep(.02)
+    (work / "lead-finished").touch()
+    return result
+
+
+def lookahead_prepare(item, work):
+    work = Path(work)
+    if item["hour"] == 6:
+        deadline = time.monotonic() + 30
+        while not (work / "current-rendering").exists():
+            if time.monotonic() > deadline:
+                raise TimeoutError("Rendering did not overlap lookahead")
+            time.sleep(.02)
+        (work / "next-inputs-ready").touch()
+    return {"error": None, "inputs": {"seconds": .1}}
+
+
+def lookahead_renderer(model, cycle, hour, root, existing, emit, **kwargs):
+    work = Path(kwargs["checkpoint_root"]).parents[1]
+    if hour == 0:
+        (work / "current-rendering").touch()
+        deadline = time.monotonic() + 30
+        while not (work / "next-inputs-ready").exists():
+            if time.monotonic() > deadline:
+                raise TimeoutError("Next input was not prefetched while rendering")
+            time.sleep(.02)
+    return every_product_renderer(model, cycle, hour, root, existing, emit, **kwargs)
+
+
 class QueueTests(unittest.TestCase):
+    def test_unseen_cycle_has_one_readiness_probe_instead_of_filling_every_slot(self):
+        queue = LeadQueue([target("gfs", h) for h in (0, 3, 6)] + [target("cmc")], set(), 10)
+        queue.model_parallel_limit = 4
+        queue.readiness_gate = True
+        self.assertEqual(queue.next(set(), preparing=True), target("gfs", 0))
+        self.assertEqual(queue.next({("gfs", CYCLE, 0)}, preparing=True), target("cmc"))
+        self.assertIsNone(queue.next({("gfs", CYCLE, 0), ("cmc", CYCLE, 0)}, preparing=True))
+        queue.refresh([target("gfs", h) for h in (0, 3, 6)])
+        queue.ready_cycles.add(("gfs", CYCLE))
+        self.assertEqual(queue.next({("gfs", CYCLE, 0)}, preparing=True), target("gfs", 3))
+
+    def test_same_model_can_borrow_all_idle_worker_slots(self):
+        queue = LeadQueue([target("gfs", h) for h in (0, 3, 6, 9, 12)], set(), 10)
+        queue.model_parallel_limit = 4
+        active = set()
+        for hour in (0, 3, 6, 9):
+            self.assertEqual(queue.next(active), target("gfs", hour))
+            active.add(("gfs", CYCLE, hour))
+        self.assertIsNone(queue.next(active))
+
+    def test_late_surface_input_does_not_block_the_next_upper_air_lead(self):
+        queue = LeadQueue([target("gfs", 24), target("gfs", 27)], set(), 10)
+        queue.finished(target("gfs", 24), {"type": "NotReady", "pending": True, "phase": "surface"})
+        self.assertEqual(queue.next(set()), target("gfs", 27))
+        self.assertEqual(queue.counts["gfs"], 0)
+
     def test_model_round_robin_and_same_model_serialization(self):
         queue = LeadQueue([target("aifs", 0), target("aifs", 6), target("gfs", 0)], set(), 2)
         self.assertEqual(queue.next(set()), target("aifs", 0))
@@ -191,6 +253,45 @@ class QueueTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    def test_image_is_delivered_before_its_renderer_finishes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work, partials, finals = Path(directory), [], []
+            def consume(item, staged):
+                if staged.get("partial"):
+                    if not partials:
+                        self.assertFalse((work / "lead-finished").exists())
+                    self.assertTrue(Path(staged["artifacts"][0]["path"]).is_file())
+                    partials.extend(staged["artifacts"])
+                    (work / "image-public").touch()
+                else:
+                    self.assertIsNone(staged["error"])
+                    finals.append(staged)
+            execute_leads(LeadQueue([target()], set(), 1), work, 1, consume,
+                          renderer=streaming_renderer, streaming=True)
+            self.assertEqual(len(partials), 2)
+            self.assertEqual(len(finals), 1)
+            self.assertEqual(finals[0]["artifacts"], [])
+
+    def test_next_lead_is_prefetched_while_current_lead_is_rendered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            received = []
+            execute_leads(LeadQueue([target(hour=h) for h in (0, 6)], set(), 2), directory, 2,
+                          lambda item, staged: received.append((item["hour"], staged["error"])),
+                          renderer=lookahead_renderer, prefetch=True, prefetcher=lookahead_prepare)
+            self.assertEqual(sorted(received), [(0, None), (6, None)])
+
+    def test_gfs_leads_use_isolated_raw_caches_and_one_locked_prefix(self):
+        from public_charts.extended_sources import ExtraFields
+        with tempfile.TemporaryDirectory() as directory:
+            work, received = Path(directory), []
+            (work / "expected-renderers").write_text("2")
+            execute_leads(LeadQueue([target("gfs", h) for h in (3, 6)], set(), 10), work, 2,
+                          lambda item, staged: received.append(staged["error"]), renderer=concurrent_cmc_renderer)
+            self.assertEqual(received, [None, None])
+            extra = ExtraFields(work, "gfs", CYCLE)
+            extra.checkpoints = work / "raw-cache/checkpoints" / CYCLE / "gfs"
+            self.assertEqual(extra.checkpoint("sample.npz")["values"].tolist(), [9])
+
     def test_cmc_backlog_fills_three_slots_and_preserves_shared_checkpoints(self):
         from public_charts.extended_sources import ExtraFields
         with tempfile.TemporaryDirectory() as directory:
@@ -251,7 +352,7 @@ class StagingTests(unittest.TestCase):
             execute_leads(LeadQueue([target()], set(), 10), directory, 4,
                           lambda item, staged: hours.append(item["hour"]), renderer=every_product_renderer,
                           refresh=refresh, refresh_seconds=.1, idle_seconds=.2)
-            self.assertEqual(hours, [0, 6])
+            self.assertEqual(sorted(hours), [0, 6])
             self.assertTrue(refreshed)
 
     def test_stop_condition_drains_started_work_without_submitting_more(self):
@@ -278,7 +379,7 @@ class StagingTests(unittest.TestCase):
 
             execute_leads(LeadQueue([target(), target(hour=6)], set(), 2), work, 2, consume,
                           renderer=ahead_renderer)
-            self.assertEqual(hours, [0, 6])
+            self.assertEqual(sorted(hours), [0, 6])
 
     def test_validated_image_survives_producer_deletion_and_checkpoint_is_shared(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -377,6 +478,30 @@ class FakeStore:
 
 
 class CoordinatorTests(unittest.TestCase):
+    def test_first_verified_image_is_public_while_its_lead_is_still_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            args=argparse.Namespace(models=["aifs"],cycle=CYCLE,hours=[0],start_cycle=None,dry_run=False,
+                                    workdir=root/"work",local=False,max_leads=1,force=False,workers=1,
+                                    cache_root=None,max_bytes=1_000_000,manifest=root/"manifest.json",
+                                    publish_incremental=True,fail_fast=True)
+            store, published=FakeStore(),[]
+            def execute(*positional,**kwargs):
+                return execute_leads(*positional,**kwargs,renderer=streaming_renderer)
+            def publish(_):
+                value=json.loads(args.manifest.read_text())
+                if not published:
+                    self.assertFalse((args.workdir/"lead-finished").exists())
+                    self.assertGreater(len(value["charts"]),0)
+                    (args.workdir/"image-public").touch()
+                published.append(value)
+            with patch("public_charts_run.execute_leads",side_effect=execute), \
+                 patch("public_charts_run.verify_public_url"), \
+                 patch("public_charts_run.publish_manifest",side_effect=publish):
+                self.assertEqual(run(args,store),0)
+            self.assertTrue((args.workdir/"lead-finished").exists())
+            self.assertEqual(len(published[-1]["charts"]),2)
+
     def test_publishes_each_lead_and_preserves_aliases_without_worker_drive_access(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -400,7 +525,9 @@ class CoordinatorTests(unittest.TestCase):
                  patch("public_charts_run.verify_public_url") as verify, \
                  patch("public_charts_run.publish_manifest", side_effect=publish):
                 self.assertEqual(run(args, store), 0)
-            self.assertEqual(published, [2, 4, 4])
+            self.assertGreaterEqual(len(published), 2)
+            self.assertIn(published[0], (1, 2))
+            self.assertEqual(published[-1], 4)
             self.assertEqual(len(store.uploads), 2)
             self.assertEqual(verify.call_count, 2)
             self.assertEqual(len({row["file_id"] for row in store.data["state.json"]["rows"]}), 2)

@@ -1,6 +1,8 @@
 """Bounded image IO; reservations and publication callbacks stay on the caller."""
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from collections import deque
 from threading import local
+import time
 
 
 class UploadBudgetExceeded(OverflowError):
@@ -71,3 +73,61 @@ class UploadPool:
     def close(self):
         if self.executor:
             self.executor.shutdown(wait=True, cancel_futures=True)
+
+
+class StreamingUploads:
+    """One coordinator feeds all leads into the same bounded upload pool."""
+
+    def __init__(self, pool, reserve, release, record):
+        self.pool, self.reserve, self.release, self.record = pool, reserve, release, record
+        self.waiting, self.pending = deque(), {}
+        self.failure = None
+
+    def enqueue(self, items):
+        self.waiting.extend(items)
+
+    def __bool__(self):
+        return bool(self.waiting or self.pending)
+
+    def upload(self, item):
+        started = time.monotonic()
+        return self.pool.upload(item), round(time.monotonic() - started, 3)
+
+    def poll(self, *, block=False):
+        if self.failure:
+            self.waiting.clear()
+        while self.waiting and len(self.pending) < self.pool.workers and self.failure is None:
+            item = self.waiting[0]
+            try:
+                self.reserve(item)
+            except Exception as exception:
+                self.failure = exception
+                self.waiting.clear()
+                break
+            self.waiting.popleft()
+            if self.pool.executor is None:
+                try:
+                    info, seconds = self.upload(item)
+                    self.record({**item, "upload_seconds": seconds}, info)
+                except Exception as exception:
+                    self.failure = exception
+                finally:
+                    self.release(item)
+                break
+            self.pending[self.pool.executor.submit(self.upload, item)] = item
+        if self.pending:
+            done, _ = wait(self.pending, timeout=.2 if block else 0, return_when=FIRST_COMPLETED)
+            for future in done:
+                item = self.pending.pop(future)
+                self.release(item)
+                try:
+                    info, seconds = future.result()
+                    self.record({**item, "upload_seconds": seconds}, info)
+                except Exception as exception:
+                    self.failure = self.failure or exception
+        if self.failure and not self.pending:
+            raise self.failure
+
+    def drain(self):
+        while self:
+            self.poll(block=True)

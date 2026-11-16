@@ -52,6 +52,15 @@ class ResourceTests(unittest.TestCase):
         self.assertFalse(sampler.thread.is_alive())
         self.assertIn("peak_process_tree_rss_mib", values)
 
+    @patch("public_charts.resources.windows_available_memory", return_value=4*1024**3)
+    @patch("public_charts.resources.available_memory", return_value=9*1024**3)
+    def test_sampler_keeps_windows_physical_headroom_separate_from_wsl_allowance(self, *_):
+        sampler=ResourceSampler()
+        sampler.sample()
+        values=sampler.finish()
+        self.assertEqual(values["lowest_windows_available_memory_mib"],4096.)
+        self.assertEqual(values["lowest_available_memory_mib"],9216.)
+
 
 if __name__ == "__main__":
     unittest.main()
