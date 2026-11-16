@@ -58,6 +58,7 @@ class FakeDriveClient:
         self.metadata_overrides = {}
         self.omit_v3_etag = False
         self.v2_metadata_overrides = {}
+        self.generated_ids = 0
         self.add(FOLDER, b"", mime=charts.FOLDER_MIME, tagged=False, parents=[self.root_id])
         self.request = Mock(side_effect=self.dispatch)
 
@@ -98,6 +99,11 @@ class FakeDriveClient:
             return Response({"user": {"emailAddress": self.email}})
         if url == charts.DRIVE_API + "/files/root":
             return Response({"id": self.root_id})
+        if url == charts.DRIVE_API + "/files/generateIds":
+            count=params.get("count",1)
+            ids=["uploaded_generated_"+str(i) for i in range(self.generated_ids,self.generated_ids+count)]
+            self.generated_ids+=count
+            return Response({"ids":ids})
         if url == charts.DRIVE_API + "/files":
             if self.list_pages is not None:
                 return Response(self.list_pages.pop(0))
@@ -136,7 +142,9 @@ class FakeDriveClient:
             metadata = json.loads(parts[0].get_payload(decode=True))
             content = parts[1].get_payload(decode=True)
             if method == "POST":
-                file_id = ("uploaded_" if metadata["appProperties"]["kind"] == "image" else "json_") + str(len(self.files))
+                file_id = metadata.get("id") or (("uploaded_" if metadata["appProperties"]["kind"] == "image" else "json_") + str(len(self.files)))
+                if file_id in self.files:
+                    return Response(status=409)
                 self.add(file_id, content, mime=metadata["mimeType"], name=metadata["name"],
                          key=metadata["name"], appProperties=metadata["appProperties"],
                          parents=metadata["parents"])
@@ -167,6 +175,130 @@ class FakeDriveClient:
 
 
 class PublicChartDriveTests(unittest.TestCase):
+    def test_explicit_chart_timeout_keeps_shared_client_default_unchanged(self):
+        client=object.__new__(charts.DriveClient)
+        client.token_is_stale=lambda:False
+        client.session=Mock()
+        client.session.request.return_value.status_code=200
+        client.request("GET","https://example.invalid")
+        self.assertEqual(client.session.request.call_args.kwargs["timeout"],120)
+        client.request("GET","https://example.invalid",timeout=(15,45))
+        self.assertEqual(client.session.request.call_args.kwargs["timeout"],(15,45))
+
+    def test_idempotent_upload_retries_are_bounded_and_fail_closed(self):
+        from requests.exceptions import ReadTimeout
+        attempts=[]
+        def request(method,url,**kwargs):
+            if method=="POST" and kwargs.get("params",{}).get("uploadType")=="multipart":
+                attempts.append(kwargs["data"])
+                raise ReadTimeout("private-refresh-token")
+            return self.client.dispatch(method,url,**kwargs)
+        self.client.request.side_effect=request
+        with patch.object(charts.time,"sleep"), self.assertRaises(charts.ChartDriveError) as caught:
+            self.store.upload_image(self.path,KEY)
+        self.assertEqual(len(attempts),3)
+        self.assertTrue(all(value==attempts[0] for value in attempts))
+        self.assertEqual(len(self.client.files),1)
+        self.assertNotIn("private-refresh-token",str(caught.exception))
+
+    def test_multipart_timeout_before_commit_retries_the_same_preallocated_id(self):
+        from requests.exceptions import ReadTimeout
+        attempts=[]
+        def request(method,url,**kwargs):
+            if method=="POST" and kwargs.get("params",{}).get("uploadType")=="multipart":
+                attempts.append(kwargs["data"])
+                if len(attempts)==1:
+                    raise ReadTimeout("private-refresh-token")
+            return self.client.dispatch(method,url,**kwargs)
+        self.client.request.side_effect=request
+        with patch.object(charts.time,"sleep"):
+            result=self.store.upload_image(self.path,KEY)
+        self.assertEqual(len(attempts),2)
+        self.assertEqual(attempts[0],attempts[1])
+        self.assertEqual(len(self.client.files),2)
+        self.assertIn(result["file_id"],self.client.files)
+
+    def test_lost_success_response_retries_without_duplicate_files(self):
+        from requests.exceptions import ReadTimeout
+        attempts=[]
+        def request(method,url,**kwargs):
+            response=self.client.dispatch(method,url,**kwargs)
+            if method=="POST" and kwargs.get("params",{}).get("uploadType")=="multipart":
+                attempts.append(response.status_code)
+                if len(attempts)==1:
+                    raise ReadTimeout("private-refresh-token")
+            return response
+        self.client.request.side_effect=request
+        with patch.object(charts.time,"sleep"):
+            result=self.store.upload_image(self.path,KEY)
+        self.assertEqual(attempts,[200,409])
+        self.assertEqual(len(self.client.files),2)
+        self.assertTrue(self.client.permissions[result["file_id"]])
+
+    def test_multipart_server_error_is_retried_but_permission_error_is_not(self):
+        for status,expected in ((503,2),(403,1)):
+            with self.subTest(status=status):
+                client=FakeDriveClient()
+                store=charts.ChartDriveStore(client,FOLDER,EMAIL)
+                attempts=[]
+                def request(method,url,**kwargs):
+                    if method=="POST" and kwargs.get("params",{}).get("uploadType")=="multipart":
+                        attempts.append(1)
+                        if len(attempts)==1:
+                            return Response(status=status)
+                    return client.dispatch(method,url,**kwargs)
+                client.request.side_effect=request
+                with patch.object(charts.time,"sleep"):
+                    if status==403:
+                        with self.assertRaises(charts.ChartDriveError):
+                            store.upload_image(self.path,KEY)
+                    else:
+                        store.upload_image(self.path,KEY)
+                self.assertEqual(len(attempts),expected)
+
+    def test_permission_response_timeout_is_reconciled_before_repeating_post(self):
+        from requests.exceptions import ReadTimeout
+        attempts=[]
+        def request(method,url,**kwargs):
+            response=self.client.dispatch(method,url,**kwargs)
+            if method=="POST" and url.endswith("/permissions"):
+                attempts.append(1)
+                if len(attempts)==1:
+                    raise ReadTimeout("private-refresh-token")
+            return response
+        self.client.request.side_effect=request
+        with patch.object(charts.time,"sleep"):
+            result=self.store.upload_image(self.path,KEY)
+        self.assertEqual(len(attempts),1)
+        self.assertEqual(len(self.client.permissions[result["file_id"]]),1)
+
+    def test_preallocated_id_conflict_cannot_bypass_content_verification(self):
+        self.client.add("uploaded_generated_0",b"foreign-content")
+        with self.assertRaisesRegex(charts.ChartDriveError,"integrity"):
+            self.store.upload_image(self.path,KEY)
+        self.assertEqual(self.client.permissions["uploaded_generated_0"],[])
+
+    def test_preallocated_ids_are_batched_across_new_images(self):
+        self.store.upload_image(self.path,KEY)
+        self.store.upload_image(self.path,KEY.replace("gph500","gph700"))
+        calls=[call for call in self.client.request.call_args_list if call.args[1].endswith("/generateIds")]
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0].kwargs["params"]["count"],32)
+
+    def test_transient_metadata_read_is_retried_without_exposing_error_body(self):
+        from requests.exceptions import ReadTimeout
+        count=[]
+        def request(method,url,**kwargs):
+            if url.endswith("/about"):
+                count.append(1)
+                if len(count)==1:
+                    raise ReadTimeout("private-refresh-token")
+            return self.client.dispatch(method,url,**kwargs)
+        self.client.request.side_effect=request
+        with patch.object(charts.time,"sleep"):
+            self.store.verify_account_and_folder()
+        self.assertEqual(len(count),2)
+
     def setUp(self):
         self.client = FakeDriveClient()
         self.store = charts.ChartDriveStore(self.client, FOLDER, EMAIL)

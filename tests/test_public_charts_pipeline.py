@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import numpy as np
 from PIL import Image
@@ -15,7 +15,7 @@ from public_charts import producer
 from public_charts.extended_sources import ExtraFields, winter_fields
 from public_charts.sources import Decoded, NotReady
 from public_charts_runner import choose
-from public_charts_run import (current_render_keys, finalize_cleanup, manifest_bytes, plan_cleanup, recover_rows, resolve_plan)
+from public_charts_run import (current_render_keys, finalize_cleanup, manifest_bytes, plan_cleanup, recover_rows, resolve_plan, verify_public_url)
 from public_charts_runtime import prune_checkpoints
 from public_charts.sources import Provider
 
@@ -27,6 +27,29 @@ def row(model="aifs", cycle="2026111500", hour=24, product="gph500", domain="asi
 
 
 class PolicyTests(unittest.TestCase):
+    def test_anonymous_url_retries_short_public_permission_propagation(self):
+        import requests
+        denied=MagicMock()
+        denied.__enter__.return_value=denied
+        denied.status_code=403
+        denied.raise_for_status.side_effect=requests.HTTPError(response=denied)
+        ready=MagicMock()
+        ready.__enter__.return_value=ready
+        ready.iter_content.return_value=iter([b"RIFF0000WEBP0000"])
+        with patch("requests.get",side_effect=[denied,ready]) as fetch, patch("public_charts_run.time.sleep"):
+            verify_public_url("https://example.invalid/image.webp")
+        self.assertEqual(fetch.call_count,2)
+        self.assertNotIn("Authorization",fetch.call_args.kwargs["headers"])
+
+    def test_anonymous_non_image_is_never_accepted_after_retries(self):
+        response=MagicMock()
+        response.__enter__.return_value=response
+        response.iter_content.side_effect=lambda **kwargs:iter([b"<html>not image"])
+        with patch("requests.get",return_value=response) as fetch, patch("public_charts_run.time.sleep"), \
+             self.assertRaisesRegex(ValueError,"WebP"):
+            verify_public_url("https://example.invalid/image.webp")
+        self.assertEqual(fetch.call_count,3)
+
     def test_zero_and_native_timeline(self):
         for model in policy.RETENTION:
             timeline = policy.hours(model)
@@ -216,11 +239,13 @@ class ProductionTests(unittest.TestCase):
         entries = []
         with patch.object(producer, "collect", return_value=(self.base, {}, {})), \
                 patch.object(producer,"winter_fields",side_effect=lambda extra,base,hour,interval:(base,{})), \
+                patch.object(producer.gc, "collect") as collect_figures, \
                 patch.object(producer, "render", side_effect=self.picture) as render:
             result = producer.produce_lead("aifs", "2026111500", 0, self.root, set(),
                                           lambda product, domain, path, alias_of=None: entries.append((product, domain, path, alias_of)))
         self.assertTrue(result["complete"])
         self.assertEqual(render.call_count, 18)
+        self.assertEqual(collect_figures.call_count, render.call_count)
         self.assertEqual(len(entries), 18)
         self.assertFalse(any(item[0].startswith("acrain") for item in entries))
         self.assertFalse(any(call.kwargs["pressure_only"] for call in render.call_args_list))
