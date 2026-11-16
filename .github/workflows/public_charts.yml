@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   probe:
-    runs-on: [self-hosted, linux, cds-public-charts]
+    runs-on: [self-hosted, linux]
     timeout-minutes: 3
     steps:
       - name: Read Linux and Windows memory without changing settings
@@ -48,4 +48,28 @@ jobs:
               print(result.stdout.strip() if result.returncode==0 else json.dumps({'windows_probe_exit':result.returncode}))
           else:
               print(json.dumps({'windows_probe':'interop unavailable'}))
+          PY
+      - name: Inspect existing runner launchers
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          home = Path.home()
+          print(json.dumps({'distro': os.environ.get('WSL_DISTRO_NAME'), 'linux_user': home.name}))
+          roots = [home / 'actions-runner-cds-public-charts', home / 'actions-runner/cds-vtg/actions-runner']
+          for root in roots:
+              print(json.dumps({'root': str(root), 'run_sh': (root / 'run.sh').exists(),
+                                'launchers': [p.name for p in root.glob('start*.sh')]}))
+              launcher = root / 'start-charts.sh'
+              if launcher.exists():
+                  allowed = []
+                  for line in launcher.read_text().splitlines():
+                      if line.startswith(('export PATH=', 'export LD_LIBRARY_PATH=', 'export CDS_', 'cd ', 'exec ', 'set ', '#!')):
+                          allowed.append(line)
+                  print(json.dumps({'launcher': str(launcher), 'allowed_lines': allowed}))
+          workers = subprocess.run(['pgrep', '-x', 'Runner.Worker'], capture_output=True, text=True)
+          print(json.dumps({'active_worker_count_including_this_probe': len(workers.stdout.splitlines())}))
           PY
