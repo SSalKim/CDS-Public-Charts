@@ -1,7 +1,12 @@
 name: Generate public model charts
-run-name: Read-only laptop memory probe
+run-name: Laptop WSL memory ${{ inputs.action || 'inventory' }}
 on:
   workflow_dispatch:
+    inputs:
+      action:
+        type: choice
+        default: inventory
+        options: [inventory, apply, verify]
 permissions:
   contents: read
 concurrency:
@@ -12,6 +17,10 @@ jobs:
     runs-on: [self-hosted, linux]
     timeout-minutes: 3
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
       - name: Read Linux and Windows memory without changing settings
         shell: bash
         run: |
@@ -72,4 +81,49 @@ jobs:
                   print(json.dumps({'launcher': str(launcher), 'allowed_lines': allowed}))
           workers = subprocess.run(['pgrep', '-x', 'Runner.Worker'], capture_output=True, text=True)
           print(json.dumps({'active_worker_count_including_this_probe': len(workers.stdout.splitlines())}))
+          PY
+      - name: Apply approved 10GB cap and schedule an idle-only restart
+        if: inputs.action == 'apply'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          workers = subprocess.run(['pgrep', '-x', 'Runner.Worker'], capture_output=True, text=True)
+          if len(workers.stdout.splitlines()) != 1:
+              raise RuntimeError('Another runner job is active; leave WSL unchanged')
+          script = Path('ops/wsl-memory-apply.ps1').resolve()
+          windows_script = subprocess.check_output(['wslpath', '-w', str(script)], text=True).strip()
+          subprocess.run(['/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe',
+                          '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                          '-File', windows_script, '-Distro', os.environ['WSL_DISTRO_NAME'],
+                          '-LinuxUser', Path.home().name], check=True, timeout=60)
+          PY
+      - uses: actions/checkout@v4
+        if: inputs.action == 'verify'
+        with:
+          ref: main
+          path: live-production
+          persist-credentials: false
+      - name: Verify the effective memory and listener processes
+        if: inputs.action == 'verify'
+        working-directory: live-production
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          mem = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
+          total = int(mem['MemTotal'].split()[0]) * 1024
+          if not 9 * 1024**3 <= total <= 10.5 * 1024**3:
+              raise RuntimeError('Expected an effective 10GB WSL cap')
+          for root in [Path.home() / 'actions-runner-cds-public-charts', Path.home() / 'actions-runner/cds-vtg/actions-runner']:
+              subprocess.run(['pgrep', '-f', '^' + str(root / 'bin/Runner.Listener')], check=True)
+          from public_charts.resources import available_memory, worker_count, cmc_worker_count
+          free = available_memory()
+          workers = worker_count()
+          print(json.dumps({'memory_total_gib':round(total/1024**3,2), 'available_memory_gib':round(free/1024**3,2),
+                            'workers': workers, 'cmc_workers': cmc_worker_count(workers)}))
           PY
