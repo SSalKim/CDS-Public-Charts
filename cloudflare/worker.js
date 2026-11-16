@@ -2,7 +2,10 @@ const GITHUB_API = "https://api.github.com";
 const OWNER = "SSalKim";
 const REF = "main";
 const USER_AGENT = "cds-cloudflare-scheduler";
+const SCHEDULER_VERSION = "20261116-orphan87-v1";
 const ACTIVE_STATUSES = ["in_progress", "queued", "waiting", "pending", "requested"];
+// Verified empty benchmark record; GitHub rejects both cancel APIs for this run.
+const EMPTY_QUEUED_CHART_RUN_IDS = new Set(["43883299059"]);
 const RETIRED_TARGETS = new Set(["gdm", "gdm-check", "dmdw"]);
 const TARGETS = {
   vtg: { repo: "CDS", workflow: "vtg.yml" },
@@ -61,12 +64,14 @@ export function createDispatcher(fetcher = fetch) {
     if (target === "charts") {
       // Filter server-side so long-queued runs cannot hide behind completed runs.
       for (const status of ACTIVE_STATUSES) {
-        const check = await githubRequest(`${base}/runs?branch=${REF}&status=${status}&per_page=1`, env.GITHUB_TOKEN);
+        const pageSize = status === "queued" ? EMPTY_QUEUED_CHART_RUN_IDS.size + 1 : 1;
+        const check = await githubRequest(`${base}/runs?branch=${REF}&status=${status}&per_page=${pageSize}`, env.GITHUB_TOKEN);
         if (!check.ok || !Array.isArray(check.data?.workflow_runs)) {
           return { ok: false, target, skipped: true, status: check.status,
             reason: "Workflow status unavailable; dispatch skipped" };
         }
-        const active = check.data.workflow_runs[0];
+        const active = check.data.workflow_runs.find(run =>
+          status !== "queued" || !EMPTY_QUEUED_CHART_RUN_IDS.has(String(run.id)));
         if (active) {
           return { ok: true, target, skipped: true, run_id: active.id, run_status: active.status,
             reason: "Chart production is already active" };
@@ -85,7 +90,7 @@ export function createDispatcher(fetcher = fetch) {
       return Response.json({ ok: false, target, skipped: true, reason: "Target retired" }, { status: 410 });
     }
     if (!target && request.method === "GET") {
-      return Response.json({ ok: true, service: USER_AGENT, crons: CRONS,
+      return Response.json({ ok: true, service: USER_AGENT, version: SCHEDULER_VERSION, crons: CRONS,
         allowedTargets: ["vtg", "cds", "charts", "both", "all"] });
     }
     const targets = target === "all" || target === "both" ? ["vtg", "charts"]

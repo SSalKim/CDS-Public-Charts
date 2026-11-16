@@ -36,6 +36,15 @@ See [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configu
   GitHub rejects the JSON number with HTTP 422. The batch limit is still two.
 - Public charts are skipped if any run is in progress, queued, waiting, pending
   or requested. Each status is filtered server-side, avoiding history truncation.
+- One verified empty benchmark record, run `43883299059` (#87), is ignored only
+  while its reported status is `queued`: it has no jobs or artifacts, and GitHub
+  rejects cancellation, force cancellation and deletion. Other queued runs still
+  block dispatch, including a real run behind that record. If #87 actually starts,
+  it also blocks dispatch normally. Remove this explicit exception after GitHub
+  repairs the orphan record. Deploy the updated Worker JavaScript to apply it;
+  no Cron Trigger, token or repository setting changes are needed.
+  The read-only `GET /` health response reports version `20261116-orphan87-v1`
+  for this replacement, allowing deployment verification without a dispatch.
 - A failed or invalid status lookup prevents a dispatch. GET requests retry
   once on transport/server failures; dispatch POSTs are never retried because
   an ambiguous timeout may already have started a run.

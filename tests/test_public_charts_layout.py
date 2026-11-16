@@ -106,6 +106,29 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(source_note_alpha("2026111606", PUBLIC_PROFILE), .65)
         self.assertEqual(source_note_alpha("2026111606"), .9)
 
+    def test_asia_model_names_share_the_existing_gfs_baseline_and_right_edge(self):
+        from public_charts.policy import TITLES
+        fig = plt.figure(figsize=(10, 7.282), dpi=160)
+        try:
+            def draw(name, reference=None):
+                model = fig.text(.945, .975, name, size=11.5, family="DejaVu Serif",
+                                 weight="bold", ha="right", va="bottom", color="blue")
+                model.set_gid("model-title")
+                fit_heading(fig, model, .945, width_scale=.96, baseline_reference=reference)
+                return fig.artists[-1]
+            reference = TITLES["gfs"]
+            old_gfs = draw(reference)
+            baseline = old_gfs.get_transform().transform((0, 0))[1]
+            for name in TITLES.values():
+                with self.subTest(name=name):
+                    aligned = draw(name, reference)
+                    self.assertAlmostEqual(aligned.get_transform().transform((0, 0))[1], baseline)
+                    self.assertAlmostEqual(aligned.get_window_extent().x1, old_gfs.get_window_extent().x1)
+            np.testing.assert_allclose(draw(reference, reference).get_transform().get_matrix(),
+                                       old_gfs.get_transform().get_matrix())
+        finally:
+            plt.close(fig)
+
     def test_interval_snow_panel_has_integer_maximum_annotation(self):
         latitude, longitude = np.linspace(29, 45, 161), np.linspace(115, 138, 231)
         x, y = np.meshgrid(longitude, latitude)

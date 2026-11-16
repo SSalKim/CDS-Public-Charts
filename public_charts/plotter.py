@@ -146,19 +146,21 @@ def tracked_title(text, properties, tracking):
     return MplPath.make_compound_path(*paths)
 
 
-def fit_heading(figure,heading,right,tracking=0,width_scale=1.):
+def fit_heading(figure,heading,right,tracking=0,width_scale=1.,baseline_reference=None):
     """Tighten requested tracking, then condense only if the right boundary requires it."""
     box=heading.get_window_extent(figure.canvas.get_renderer())
     available=right*figure.bbox.width-box.x0
-    if box.width<=available and not tracking and width_scale == 1.:
+    if box.width<=available and not tracking and width_scale == 1. and baseline_reference is None:
         return 1.
     glyphs=(tracked_title(heading.get_text(),heading.get_fontproperties(),tracking) if tracking
             else TextPath((0,0),heading.get_text(),prop=heading.get_fontproperties()))
     bounds=glyphs.get_extents()
+    baseline_bounds=(TextPath((0,0),baseline_reference,prop=heading.get_fontproperties()).get_extents()
+                     if baseline_reference is not None else bounds)
     factor=figure.dpi/72
     scale=min(width_scale,available/(bounds.width*factor))
     left=box.x1-bounds.width*factor*scale if heading.get_ha()=="right" else box.x0
-    transform=Affine2D().scale(factor*scale,factor).translate(left-bounds.x0*factor*scale,box.y0-bounds.y0*factor)
+    transform=Affine2D().scale(factor*scale,factor).translate(left-bounds.x0*factor*scale,box.y0-baseline_bounds.y0*factor)
     patch=PathPatch(glyphs,transform=transform,color=heading.get_color(),linewidth=0,
                     gid="compressed-model-title" if heading.get_gid()=="model-title" else "compressed-product-title",clip_on=False)
     figure.add_artist(patch)
@@ -833,7 +835,8 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
         if public:
             model_box=model_text.get_window_extent(figure.canvas.get_renderer())
             if typography["width_scale"] < 1.:
-                fit_heading(figure,model_text,pos.x1,width_scale=typography["width_scale"])
+                fit_heading(figure,model_text,pos.x1,width_scale=typography["width_scale"],
+                            baseline_reference="NCEP GFS (C768 L127)")
                 model_box=figure.artists[-1].get_window_extent(figure.canvas.get_renderer())
             right=pos.x1 if korea else model_box.x0/figure.bbox.width-.005
             title_scale=fit_heading(figure,heading,right,tracking=typography["tracking"],width_scale=typography["width_scale"])

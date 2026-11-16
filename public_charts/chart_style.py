@@ -1,5 +1,5 @@
 """Lightweight rendering contract, shared with the image cache."""
-STYLE_VERSION = 15
+STYLE_VERSION = 16
 PUBLIC_PROFILE = "cds-public-v6"
 ASIA_LAYOUT_CUTOVER = "2026111606"
 KOREA_LAYOUT_CUTOVER = "2026111606"

@@ -54,6 +54,30 @@ for (const code of [401, 403, 404, 429, 500, 503]) {
   });
 }
 
+test("only the verified empty queued benchmark record is ignored", async () => {
+  const { dispatcher, calls } = fixture(url => new URL(url).searchParams.get("status") === "queued"
+    ? Response.json({ workflow_runs: [{ id: 43883299059, status: "queued" }] }) : null);
+  assert.equal((await dispatcher.runTarget("charts", env)).skipped, false);
+  assert(calls.some(call => call.method === "POST"));
+});
+
+test("a real queued run behind the empty record still prevents dispatch", async () => {
+  const { dispatcher, calls } = fixture(url => new URL(url).searchParams.get("status") === "queued"
+    ? Response.json({ workflow_runs: [{ id: 43883299059 }, { id: 43 }] }) : null);
+  const result = await dispatcher.runTarget("charts", env);
+  assert.equal(result.skipped, true);
+  assert.equal(result.run_id, 43);
+  assert(!calls.some(call => call.method === "POST"));
+  assert.equal(new URL(calls.at(-1).url).searchParams.get("per_page"), "2");
+});
+
+test("the same benchmark ID is not ignored if it actually starts", async () => {
+  const { dispatcher, calls } = fixture(url => new URL(url).searchParams.get("status") === "in_progress"
+    ? Response.json({ workflow_runs: [{ id: 43883299059, status: "in_progress" }] }) : null);
+  assert.equal((await dispatcher.runTarget("charts", env)).skipped, true);
+  assert(!calls.some(call => call.method === "POST"));
+});
+
 test("malformed JSON and transport errors never trigger charts", async () => {
   for (const failure of [() => new Response("not json"), () => Response.json({}),
     () => { throw new Error("private transport detail"); }]) {
@@ -161,7 +185,9 @@ test("scheduled transport errors never expose raw exceptions", async () => {
 
 test("health endpoint and retired manual URLs never call GitHub", async () => {
   const { dispatcher, calls } = fixture();
-  assert.equal((await dispatcher.fetch(new Request("https://worker.example/"), env)).status, 200);
+  const health = await dispatcher.fetch(new Request("https://worker.example/"), env);
+  assert.equal(health.status, 200);
+  assert.equal((await health.json()).version, "20261116-orphan87-v1");
   for (const target of ["gdm", "gdm-check", "dmdw"]) {
     assert.equal((await dispatcher.fetch(new Request(`https://worker.example/?target=${target}`), env)).status, 410);
   }
