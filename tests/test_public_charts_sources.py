@@ -76,6 +76,31 @@ class FileSizeTests(unittest.TestCase):
                          {"Range": "bytes=100-119", "Accept-Encoding": "identity"})
 
 
+class CanadaPathTests(unittest.TestCase):
+    def test_previous_and_current_runs_use_their_own_date_directory(self):
+        for cycle in ("2026111512", "2026111600"):
+            with self.subTest(cycle=cycle):
+                client = Mock()
+                client.get.return_value = b"GRIB"
+                with patch("public_charts.sources.decode", return_value="decoded"):
+                    result = Provider("cmc", client).fetch(cycle, 42, {"geopotential_200"})
+                self.assertEqual(result, {"geopotential_200": "decoded"})
+                url = client.get.call_args.args[0]
+                self.assertEqual(url, f"https://dd.weather.gc.ca/{cycle[:8]}/WXO-DD/model_gdps/15km/{cycle[8:]}/042/"
+                                 f"{cycle[:8]}T{cycle[8:]}Z_MSC_GDPS_GeopotentialHeight_IsbL-0200_LatLon0.15_PT042H.grib2")
+                self.assertNotIn("/today/", url)
+
+    def test_total_rain_fallback_stays_in_the_requested_run_date(self):
+        client = Mock()
+        client.get.side_effect = [NotReady("No standalone three-hour rain"), b"GRIB"]
+        with patch("public_charts.sources.decode", return_value="decoded"):
+            Provider("cmc", client).fetch("2026111512", 120, {"precipitation"})
+        first, second = [call.args[0] for call in client.get.call_args_list]
+        self.assertIn("Precip-Accum3h_Sfc", first)
+        self.assertIn("Precip-Accum_Sfc", second)
+        self.assertTrue(all("/20261115/WXO-DD/model_gdps/15km/12/120/" in url for url in (first, second)))
+
+
 class PackingTests(unittest.TestCase):
     @staticmethod
     def field(values, end, error=None):

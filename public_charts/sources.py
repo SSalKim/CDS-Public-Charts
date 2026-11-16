@@ -408,7 +408,7 @@ class Provider:
         geml = self.model == "geml"
         model, resolution = ("GDPS-GEML", "0.25") if geml else ("GDPS", "0.15")
         root = "model_gdps-geml/25km" if geml else "model_gdps/15km"
-        base = f"https://dd.weather.gc.ca/today/{root}/{cycle[8:]}/{hour:03}/"
+        base = f"https://dd.weather.gc.ca/{cycle[:8]}/WXO-DD/{root}/{cycle[8:]}/{hour:03}/"
         variables = {"geopotential": "Geopotential" if geml else "GeopotentialHeight",
                      "temperature": "AirTemp", "specific_humidity": "SpecificHumidity",
                      "wind_u": "WindU", "wind_v": "WindV"}
