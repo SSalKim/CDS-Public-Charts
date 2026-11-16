@@ -136,6 +136,11 @@ def lookahead_prepare(item, work):
     return {"error": None, "inputs": {"seconds": .1}}
 
 
+def prepare_then_stop(item, work):
+    (Path(work) / "memory-guard").touch()
+    return {"error": None, "inputs": {"seconds": .1}}
+
+
 def lookahead_renderer(model, cycle, hour, root, existing, emit, **kwargs):
     work = Path(kwargs["checkpoint_root"]).parents[1]
     if hour == 0:
@@ -362,6 +367,17 @@ class StagingTests(unittest.TestCase):
                           lambda item, staged: hours.append(item["hour"]), renderer=every_product_renderer,
                           started=lambda item, active: stop.set(), can_schedule=lambda: not stop.is_set())
             self.assertEqual(hours, [0])
+
+    def test_stop_after_prefetch_does_not_start_a_memory_heavy_renderer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work, starts, received = Path(directory), [], []
+            execute_leads(LeadQueue([target()], set(), 1), work, 1,
+                          lambda *args: received.append(args), renderer=every_product_renderer,
+                          prefetch=True, prefetcher=prepare_then_stop,
+                          started=lambda *args: starts.append(args),
+                          can_schedule=lambda: not (work / "memory-guard").exists())
+            self.assertEqual(starts, [])
+            self.assertEqual(received, [])
 
     def test_next_lead_renders_while_coordinator_uploads_previous_lead(self):
         with tempfile.TemporaryDirectory() as directory:
