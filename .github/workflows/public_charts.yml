@@ -84,6 +84,7 @@ jobs:
           PY
       - name: Apply approved 10GB cap and schedule an idle-only restart
         if: inputs.action == 'apply'
+        working-directory: ${{ github.workspace }}
         shell: bash
         run: |
           python3 - <<'PY'
@@ -96,6 +97,8 @@ jobs:
           workers = subprocess.run(['pgrep', '-x', 'Runner.Worker'], capture_output=True, text=True)
           if len(workers.stdout.splitlines()) != 1:
               raise RuntimeError('Another runner job is active; leave WSL unchanged')
+          source = Path(os.environ['GITHUB_WORKSPACE']) / 'ops'
+          print(json.dumps({'cwd':str(Path.cwd()), 'source':str(source), 'source_exists':source.exists()}))
           powershell = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
           windows_temp = subprocess.check_output([powershell, '-NoProfile', '-NonInteractive', '-Command',
                           '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); Write-Output $env:TEMP'],
@@ -106,7 +109,7 @@ jobs:
           deployed = linux_temp / ('CDS-WSL-Deploy-' + uuid.uuid4().hex)
           deployed.mkdir()
           for name in ('wsl-memory-apply.ps1', 'wsl-memory-restart.ps1', 'wsl-runners-start.sh'):
-              shutil.copyfile(Path('ops') / name, deployed / name)
+              shutil.copyfile(source / name, deployed / name)
           windows_script = subprocess.check_output(['wslpath', '-w', str(deployed / 'wsl-memory-apply.ps1')], text=True).strip()
           result = subprocess.run([powershell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                           '-File', windows_script, '-Distro', os.environ['WSL_DISTRO_NAME'],
