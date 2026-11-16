@@ -1,6 +1,7 @@
 """Lightweight rendering contract, shared with the image cache."""
-STYLE_VERSION = 12
+STYLE_VERSION = 13
 PUBLIC_PROFILE = "cds-public-v6"
+ASIA_LAYOUT_CUTOVER = "2026111606"
 PUBLIC_IMAGE_SIZES = {"asia": (910, 660), "hkor": (640, 730)}
 PUBLIC_MAP_AXES = {"hkor": (.004, .052, .926, .896)}
 
@@ -35,6 +36,30 @@ MAPS = {
              "xlim": (-600000, 570000), "ylim": (-730000, 560000),
              "axes": (.001, .050, .944, .902)},
 }
+
+# Calibrated against the supplied KIM coastline and graticule reference.
+ASIA_KIM_MAP = {
+    "figsize": (10, 7.282), "center": (126, 38), "parallels": (30, 60),
+    "radius": 6371229,
+    "xlim": (-5637502, 3965042), "ylim": (-2919176, 3803683),
+    "axes": (.001, 41 / 660, .944, 599 / 660),
+}
+
+
+def revised_asia(domain, cycle, profile):
+    return profile == PUBLIC_PROFILE and domain == "asia" and cycle >= ASIA_LAYOUT_CUTOVER
+
+
+def map_spec(domain, cycle, profile=None):
+    return ASIA_KIM_MAP if revised_asia(domain, cycle, profile) else MAPS[domain]
+
+
+def heading_style(domain, cycle, profile=None):
+    if revised_asia(domain, cycle, profile):
+        return {"title": 12., "model": 11.5, "tracking": -.12}
+    korea = domain == "hkor"
+    scale = (1.25 if korea else 1.35) if profile == PUBLIC_PROFILE else 1
+    return {"title": (8.6 if korea else 10.1) * scale, "model": 9 * scale, "tracking": 0.}
 
 # Covers the northern Asia view as well as its curved western/eastern corners.
 GRID_BOUNDS = {"asia": (-5, 85, 20, 220), "hkor": (29, 45, 115, 138)}

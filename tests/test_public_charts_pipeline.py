@@ -77,9 +77,19 @@ class PolicyTests(unittest.TestCase):
         previous=row()
         rows={policy.row_key(previous):previous}
         self.assertEqual(current_render_keys(rows),set())
-        previous["render_version"]=policy.PIPELINE_VERSION
+        previous["render_version"]=policy.render_version(previous["cycle"])
         self.assertEqual(current_render_keys(rows),set(rows))
-        self.assertEqual(policy.public_manifest(list(rows.values()))["charts"][0]["render_version"],policy.PIPELINE_VERSION)
+        self.assertEqual(policy.public_manifest(list(rows.values()))["charts"][0]["render_version"],policy.render_version(previous["cycle"]))
+
+    def test_asia_layout_cutover_preserves_older_cycles(self):
+        rows = {}
+        for cycle in ("2026111512", "2026111518", "2026111600", "2026111606"):
+            item = row(cycle=cycle)
+            item["render_version"] = 2
+            rows[policy.row_key(item)] = item
+        self.assertEqual(len(current_render_keys(rows)), 3)
+        self.assertEqual(policy.render_version("2026111600"), 2)
+        self.assertEqual(policy.render_version("2026111606"), 3)
 
     def test_reject_invalid_model_cycle_product_or_hour(self):
         for args in (("cmc", "2026111506", 0, "surfce", "asia"),

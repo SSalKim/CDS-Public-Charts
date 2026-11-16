@@ -104,11 +104,16 @@ schedule from VTG, for example minute 03/13/23/33/43/53 UTC.
 
 ## Runner Routing
 
-`auto` uses an online, idle Linux runner labeled `cds-vtg` registered with **this
-repository**; otherwise it uses `ubuntu-24.04`. The existing CDS laptop registration
-does not automatically become available here. Until a laptop registration is
-explicitly added, the new repository uses GitHub-hosted runners. Do not start two
-runner services on one laptop without coordinating CPU use and VTG priority.
+`auto` uses the online, idle `LAPTOP-WOOJIN-CHARTS` runner labeled
+`cds-public-charts` in this repository, only when the original CDS VTG runner is
+also idle. Otherwise it uses `ubuntu-24.04`. Both registrations share a physical
+host lock. VTG waits up to three minutes for that laptop before falling back;
+CHART falls back immediately when it is busy and does not yield an active render.
+
+After a laptop/WSL restart, run `~/actions-runner-cds-public-charts/start-charts.sh`
+in a separate WSL terminal and keep it running. This is not an OS autostart
+service. Start the original VTG listener as before. Both repositories must be
+readable by `RUNNER_STATUS_TOKEN` with Administration Read permission.
 
 ## Verification
 

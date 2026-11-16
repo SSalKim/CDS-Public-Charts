@@ -42,7 +42,7 @@ def manifest_bytes(payload):
     return (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 def current_render_keys(rows):
-    return {key for key, row in rows.items() if row.get("render_version") == policy.PIPELINE_VERSION}
+    return {key for key, row in rows.items() if row.get("render_version") == policy.render_version(row["cycle"])}
 
 
 def resolve_plan(models, cycle=None, requested_hours=None, now=None, start_cycle=None):
@@ -256,7 +256,7 @@ def run(args, store=None):
                     before_ids.add(info["file_id"])
             rows[item["key"]] = {"model": model, "cycle": cycle, "hour": hour,
                                  "product": item["product"], "domain": item["domain"],
-                                 "render_version": policy.PIPELINE_VERSION,
+                                 "render_version": policy.render_version(cycle),
                                  **{key: info[key] for key in ("file_id", "url", "size", "sha256")}}
             fresh.add(item["key"])
 

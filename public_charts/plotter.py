@@ -13,9 +13,9 @@ import matplotlib.patheffects as effects
 from scipy.interpolate import RegularGridInterpolator
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from matplotlib.cm import ScalarMappable
-from matplotlib.font_manager import FontProperties
+from matplotlib.font_manager import FontProperties, findfont, get_font
 from matplotlib.path import Path as MplPath
-from matplotlib.textpath import TextPath
+from matplotlib.textpath import TextPath, TextToPath
 from matplotlib.patches import PathPatch,FancyArrowPatch
 from matplotlib.transforms import Affine2D
 from matplotlib.ticker import FixedLocator
@@ -30,7 +30,7 @@ from metpy.units import units
 from pyproj import CRS
 from scipy.ndimage import gaussian_filter, maximum_filter, minimum_filter, label, find_objects, binary_erosion
 
-from .chart_style import (MAPS, STYLE_VERSION, CENTER_MARKER_SIZE, CENTER_MARKER_WIDTH, UPPER_CENTER_COLORS, BARB_LENGTH,
+from .chart_style import (map_spec, heading_style, STYLE_VERSION, CENTER_MARKER_SIZE, CENTER_MARKER_WIDTH, UPPER_CENTER_COLORS, BARB_LENGTH,
                          ISOTACH_LEVELS, ISOTACH_COLORS, THETA_LEVELS, THETA_COLORS, barb_stride,
                          center_parameters, numeric_extrema_parameters, contour_steps, surface_steps, upper_level,
                          stream_isotach_levels,stream_shading,
@@ -131,13 +131,29 @@ def stream_direction_arrows(ax,segments,*,color="#0000ff",spacing=180):
     return arrows
 
 
-def fit_heading(figure,heading,right):
-    """Condense only glyph width when a long product title reaches its right boundary."""
+def tracked_title(text, properties, tracking):
+    """Keep glyph outlines intact while adjusting their horizontal advance in points."""
+    converter = TextToPath()
+    font = get_font(findfont(properties))
+    font.set_size(converter.FONT_SCALE, converter.DPI)
+    glyphs, shapes, _ = converter.get_glyphs_with_font(font, text)
+    scale = properties.get_size_in_points() / converter.FONT_SCALE
+    paths = []
+    for index, (name, x, y, size) in enumerate(glyphs):
+        vertices, codes = shapes[name]
+        if len(vertices):
+            paths.append(MplPath(vertices * size * scale + (x * scale + index * tracking, y * scale), codes))
+    return MplPath.make_compound_path(*paths)
+
+
+def fit_heading(figure,heading,right,tracking=0):
+    """Tighten requested tracking, then condense only if the right boundary requires it."""
     box=heading.get_window_extent(figure.canvas.get_renderer())
     available=right*figure.bbox.width-box.x0
-    if box.width<=available:
+    if box.width<=available and not tracking:
         return 1.
-    glyphs=TextPath((0,0),heading.get_text(),prop=heading.get_fontproperties())
+    glyphs=(tracked_title(heading.get_text(),heading.get_fontproperties(),tracking) if tracking
+            else TextPath((0,0),heading.get_text(),prop=heading.get_fontproperties()))
     bounds=glyphs.get_extents()
     factor=figure.dpi/72
     scale=min(1.,available/(bounds.width*factor))
@@ -275,7 +291,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
     started = time.perf_counter()
     xx, yy = np.meshgrid(arrays["longitude"], arrays["latitude"])
     plate = ccrs.PlateCarree()
-    spec = MAPS[domain]
+    spec = map_spec(domain, cycle, profile)
     korea = domain == "hkor"
     public=profile==PUBLIC_PROFILE
     font_scale=(1.25 if korea else 1.35) if public else 1
@@ -285,8 +301,9 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
     figure = None
     try:
         figure = plt.figure(figsize=spec["figsize"], dpi=160)
+        globe = ccrs.Globe(ellipse=None, semimajor_axis=spec["radius"], semiminor_axis=spec["radius"]) if "radius" in spec else None
         projection = ccrs.LambertConformal(central_longitude=spec["center"][0], central_latitude=spec["center"][1],
-                                         standard_parallels=spec["parallels"])
+                                         standard_parallels=spec["parallels"], globe=globe)
         ax = figure.add_axes(PUBLIC_MAP_AXES.get(domain,spec["axes"]) if public else spec["axes"], projection=projection)
         ax.set_xlim(*spec["xlim"])
         ax.set_ylim(*spec["ylim"])
@@ -804,14 +821,15 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                                 upper=upper_level_override or upper_level(cycle),
                                 has_omega="vertical_velocity_700" in arrays,pressure_only=pressure_only)
         title_y = pos.y1 + .005
-        heading=figure.text(pos.x0,title_y,title,size=fs(8.6 if korea else 10.1),weight="bold",family="DejaVu Serif",va="bottom")
-        model_text=figure.text(pos.x0 if korea else pos.x1,title_y+(.024 if korea and public else .020 if korea else 0),model_name,size=fs(9),
+        typography = heading_style(domain, cycle, profile)
+        heading=figure.text(pos.x0,title_y,title,size=typography["title"],weight="bold",family="DejaVu Serif",va="bottom")
+        model_text=figure.text(pos.x0 if korea else pos.x1,title_y+(.024 if korea and public else .020 if korea else 0),model_name,size=typography["model"],
                                color="#0000ff",ha="left" if korea else "right",weight="bold",family="DejaVu Serif",va="bottom")
         heading.set_gid("product-title")
         title_scale=1.
         if public:
             right=pos.x1 if korea else model_text.get_window_extent(figure.canvas.get_renderer()).x0/figure.bbox.width-.005
-            title_scale=fit_heading(figure,heading,right)
+            title_scale=fit_heading(figure,heading,right,tracking=typography["tracking"])
         init = parse_cycle(cycle)
         size = fs(7.5 if korea else 9)
         footer_blocks=draw_time_footer(figure,pos,init,hour,size,public=public,korea=korea)

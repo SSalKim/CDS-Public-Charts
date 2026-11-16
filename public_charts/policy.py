@@ -3,14 +3,19 @@ from datetime import datetime, timedelta, timezone
 import re
 
 from .dates import parse_cycle
+from .chart_style import ASIA_LAYOUT_CUTOVER
 
 RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5}
 CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12}
 TITLES = {"aifs": "ECMWF AIFS-Single (N320)", "gfs": "NCEP GFS (C768 L127)",
           "aigfs": "NCEP AIGFS (0.25\u00b0)", "cmc": "CMC GDPS (GEM 0.135\u02da L84)"}
 MAX_IMAGE_BYTES = 12_000_000_000
-PIPELINE_VERSION = 2
+PIPELINE_VERSION = 3
 KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
+
+
+def render_version(cycle):
+    return PIPELINE_VERSION if cycle >= ASIA_LAYOUT_CUTOVER else 2
 
 
 def hours(model):

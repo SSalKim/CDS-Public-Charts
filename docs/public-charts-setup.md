@@ -14,7 +14,7 @@ Cloudflare 호출 설정과 저장소별 노트북 러너 등록 주의사항은
 - +000h: surfce/acptot도 다른 시간대와 같은 제목에 `[000-000]`을 사용하고 누적량 채색은 비운다. 겨울철 한반도 acptot는 순간 고도·기온·바람·습구온도와 함께 3패널/세로 비교본을 모두 제공한다. 누적강수·강설 자료는 조회하지 않으며 acrain은 +000h에 생성하지 않는다.
 - 빠른 무손실 WebP(`lossless=True, quality=80, method=4`). 지도는 한 번만 렌더링하고 최종 프레임에서 저장한다.
 - 한반도 단일 패널은 오른쪽 6px, 위 2px, 아래 3px의 빈 여백을 줄인 634x725px이다. 지도·제목·컬러바 배치도 KIM 원본 패널에 가깝게 조정한다. 겨울철 3패널은 합성 후 가로 1750x660px / 세로 600x2000px로 맞춘다. 모델명은 KIM과 같은 `#0000ff`를 사용한다.
-- 노트북이 online/idle이고 `linux`, `cds-vtg` 라벨이 있을 때 우선 사용한다. busy/offline/조회 실패는 ubuntu-24.04로 보낸다. 선택 직후 상태가 바뀌는 경합 가능성까지 완전히 없어지는 것은 아니다.
+- 이 저장소의 `LAPTOP-WOOJIN-CHARTS`가 online/idle이고, 기존 CDS의 VTG 러너도 busy가 아니면 노트북을 우선 사용한다. busy/offline/조회 실패는 ubuntu-24.04로 보낸다. 두 등록은 같은 노트북이므로 실제 작업에서도 공유 파일 잠금을 사용한다. 선택 직후 상태가 바뀌는 경합 가능성까지 완전히 없어지는 것은 아니다.
 - AIGFS는 NOAA 공식 S3의 `aigfs.YYYYMMDD/HH/model/atmos/grib2/` 운영 파일을 우선 사용한다. 같은 버킷의 예전 GraphCastGFS 실험 경로와 혼합하지 않는다. S3 인덱스가 없을 때만 같은 cycle의 NOMADS 인덱스를 조회한다.
 - 모델별 개수 제한과 이미지 12GB 상한을 함께 적용한다. 예측 내용에 따라 상한이 먼저 걸리면 오래된 cycle이 조기 정리될 수 있다. 최신 cycle 하나도 상한을 초과하면 삭제 대신 실패한다.
 
@@ -77,7 +77,7 @@ PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL
 
 공개/비공개 목록의 각 행에는 `render_version`을 기록한다. 이전 규격의 이미지는 새 규격으로 다시 생산하기 전까지 그대로 제공하며, 현재 버전의 이미지로 교체된 뒤에만 기존 파일을 정리한다.
 
-`RUNNER_STATUS_TOKEN`은 선택적인 러너 조회용 Secret이다. 현재는 Drive 인증정보 5개만 이전했으며, 이 토큰이나 새 저장소의 노트북 등록이 없어도 GitHub-hosted로 진행한다.
+`RUNNER_STATUS_TOKEN`은 러너 조회용 Secret이며 두 저장소에 등록되어 있다. PAT에는 두 저장소의 Administration Read 권한이 필요하다. 토큰이나 노트북 연결을 사용할 수 없으면 GitHub-hosted로 진행한다.
 
 ## 저장/삭제 흐름
 
@@ -92,8 +92,25 @@ PUBLIC_CHARTS_DRIVE_ACCOUNT_EMAIL
 배치 종료 후에도 최종 공개본을 재확인하며, 기존 삭제 유예와 용량 제한은 그대로 적용한다.
 이미지 해상도·컨투어·무손실 WebP 설정은 변경하지 않는다.
 
-기본 병렬 수는 `2`이다. 메모리가 부족한 러너에서는 repository variable `PUBLIC_CHARTS_WORKERS=1`로 되돌릴 수 있다.
+기본 `PUBLIC_CHARTS_WORKERS=auto`는 CPU와 사용 가능한 메모리에 따라 최대 4개 렌더 프로세스를 사용한다. 메모리가 부족하면 시작 시 병렬 수를 줄이고, 실행 중 여유 메모리가 부족해지면 새 작업 투입을 멈춘 뒤 진행 중인 작업을 마무리한다. `PUBLIC_CHARTS_WORKERS=1`로 제한할 수도 있다.
+`PUBLIC_CHARTS_UPLOAD_WORKERS` 기본값은 3이며 독립 세션으로 이미지를 업로드한다. 목록·상태·Git 게시·삭제는 한 프로세스에서 처리한다.
+자동 실행은 기본 20분 동안 준비된 작업을 계속 투입하고, 2분마다 최신 cycle/입전을 다시 확인한다. 20분은 새 작업 투입 제한이며 이미 시작한 렌더·업로드를 마무리하므로 실제 실행은 더 길 수 있다. `PUBLIC_CHARTS_TIME_BUDGET_MINUTES`로 조정한다.
 Cloudflare 설정은 수정할 필요가 없다. `render_seconds`, `upload_seconds`, `publish_seconds`, `renderer_pid` 로그로 시간을 구분한다.
+
+### 노트북 시작과 VTG 우선순위
+
+현재 추가 러너는 연결되어 있다. 노트북/WSL 재시작 후에는 WSL의 별도 터미널에서 다음을 실행하고 창을 유지한다. Windows 자동 시작 서비스로 등록한 것은 아니다.
+
+```bash
+~/actions-runner-cds-public-charts/start-charts.sh
+```
+
+기존 VTG 러너도 원래 방식으로 실행한다. CHART는 노트북을 우선 선택하되 사용 중이면 바로 GitHub-hosted로 간다. VTG는 같은 노트북이 사용 중이면 최대 3분 동안 기다리고, 그 안에 유휴 상태가 되면 노트북을 사용한다. 3분이 지나면 GitHub-hosted로 간다. 실행 중인 CHART를 중단해 VTG에 양보하지 않는다.
+
+### 아시아 지도와 제목 전환
+
+`2026111606` 초기시각부터 아시아 지도에 KIM 참고 이미지로 보정한 Lambert 도법·영역을 적용한다. 제목 12.0pt, 파란 모델명 11.5pt이며 제목 자간은 0.12pt 줄인다. 한반도 영역은 변경하지 않는다.
+이전 초기시각은 기존 도법·글꼴·렌더 버전 2를 계속 사용한다. 공개 목록의 전체 pipeline 버전이 3이 되어도 기존 12/18/00Z 이미지를 일괄 재생산하지 않는다. 이미지 비교로 맞춘 설정이며 원래 KIM 투영 메타데이터를 직접 확인한 것은 아니다.
 
 강수 누적값을 뺄 때는 두 GRIB 필드의 `packingError`를 mm 단위로 환산해 허용 오차에 합산한다.
 저장 정밀도 안의 음수만 0으로 보정하며, 이 범위를 넘는 감소·시간 구간 불일치·격자 불일치는 계속 실패 처리한다.
