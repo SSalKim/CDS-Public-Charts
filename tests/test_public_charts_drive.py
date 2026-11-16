@@ -642,6 +642,19 @@ class PublicChartDriveTests(unittest.TestCase):
         self.assertNotIn("access-token", rendered)
         self.assertNotIn("private-refresh-token", rendered)
 
+    def test_api_error_reports_only_safe_status_and_reason(self):
+        self.client.request.side_effect = RuntimeError("HTTP 403 storageQuotaExceeded private-refresh-token")
+        with self.assertRaisesRegex(charts.ChartDriveError, "HTTP 403, storageQuotaExceeded") as error:
+            self.store.inventory()
+        self.assertNotIn("private-refresh-token", str(error.exception))
+
+    def test_timeout_error_does_not_retry_ambiguous_upload(self):
+        from requests.exceptions import ReadTimeout
+        self.client.request.side_effect = ReadTimeout("private-session private-refresh-token")
+        with self.assertRaisesRegex(charts.ChartDriveError, "unknown, timeout"):
+            self.store._request("POST", charts.DRIVE_UPLOAD_API + "/files", data=b"chart")
+        self.assertEqual(self.client.request.call_count, 1)
+
     def test_redirect_and_invalid_metadata_are_rejected(self):
         for response in (Response(status=302), Response(["not an object"])):
             self.client.request.side_effect = None

@@ -113,12 +113,25 @@ class ChartDriveStore:
 
     def _request(self, method: str, url: str, **kwargs):
         # The shared client includes response bodies in errors; never expose them.
+        response = None
         try:
             response = self._client.request(method, url, allow_redirects=False, **kwargs)
             if not 200 <= response.status_code < 300:
                 raise ValueError("Unexpected HTTP status")
-        except (Exception, SystemExit):
-            raise ChartDriveError("Google Drive request failed.") from None
+        except (Exception, SystemExit) as error:
+            details = str(error)
+            status = re.search(r"\bHTTP ([1-5][0-9]{2})\b", details)
+            code = response.status_code if response is not None else int(status.group(1)) if status else None
+            reason = next((name for name in (
+                "storageQuotaExceeded", "userRateLimitExceeded", "rateLimitExceeded",
+                "dailyLimitExceeded", "insufficientPermissions", "backendError",
+            ) if name in details), "request_error")
+            if code is None and "timeout" in type(error).__name__.lower():
+                reason = "timeout"
+            elif code is None and "connection" in type(error).__name__.lower():
+                reason = "connection"
+            operation = method.upper() if method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "API"
+            raise ChartDriveError(f"Google Drive {operation} request failed (HTTP {code or 'unknown'}, {reason}).") from None
         return response
 
     @staticmethod
