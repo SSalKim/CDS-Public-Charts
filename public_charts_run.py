@@ -339,8 +339,8 @@ def run(args, store=None):
         nonlocal stop_reason
         if stop_reason is not None:
             return False
-        if not acquired or lease.vtg_busy():
-            stop_reason = "vtg_priority"
+        if not acquired:
+            stop_reason = "shared_laptop_lock"
             return False
         if deadline is not None and time.monotonic() >= deadline:
             stop_reason = "time_budget"

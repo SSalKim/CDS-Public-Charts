@@ -38,8 +38,8 @@ def main():
                     with urlopen(request, timeout=20) as response:
                         return json.load(response)
                 result = choose(runners(repository), runners("SSalKim/CDS"))
-            except Exception:
-                print("Runner status unavailable; using GitHub-hosted.")
+            except Exception as exception:
+                print("Runner status unavailable; using GitHub-hosted.", type(exception).__name__, getattr(exception, "code", None))
     print("Selected runner:", json.dumps(result))
     output = os.environ.get("GITHUB_OUTPUT")
     if output:

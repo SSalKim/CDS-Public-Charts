@@ -75,7 +75,7 @@ class LaptopLease:
         self.handle = (directory / "owner.lock").open("a")
         try:
             fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return not self.vtg_busy()
+            return True
         except BlockingIOError:
             return False
 

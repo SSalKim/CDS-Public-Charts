@@ -36,8 +36,9 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
 - The dedicated laptop label is `cds-public-charts`. Routing checks both this
   repository and the original CDS runner status. A busy VTG runner causes
   GitHub-hosted routing. On the shared laptop, chart production also holds a
-  host lock and yields to a newly started VTG worker after current renders.
-  The original VTG automation takes the same lock before rendering.
+  host lock. VTG routing waits up to three minutes for that shared laptop, then
+  uses GitHub-hosted; it never interrupts an active chart batch.
+  The original VTG automation also takes the host lock before rendering.
 - `run_minutes` is an optional manual validation input; explicit cycle/hour
   batches still use their lead limit unless a positive budget is supplied.
   No Cloudflare Worker changes are required for these defaults.
