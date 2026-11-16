@@ -1,4 +1,6 @@
 import unittest
+from unittest.mock import patch
+import numpy as np
 
 import matplotlib
 matplotlib.use("Agg")
@@ -7,8 +9,9 @@ from matplotlib.font_manager import FontProperties
 from matplotlib.textpath import TextPath
 import cartopy.crs as ccrs
 
-from public_charts.chart_style import MAPS, ASIA_KIM_MAP, PUBLIC_PROFILE, heading_style, map_spec
+from public_charts.chart_style import MAPS, ASIA_KIM_MAP, PUBLIC_PROFILE, heading_style, map_spec, source_note_alpha
 from public_charts.plotter import tracked_title, fit_heading
+from public_charts import plotter
 
 
 class LayoutTests(unittest.TestCase):
@@ -26,7 +29,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_asia_title_and_model_sizes_are_exact_not_scaled_twice(self):
         self.assertEqual(heading_style("asia", "2026111606", PUBLIC_PROFILE),
-                         {"title": 12., "model": 11.5, "tracking": -.12})
+                         {"title": 12., "model": 11.5, "tracking": -.12, "width_scale": .96})
         self.assertAlmostEqual(heading_style("asia", "2026111600", PUBLIC_PROFILE)["title"], 13.635)
 
     def test_tracking_does_not_shrink_glyph_height(self):
@@ -62,6 +65,50 @@ class LayoutTests(unittest.TestCase):
         east, _ = projection.transform_point(81.7, 8, ccrs.PlateCarree())
         self.assertLess(west, spec["xlim"][0])
         self.assertGreater(east, spec["xlim"][0])
+
+    def test_model_compression_preserves_height_and_right_alignment(self):
+        fig = plt.figure(figsize=(10, 7.282), dpi=160)
+        try:
+            model = fig.text(.94, .98, "ECMWF AIFS-Single (N320)", size=11.5,
+                             family="DejaVu Serif", weight="bold", ha="right", va="bottom")
+            model.set_gid("model-title")
+            original = model.get_window_extent(fig.canvas.get_renderer())
+            self.assertEqual(fit_heading(fig, model, .94, width_scale=.96), .96)
+            patch = fig.artists[-1]
+            self.assertEqual(patch.get_gid(), "compressed-model-title")
+            self.assertAlmostEqual(patch.get_window_extent().x1, original.x1)
+            self.assertAlmostEqual(model.get_fontsize(), 11.5)
+        finally:
+            plt.close(fig)
+
+    def test_note_transparency_changes_only_for_new_public_cycles(self):
+        self.assertEqual(source_note_alpha("2026111600", PUBLIC_PROFILE), .9)
+        self.assertEqual(source_note_alpha("2026111606", PUBLIC_PROFILE), .65)
+        self.assertEqual(source_note_alpha("2026111606"), .9)
+
+    def test_interval_snow_panel_has_integer_maximum_annotation(self):
+        latitude, longitude = np.linspace(29, 45, 161), np.linspace(115, 138, 231)
+        x, y = np.meshgrid(longitude, latitude)
+        arrays = {"latitude": latitude, "longitude": longitude,
+                  "snowfall_water_equivalent": 4 * np.exp(-((x-127)**2+(y-38)**2)),
+                  "geopotential_925": (810+5*(y-38))*9.80665,
+                  "geopotential_850": (1500+5*(y-38))*9.80665,
+                  "geopotential_1000": (210+0*y)*9.80665,
+                  "temperature_925": 273.15+y-38, "wet_bulb_2m": 1.2+.5*(y-38),
+                  "wind_u_925": 5+0*x, "wind_v_925": 5+0*y}
+        labels = []
+        close = plt.close
+        def capture(figure):
+            if hasattr(figure, "axes"):
+                labels.extend(text.get_text() for axes in figure.axes for text in axes.texts
+                              if text.get_gid() == "precipitation-extreme")
+            close(figure)
+        with patch("cartopy.mpl.geoaxes.GeoAxes.add_feature"), \
+             patch.object(plotter, "korean_admin_boundaries", return_value=[]), \
+             patch.object(plotter.plt, "close", side_effect=capture):
+            plotter.render(arrays, "2026111606", 24, "acptot_snow", "hkor", None,
+                           profile=PUBLIC_PROFILE, return_frame=True)
+        self.assertIn("4", labels)
 
 
 if __name__ == "__main__":

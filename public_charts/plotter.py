@@ -30,7 +30,7 @@ from metpy.units import units
 from pyproj import CRS
 from scipy.ndimage import gaussian_filter, maximum_filter, minimum_filter, label, find_objects, binary_erosion
 
-from .chart_style import (map_spec, heading_style, STYLE_VERSION, CENTER_MARKER_SIZE, CENTER_MARKER_WIDTH, UPPER_CENTER_COLORS, BARB_LENGTH,
+from .chart_style import (map_spec, heading_style, source_note_alpha, STYLE_VERSION, CENTER_MARKER_SIZE, CENTER_MARKER_WIDTH, UPPER_CENTER_COLORS, BARB_LENGTH,
                          ISOTACH_LEVELS, ISOTACH_COLORS, THETA_LEVELS, THETA_COLORS, barb_stride,
                          center_parameters, numeric_extrema_parameters, contour_steps, surface_steps, upper_level,
                          stream_isotach_levels,stream_shading,
@@ -146,20 +146,21 @@ def tracked_title(text, properties, tracking):
     return MplPath.make_compound_path(*paths)
 
 
-def fit_heading(figure,heading,right,tracking=0):
+def fit_heading(figure,heading,right,tracking=0,width_scale=1.):
     """Tighten requested tracking, then condense only if the right boundary requires it."""
     box=heading.get_window_extent(figure.canvas.get_renderer())
     available=right*figure.bbox.width-box.x0
-    if box.width<=available and not tracking:
+    if box.width<=available and not tracking and width_scale == 1.:
         return 1.
     glyphs=(tracked_title(heading.get_text(),heading.get_fontproperties(),tracking) if tracking
             else TextPath((0,0),heading.get_text(),prop=heading.get_fontproperties()))
     bounds=glyphs.get_extents()
     factor=figure.dpi/72
-    scale=min(1.,available/(bounds.width*factor))
-    transform=Affine2D().scale(factor*scale,factor).translate(box.x0-bounds.x0*factor*scale,box.y0-bounds.y0*factor)
+    scale=min(width_scale,available/(bounds.width*factor))
+    left=box.x1-bounds.width*factor*scale if heading.get_ha()=="right" else box.x0
+    transform=Affine2D().scale(factor*scale,factor).translate(left-bounds.x0*factor*scale,box.y0-bounds.y0*factor)
     patch=PathPatch(glyphs,transform=transform,color=heading.get_color(),linewidth=0,
-                    gid="compressed-product-title",clip_on=False)
+                    gid="compressed-model-title" if heading.get_gid()=="model-title" else "compressed-product-title",clip_on=False)
     figure.add_artist(patch)
     heading.set_visible(False)
     return scale
@@ -622,6 +623,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                 elif product=="acptot" and "snow_expected" in arrays:
                     hatch(arrays["snow_expected"],.5,1.5,"#ff00ff",clip_to=rain_fill if public else None,gid="snow-area-hatch")
             elif product=="acptot_snow":
+                numeric_extrema(np.maximum(precip, 0), "precipitation", threshold, grid=rain_grid)
                 heights=np.arange(0,4501,30)
                 obj=contour(arrays["geopotential_925"]/9.80665,heights,"black",np.where((heights-810)%60==0,.9,.42),quality_kind=925)
                 obj.set_gid("snow-height-contours")
@@ -826,10 +828,15 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
         model_text=figure.text(pos.x0 if korea else pos.x1,title_y+(.024 if korea and public else .020 if korea else 0),model_name,size=typography["model"],
                                color="#0000ff",ha="left" if korea else "right",weight="bold",family="DejaVu Serif",va="bottom")
         heading.set_gid("product-title")
+        model_text.set_gid("model-title")
         title_scale=1.
         if public:
-            right=pos.x1 if korea else model_text.get_window_extent(figure.canvas.get_renderer()).x0/figure.bbox.width-.005
-            title_scale=fit_heading(figure,heading,right,tracking=typography["tracking"])
+            model_box=model_text.get_window_extent(figure.canvas.get_renderer())
+            if typography["width_scale"] < 1.:
+                fit_heading(figure,model_text,pos.x1,width_scale=typography["width_scale"])
+                model_box=figure.artists[-1].get_window_extent(figure.canvas.get_renderer())
+            right=pos.x1 if korea else model_box.x0/figure.bbox.width-.005
+            title_scale=fit_heading(figure,heading,right,tracking=typography["tracking"],width_scale=typography["width_scale"])
         init = parse_cycle(cycle)
         size = fs(7.5 if korea else 9)
         footer_blocks=draw_time_footer(figure,pos,init,hour,size,public=public,korea=korea)
@@ -843,10 +850,10 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             source_note="Plotted by WooJin Kim\n"+source_note.replace("Data Sourced from","Data sourced from",1)
             ax.text(.01, note_y, source_note, transform=ax.transAxes, fontsize=fs(4.7 if korea else 5.6),
                     color="#333333", ha="left", va="bottom", zorder=10, gid="source-note",
-                    bbox={"facecolor":"white", "edgecolor":"none", "alpha":.9, "pad":1})
+                    bbox={"facecolor":"white", "edgecolor":"none", "alpha":source_note_alpha(cycle,profile), "pad":1})
             ax.text(.99,note_y,"Chart style inspired by KMA",transform=ax.transAxes,fontsize=fs(4.7 if korea else 5.6),
                     color="#333333",ha="right",va="bottom",zorder=10,gid="style-inspiration-note",
-                    bbox={"facecolor":"white","edgecolor":"none","alpha":.9,"pad":1})
+                    bbox={"facecolor":"white","edgecolor":"none","alpha":source_note_alpha(cycle,profile),"pad":1})
         from PIL import Image
         figure.set_dpi(160)
         figure.canvas.draw()
