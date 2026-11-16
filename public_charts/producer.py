@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+import gc
 import time
 
 import numpy as np
@@ -128,6 +129,7 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
                       physical_barb_spacing=True, profile=PUBLIC_PROFILE, model_id=model,
                       contour_filter=closed_contour_predicate(arrays), diagnostic_snowfall=model == "gfs",
                       return_frame=True)
+        gc.collect()
         timings["plot_seconds"] += time.monotonic() - started
         return frame
 

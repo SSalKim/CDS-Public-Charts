@@ -47,14 +47,20 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   `PUBLIC_CHARTS_WORKERS=1` to restore sequential rendering.
   Total renderer caps are four at 8 GiB available, three at 6 GiB, two below that,
   and one below 3 GiB. Explicit worker requests cannot bypass these limits.
-  Renderers collect retired figure reference cycles after every lead to prevent
-  large NumPy-backed plots from lingering between tasks.
+  Renderers collect retired figure reference cycles after every image and lead
+  to prevent large NumPy-backed plots from lingering between tasks.
 - A bounded renderer scheduler keeps working while the coordinator uploads.
   `PUBLIC_CHARTS_UPLOAD_WORKERS` controls independent image-upload sessions
   (default `3`; `1` restores sequential uploads). Only the coordinator changes
   state, manifests, aliases, budget reservations, cleanup plans, and Git.
   Small images use one multipart upload; MD5/size, ownership and public-reader
   verification remain mandatory. Larger images retain resumable uploads.
+  Multipart creation uses [pre-generated Drive IDs](https://developers.google.com/workspace/drive/api/guides/manage-uploads#use_a_pre-generated_id_to_upload_files):
+  transient upload failures retry the same bytes and ID, at most three attempts,
+  without creating duplicate files after a lost response. A conflict still requires
+  the existing content, owner, folder and chart-key checks. Transient reads and
+  anonymous public-URL propagation checks also have bounded retries; persistent
+  permission, quota, integrity or network failures remain visible errors.
 - Automatic dispatches keep processing for a 20-minute dispatch budget instead
   of stopping after two leads per model. `PUBLIC_CHARTS_TIME_BUDGET_MINUTES`
   changes that budget (maximum 30). Plans refresh every 60 seconds so a newly

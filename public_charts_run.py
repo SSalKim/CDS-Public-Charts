@@ -143,11 +143,21 @@ def finalize_cleanup(store, manifest, plan, published_payload, *, grace_seconds=
 def verify_public_url(url):
     import requests
     # Do not reuse the authenticated Drive session for this check.
-    with requests.get(url, headers={"Range": "bytes=0-15"}, stream=True, timeout=(15, 45)) as response:
-        response.raise_for_status()
-        header = next(response.iter_content(chunk_size=16), b"")
-        if header[:4] != b"RIFF" or header[8:12] != b"WEBP":
-            raise ValueError("Anonymous Drive URL did not return a WebP image")
+    for attempt in range(3):
+        try:
+            with requests.get(url, headers={"Range": "bytes=0-15"}, stream=True, timeout=(10, 20)) as response:
+                response.raise_for_status()
+                header = next(response.iter_content(chunk_size=16), b"")
+                if header[:4] != b"RIFF" or header[8:12] != b"WEBP":
+                    raise ValueError("Anonymous Drive URL did not return a WebP image")
+                return
+        except requests.HTTPError as error:
+            if attempt == 2 or error.response is None or error.response.status_code not in (403,404,429,500,502,503,504):
+                raise
+        except (requests.ConnectionError, requests.Timeout, ValueError):
+            if attempt == 2:
+                raise
+        time.sleep(2 ** attempt)
 
 
 def run(args, store=None):

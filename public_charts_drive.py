@@ -13,6 +13,8 @@ import os
 import re
 import uuid
 import copy
+from collections import deque
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -42,6 +44,11 @@ KEY_PATTERN = re.compile(
 
 class ChartDriveError(RuntimeError):
     """A sanitized configuration, safety, integrity, or Drive API failure."""
+
+    def __init__(self, message, *, http_status=None, transient=False):
+        super().__init__(message)
+        self.http_status = http_status
+        self.transient = transient
 
 
 def _file_id(value: Any) -> str:
@@ -74,6 +81,7 @@ class ChartDriveStore:
         self._client = client
         self._verified = False
         self._image_index = None
+        self._upload_ids = deque()
 
     def prime_inventory(self, inventory):
         self._image_index = {}
@@ -113,26 +121,35 @@ class ChartDriveStore:
 
     def _request(self, method: str, url: str, **kwargs):
         # The shared client includes response bodies in errors; never expose them.
-        response = None
-        try:
-            response = self._client.request(method, url, allow_redirects=False, **kwargs)
-            if not 200 <= response.status_code < 300:
-                raise ValueError("Unexpected HTTP status")
-        except (Exception, SystemExit) as error:
-            details = str(error)
-            status = re.search(r"\bHTTP ([1-5][0-9]{2})\b", details)
-            code = response.status_code if response is not None else int(status.group(1)) if status else None
-            reason = next((name for name in (
-                "storageQuotaExceeded", "userRateLimitExceeded", "rateLimitExceeded",
-                "dailyLimitExceeded", "insufficientPermissions", "backendError",
-            ) if name in details), "request_error")
-            if code is None and "timeout" in type(error).__name__.lower():
-                reason = "timeout"
-            elif code is None and "connection" in type(error).__name__.lower():
-                reason = "connection"
-            operation = method.upper() if method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "API"
-            raise ChartDriveError(f"Google Drive {operation} request failed (HTTP {code or 'unknown'}, {reason}).") from None
-        return response
+        kwargs.setdefault("timeout", (15, 60))
+        attempts = 3 if method.upper() == "GET" else 1
+        for attempt in range(attempts):
+            response = None
+            try:
+                response = self._client.request(method, url, allow_redirects=False, **kwargs)
+                if not 200 <= response.status_code < 300:
+                    raise ValueError("Unexpected HTTP status")
+                return response
+            except (Exception, SystemExit) as error:
+                details = str(error)
+                status = re.search(r"\bHTTP ([1-5][0-9]{2})\b", details)
+                code = response.status_code if response is not None else int(status.group(1)) if status else None
+                reason = next((name for name in (
+                    "storageQuotaExceeded", "userRateLimitExceeded", "rateLimitExceeded",
+                    "dailyLimitExceeded", "insufficientPermissions", "backendError",
+                ) if name in details), "request_error")
+                if code is None and "timeout" in type(error).__name__.lower():
+                    reason = "timeout"
+                elif code is None and "connection" in type(error).__name__.lower():
+                    reason = "connection"
+                transient = (code in (429, 500, 502, 503, 504) or reason in
+                             {"timeout", "connection", "userRateLimitExceeded", "rateLimitExceeded", "backendError"})
+                if transient and attempt < attempts - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                operation = method.upper() if method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "API"
+                raise ChartDriveError(f"Google Drive {operation} request failed (HTTP {code or 'unknown'}, {reason}).",
+                                      http_status=code, transient=transient) from None
 
     @staticmethod
     def _json(response) -> dict:
@@ -346,13 +363,37 @@ class ChartDriveStore:
     def _ensure_public_reader(self, file_id: str) -> None:
         if self._has_public_reader(self._permissions(file_id)):
             return
-        self._request(
-            "POST", f"{DRIVE_API}/files/{quote(file_id, safe='')}/permissions",
-            params={"fields": "id"},
-            json={"type": "anyone", "role": "reader", "allowFileDiscovery": False},
-        )
+        for attempt in range(3):
+            try:
+                self._request(
+                    "POST", f"{DRIVE_API}/files/{quote(file_id, safe='')}/permissions",
+                    params={"fields": "id"},
+                    json={"type": "anyone", "role": "reader", "allowFileDiscovery": False},
+                )
+                break
+            except ChartDriveError as error:
+                if not error.transient:
+                    raise
+                if self._has_public_reader(self._permissions(file_id)):
+                    return
+                if attempt == 2:
+                    raise
+                time.sleep(2 ** attempt)
         if not self._has_public_reader(self._permissions(file_id)):
             raise ChartDriveError("Google Drive public reader verification failed.")
+
+    def _allocate_upload_id(self):
+        if not self._upload_ids:
+            payload = self._json(self._request("GET", f"{DRIVE_API}/files/generateIds",
+                                params={"count": 32, "space": "drive", "type": "files"}))
+            ids = payload.get("ids")
+            if not isinstance(ids, list) or not 1 <= len(ids) <= 32:
+                raise ChartDriveError("Google Drive returned invalid upload IDs.")
+            valid = [_file_id(value) for value in ids]
+            if len(set(valid)) != len(valid):
+                raise ChartDriveError("Google Drive returned duplicate upload IDs.")
+            self._upload_ids.extend(valid)
+        return self._upload_ids.popleft()
 
     def _upload_image(self, handle: BinaryIO, key: str, suffix: str,
                       size: int, sha256: str) -> str:
@@ -360,15 +401,29 @@ class ChartDriveStore:
                     "parents": [self.folder_id], "mimeType": IMAGE_TYPES[suffix],
                     "appProperties": {"namespace": NAMESPACE, "kind": "image", "key": key, "sha256": sha256}}
         if size <= MULTIPART_LIMIT:
+            file_id = self._allocate_upload_id()
+            metadata["id"] = file_id
             boundary = "chart_" + uuid.uuid4().hex
             body = (f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".encode()
                     + json.dumps(metadata).encode("utf-8")
                     + f"\r\n--{boundary}\r\nContent-Type: {IMAGE_TYPES[suffix]}\r\n\r\n".encode()
                     + handle.read() + f"\r\n--{boundary}--\r\n".encode())
-            uploaded = self._json(self._request("POST", f"{DRIVE_UPLOAD_API}/files",
-                                  params={"uploadType": "multipart", "fields": "id"}, data=body,
-                                  headers={"Content-Type": f"multipart/related; boundary={boundary}"}))
-            return _file_id(uploaded.get("id"))
+            for attempt in range(3):
+                try:
+                    uploaded = self._json(self._request("POST", f"{DRIVE_UPLOAD_API}/files",
+                                          params={"uploadType": "multipart", "fields": "id"}, data=body,
+                                          timeout=(15, 45),
+                                          headers={"Content-Type": f"multipart/related; boundary={boundary}"}))
+                    if _file_id(uploaded.get("id")) != file_id:
+                        raise ChartDriveError("Google Drive returned an unexpected upload ID.")
+                    return file_id
+                except ChartDriveError as error:
+                    # A committed upload with a lost response returns 409 on this same ID.
+                    if error.http_status == 409:
+                        return file_id
+                    if not error.transient or attempt == 2:
+                        raise
+                    time.sleep(2 ** attempt)
         response = self._request(
             "POST", f"{DRIVE_UPLOAD_API}/files",
             params={"uploadType": "resumable", "fields": "id"},
