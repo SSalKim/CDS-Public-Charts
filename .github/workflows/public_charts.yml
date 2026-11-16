@@ -87,18 +87,37 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
+          import json
           import os
           from pathlib import Path
+          import shutil
           import subprocess
+          import uuid
           workers = subprocess.run(['pgrep', '-x', 'Runner.Worker'], capture_output=True, text=True)
           if len(workers.stdout.splitlines()) != 1:
               raise RuntimeError('Another runner job is active; leave WSL unchanged')
-          script = Path('ops/wsl-memory-apply.ps1').resolve()
-          windows_script = subprocess.check_output(['wslpath', '-w', str(script)], text=True).strip()
-          subprocess.run(['/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe',
-                          '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+          powershell = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+          windows_temp = subprocess.check_output([powershell, '-NoProfile', '-NonInteractive', '-Command',
+                          '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); Write-Output $env:TEMP'],
+                          text=True, encoding='utf-8').strip()
+          linux_temp = Path(subprocess.check_output(['wslpath', '-u', windows_temp], text=True).strip())
+          if not str(linux_temp).startswith('/mnt/c/'):
+              raise RuntimeError('Expected the Windows user temporary directory')
+          deployed = linux_temp / ('CDS-WSL-Deploy-' + uuid.uuid4().hex)
+          deployed.mkdir()
+          for name in ('wsl-memory-apply.ps1', 'wsl-memory-restart.ps1', 'wsl-runners-start.sh'):
+              shutil.copyfile(Path('ops') / name, deployed / name)
+          windows_script = subprocess.check_output(['wslpath', '-w', str(deployed / 'wsl-memory-apply.ps1')], text=True).strip()
+          result = subprocess.run([powershell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                           '-File', windows_script, '-Distro', os.environ['WSL_DISTRO_NAME'],
-                          '-LinuxUser', Path.home().name], check=True, timeout=60)
+                          '-LinuxUser', Path.home().name], capture_output=True, text=True,
+                          encoding='utf-8', errors='replace', timeout=60)
+          records = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+          if result.returncode or not any(row.get('memory_limit') == '10GB' and row.get('helper_pid') for row in records):
+              print(result.stdout)
+              print(result.stderr)
+              raise RuntimeError('The memory change and restart were not confirmed')
+          print(json.dumps(records[-1]))
           PY
       - uses: actions/checkout@v4
         if: inputs.action == 'verify'
