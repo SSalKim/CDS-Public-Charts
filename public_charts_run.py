@@ -192,6 +192,8 @@ def run(args, store=None):
             raise ValueError("Unknown private production state version")
         if state.get("storage_layout") == "balanced-v1" and not hasattr(store, "storage_folders"):
             raise ValueError("Balanced chart state requires the two-account coordinator")
+        if state.get("storage_layout") == "balanced-v1" and state.get("storage_folders") != store.storage_folders:
+            raise ValueError("Stored account targets differ from the configured chart folders")
         inventory = store.inventory()
         if hasattr(store, "prime_inventory"):
             store.prime_inventory(inventory)
@@ -300,9 +302,12 @@ def run(args, store=None):
         nonlocal image_bytes, publication_dirty
         model, cycle, hour = (item["target"][key] for key in ("model", "cycle", "hour"))
         if not local:
-            if f"{model}/{cycle}" not in verified_cycles:
+            verification_key = f"{model}/{cycle}"
+            if len(accounts) > 1:
+                verification_key += "/" + info["storage_account"]
+            if verification_key not in verified_cycles:
                 verify_public_url(info["url"])
-                verified_cycles.add(f"{model}/{cycle}")
+                verified_cycles.add(verification_key)
             if info["file_id"] not in before_ids:
                 image_bytes += int(info["size"])
                 account_bytes[info.get("storage_account", "primary")] += int(info["size"])

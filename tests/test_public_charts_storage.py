@@ -163,3 +163,8 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(len(self.stores["primary"].data["manifest.json"]["charts"]), 2)
             self.assertEqual(self.stores["secondary"].data, {})
             self.assertTrue(self.stores["secondary"].uploads[0].startswith("icon/"))
+            self.assertEqual(set(state["verified_cycles"]),
+                             {"gfs/2026111612/primary", "icon/2026111612/secondary"})
+            self.pool.storage_folders["secondary"] = "changed-target"
+            with self.assertRaisesRegex(ValueError, "Stored account targets"):
+                run(args, self.pool)
