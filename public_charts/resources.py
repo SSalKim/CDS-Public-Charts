@@ -38,11 +38,19 @@ def worker_count(requested="auto", *, local=False, memory=None, cpus=None):
         return 1
     free = available_memory() if memory is None else memory
     cpus = cpu_capacity() if cpus is None else cpus
-    cap = 4 if free is not None and free >= 6*1024**3 else 3 if free is not None and free >= 4*1024**3 else 2
-    if free is not None and free < 2*1024**3:
+    cap = 4 if free is not None and free >= 8*1024**3 else 3 if free is not None and free >= 6*1024**3 else 2
+    if free is not None and free < 3*1024**3:
         cap = 1
     cap = min(cap, cpus, 4)
     return cap if requested == "auto" else min(int(requested), cap)
+
+
+def cmc_worker_count(workers, memory=None):
+    free = available_memory() if memory is None else memory
+    cap = (4 if free is not None and free >= 12*1024**3 else
+           3 if free is not None and free >= 8*1024**3 else
+           1 if free is not None and free < 4*1024**3 else 2)
+    return min(workers, cap)
 
 
 class LaptopLease:

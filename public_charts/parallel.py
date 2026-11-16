@@ -1,6 +1,7 @@
 """Bounded renderer processes; only the caller owns Drive and Git publication."""
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+import gc
 import multiprocessing
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ from threading import Event, Thread
 from urllib.parse import urlsplit
 
 from . import policy
-from .resources import available_memory
+from .resources import available_memory, cmc_worker_count
 
 
 def child_path(root, *parts):
@@ -96,6 +97,7 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
     finally:
         if not raw_override:
             cleanup_raw(workspace)
+        gc.collect()
     return {"artifacts": artifacts, "result": result, "error": error,
             "render_seconds": round(time.monotonic() - started, 3), "pid": os.getpid()}
 
@@ -177,7 +179,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
         raise ValueError("Use one to four workers; a local cache override requires one")
     cleanup_models = set(queue.queues)
     memory = available_memory()
-    queue.cmc_parallel_limit = min(workers, 3 if memory is not None and memory < 8*1024**3 else 4)
+    queue.cmc_parallel_limit = cmc_worker_count(workers, memory)
     try:
         if workers == 1 and not refresh:
             while (target := queue.next(set())) is not None:

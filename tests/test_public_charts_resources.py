@@ -1,21 +1,34 @@
 import unittest
 from unittest.mock import patch
 
-from public_charts.resources import worker_count, LaptopLease, ResourceSampler
+from public_charts.resources import worker_count, cmc_worker_count, LaptopLease, ResourceSampler
 from public_charts_runner import choose
 
 
 class ResourceTests(unittest.TestCase):
     def test_four_cpus_and_sufficient_memory_use_four_workers(self):
         self.assertEqual(worker_count(memory=12*1024**3, cpus=4), 4)
-        self.assertEqual(worker_count(memory=6*1024**3, cpus=16), 4)
+        self.assertEqual(worker_count(memory=8*1024**3, cpus=16), 4)
 
     def test_wsl_memory_or_cpu_limits_reduce_parallelism(self):
-        self.assertEqual(worker_count(memory=4*1024**3, cpus=16), 3)
+        self.assertEqual(worker_count(memory=6*1024**3, cpus=16), 3)
+        self.assertEqual(worker_count(memory=4*1024**3, cpus=16), 2)
         self.assertEqual(worker_count(memory=3*1024**3, cpus=16), 2)
         self.assertEqual(worker_count(memory=1*1024**3, cpus=16), 1)
         self.assertEqual(worker_count("4", memory=10*1024**3, cpus=2), 2)
         self.assertEqual(worker_count(local=True), 1)
+
+    def test_observed_laptop_headroom_allows_three_total_but_only_two_cmc(self):
+        free=int(6.4*1024**3)
+        workers=worker_count(memory=free,cpus=16)
+        self.assertEqual(workers,3)
+        self.assertEqual(cmc_worker_count(workers,memory=free),2)
+        self.assertEqual(worker_count("4",memory=free,cpus=16),3)
+
+    def test_cmc_memory_limits_leave_room_for_large_native_grids(self):
+        for gib,expected in ((2,1),(6,2),(10,3),(14,4)):
+            self.assertEqual(cmc_worker_count(4,memory=gib*1024**3),expected)
+        self.assertEqual(cmc_worker_count(1,memory=14*1024**3),1)
 
     def test_dedicated_chart_runner_is_selected_only_when_vtg_is_idle(self):
         chart = {"runners": [{"name": "LAPTOP-WOOJIN-CHARTS", "status": "online", "busy": False,

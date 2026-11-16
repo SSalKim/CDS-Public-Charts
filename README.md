@@ -27,8 +27,9 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
 - Production is serialized in one concurrency group. Never enable the old CDS
   producer and this producer together: both use the same Drive state.
 - Inside that one job, isolated renderer processes work on different models.
-  CMC can fill spare slots with different forecast leads: up to three simultaneous
-  CMC leads below 8 GiB available memory, or four with more memory. Each lead has
+  CMC can fill spare slots with different forecast leads: two concurrent CMC leads
+  on the laptop with about 6.4 GiB available, three at 8 GiB, or four at 12 GiB.
+  Each lead has
   separate raw scratch files. Shared cumulative rain/snow checkpoints are protected
   by a per-cycle process lock; only prefix calculation is serialized, not rendering.
   Only the coordinator uploads to Drive, updates manifests, publishes Git commits,
@@ -37,6 +38,10 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
 - Rendering defaults to `auto`: up to four processes, limited by effective CPU
   and available memory (including WSL/container limits). Set
   `PUBLIC_CHARTS_WORKERS=1` to restore sequential rendering.
+  Total renderer caps are four at 8 GiB available, three at 6 GiB, two below that,
+  and one below 3 GiB. Explicit worker requests cannot bypass these limits.
+  Renderers collect retired figure reference cycles after every lead to prevent
+  large NumPy-backed plots from lingering between tasks.
 - A bounded renderer scheduler keeps working while the coordinator uploads.
   `PUBLIC_CHARTS_UPLOAD_WORKERS` controls independent image-upload sessions
   (default `3`; `1` restores sequential uploads). Only the coordinator changes

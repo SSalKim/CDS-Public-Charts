@@ -94,7 +94,9 @@ def concurrent_cmc_renderer(model, cycle, hour, root, existing, emit, *, checkpo
     marker.touch()
     (work / f"cmc-started-{hour}").touch()
     deadline = time.monotonic() + 30
-    while len(list(work.glob("cmc-started-*"))) < 3:
+    expected_file=work / "expected-renderers"
+    expected=int(expected_file.read_text()) if expected_file.exists() else 3
+    while len(list(work.glob("cmc-started-*"))) < expected:
         if time.monotonic() > deadline:
             raise TimeoutError("CMC leads did not start concurrently")
         time.sleep(.02)
@@ -204,7 +206,7 @@ class StagingTests(unittest.TestCase):
                 self.assertTrue(all(Path(row["path"]).exists() for row in staged["artifacts"]))
                 received.append(staged["pid"])
 
-            with patch("public_charts.parallel.available_memory", return_value=6*1024**3):
+            with patch("public_charts.parallel.available_memory", return_value=10*1024**3):
                 execute_leads(queue, work, 4, consume, renderer=concurrent_cmc_renderer,
                               started=lambda item, active: starts.append(active))
             self.assertEqual(starts, [1, 2, 3])
@@ -213,6 +215,20 @@ class StagingTests(unittest.TestCase):
             extra.checkpoints = work / "raw-cache/checkpoints" / CYCLE / "cmc"
             self.assertEqual(extra.checkpoint("sample.npz")["values"].tolist(), [225])
             self.assertFalse((work / "render-workers/cmc/leads").exists())
+
+    def test_laptop_cmc_backlog_stays_at_two_concurrent_leads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work, starts, received=Path(directory), [], []
+            (work / "expected-renderers").write_text("2")
+            queue=LeadQueue([target("cmc",h) for h in (72,75,78)],set(),10)
+            def consume(item,staged):
+                self.assertIsNone(staged["error"])
+                received.append(item["hour"])
+            with patch("public_charts.parallel.available_memory",return_value=int(6.4*1024**3)):
+                execute_leads(queue,work,3,consume,renderer=concurrent_cmc_renderer,
+                              started=lambda item,active:starts.append(active))
+            self.assertEqual(sorted(received),[72,75,78])
+            self.assertEqual(max(starts),2)
 
     def test_checkpoint_lock_releases_after_error(self):
         from public_charts.extended_sources import ExtraFields

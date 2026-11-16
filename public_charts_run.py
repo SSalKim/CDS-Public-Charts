@@ -17,7 +17,7 @@ from public_charts.dates import parse_cycle
 from public_charts.parallel import LeadQueue, child_path, cleanup_raw, execute_leads, model_workspace
 from public_charts_publish import publish_manifest
 from public_charts.uploads import UploadPool, UploadBudgetExceeded
-from public_charts.resources import LaptopLease, ResourceSampler, available_memory, cpu_capacity, worker_count
+from public_charts.resources import LaptopLease, ResourceSampler, available_memory, cpu_capacity, worker_count, cmc_worker_count
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "data/public_charts_manifest.json"
@@ -364,6 +364,7 @@ def run(args, store=None):
         return planned
 
     print(json.dumps({"event": "runtime_profile", "workers": args.workers, "upload_workers": upload_workers,
+                      "cmc_workers": cmc_worker_count(args.workers),
                       "cpu_capacity": cpu_capacity(), "available_memory_mib": round(available_memory()/1024**2, 1) if available_memory() is not None else None,
                       "time_budget_minutes": minutes, "laptop_guard": lease.root is not None}), flush=True)
     sampler.start()
