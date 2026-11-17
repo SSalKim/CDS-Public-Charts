@@ -87,7 +87,8 @@ def read_native(payload, cycle, hour, parameter, level=None, *, constant=False):
 
 def native(client, cycle, hour, parameter, level=None, *, constant=False):
     def retrieve(url):
-        return read_native(client.get(url), cycle, hour, parameter, level, constant=constant)
+        # Switch exact-cycle feeds promptly instead of retrying a stalled socket for minutes.
+        return read_native(client.get(url,attempts=1,timeout=(10,30)), cycle, hour, parameter, level, constant=constant)
     return Provider._mirrors(source_urls(cycle, hour, parameter, level, constant=constant), retrieve)
 
 

@@ -5,9 +5,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 import numpy as np
+import requests
 
 from public_charts import policy
-from public_charts.icon import IconProvider, IconRemapper, read_native, source_urls
+from public_charts.icon import IconProvider, IconRemapper, native, read_native, source_urls
 from public_charts.sources import Decoded, HttpCache, NotReady, Provider
 
 
@@ -42,6 +43,17 @@ class IconPolicyTests(unittest.TestCase):
 
 
 class IconProviderTests(unittest.TestCase):
+    def test_slow_socket_switches_exact_cycle_feed_after_one_short_attempt(self):
+        client = Mock()
+        client.get.side_effect = [requests.ReadTimeout("slow source"),b"second feed"]
+        with patch("public_charts.icon.read_native",return_value=(np.ones(2),{"grid":"native"})) as decode:
+            values, _ = native(client,"2026111700",39,"FI",300)
+        self.assertEqual([call.args[0] for call in client.get.call_args_list],list(source_urls("2026111700",39,"FI",300)))
+        for call in client.get.call_args_list:
+            self.assertEqual(call.kwargs,{"attempts":1,"timeout":(10,30)})
+        decode.assert_called_once_with(b"second feed","2026111700",39,"FI",300,constant=False)
+        np.testing.assert_array_equal(values,np.ones(2))
+
     @staticmethod
     def field(parameter, level=None):
         value = {"T": 273.15, "RELHUM": 80, "SNOW_GSP": 2, "SNOW_CON": 1}.get(parameter, 101000)
