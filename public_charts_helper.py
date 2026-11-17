@@ -169,10 +169,11 @@ class ComputeHelper:
             self.tick()
             print(json.dumps({"event":"helper_runtime","workers":self.workers,"session":self.session,"smoke":self.smoke,
                               "heavy_workers":self.memory_budget.snapshot()["heavy_workers"],
-                              "resource_policy":"measured_worker_memory"}),flush=True)
+                              "resource_policy":"measured_worker_memory","idle_policy":"coordinator_lifetime"}),flush=True)
+            # Missing inputs are normal; healthy coordinator control keeps the helper waiting.
             execute_leads(self.queue,self.work,self.workers,self.consume,streaming=True,
                           prefetch=not self.smoke, renderer=smoke_renderer if self.smoke else None,
-                          refresh=self.targets,refresh_seconds=5,idle_seconds=180,
+                          refresh=self.targets,refresh_seconds=5,keep_alive=self.can_schedule,
                           can_schedule=self.can_schedule,on_idle=self.tick,
                           progress=lambda event:print(json.dumps(event),flush=True),memory_budget=self.memory_budget)
             for key in list(self.waiting):

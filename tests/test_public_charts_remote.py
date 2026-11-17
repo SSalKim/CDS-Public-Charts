@@ -323,6 +323,64 @@ class ArtifactTests(unittest.TestCase):
 
 
 class ActionRoleTests(unittest.TestCase):
+    def test_helper_waits_beyond_three_minutes_while_coordinator_is_healthy(self):
+        from public_charts_helper import ComputeHelper
+        with patch("public_charts_helper.time.time",return_value=100.) as clock:
+            helper=ComputeHelper(FakeArtifacts(),SESSION,SHA,"unused",4)
+            def inspect(*args,**kwargs):
+                clock.return_value=400.
+                helper.control={"stop":False,"valid_until":520.,"deadline":1300.,"leases":[]}
+                self.assertTrue(kwargs["keep_alive"]())
+                self.assertTrue(kwargs["can_schedule"]())
+                helper.control["stop"]=True
+                self.assertFalse(kwargs["keep_alive"]())
+            with patch.object(helper,"tick"),patch("public_charts_helper.LaptopLease") as lease, \
+                 patch("public_charts_helper.ResourceSampler") as sampler, \
+                 patch("public_charts_helper.execute_leads",side_effect=inspect) as execute, \
+                 patch("sys.stdout",new_callable=io.StringIO):
+                lease.return_value.acquire.return_value=True
+                sampler.return_value.finish.return_value={}
+                self.assertEqual(helper.run(),0)
+                execute.assert_called_once()
+
+    def test_helper_still_stops_on_stale_control_deadline_and_safety_caps(self):
+        from public_charts_helper import ComputeHelper
+        with patch("public_charts_helper.time.time",return_value=100.) as clock:
+            helper=ComputeHelper(FakeArtifacts(),SESSION,SHA,"unused",4)
+            clock.return_value=400.
+            healthy={"stop":False,"valid_until":520.,"deadline":1300.}
+            for control in ({**healthy,"stop":True},{**healthy,"valid_until":399.},
+                            {**healthy,"deadline":399.}):
+                helper.control=control
+                self.assertFalse(helper.can_schedule())
+            helper.control=healthy
+            helper.transport.created=350
+            self.assertFalse(helper.can_schedule())
+            helper.transport.created=0
+            clock.return_value=100.+28*60
+            self.assertFalse(helper.can_schedule())
+
+    def test_helper_without_initial_control_still_has_three_minute_startup_limit(self):
+        from public_charts_helper import ComputeHelper
+        with patch("public_charts_helper.time.time",return_value=100.) as clock:
+            helper=ComputeHelper(FakeArtifacts(),SESSION,SHA,"unused",4)
+            clock.return_value=279.
+            self.assertTrue(helper.can_schedule())
+            clock.return_value=280.
+            self.assertFalse(helper.can_schedule())
+
+    def test_helper_transport_failure_limit_still_stops_waiting(self):
+        from public_charts_helper import ComputeHelper
+        with patch("public_charts_helper.time.time",return_value=100.) as clock:
+            helper=ComputeHelper(FakeArtifacts(),SESSION,SHA,"unused",4)
+            helper.control={"stop":False,"valid_until":220.,"deadline":1300.}
+            with patch.object(helper,"poll_control",side_effect=ArtifactError("unavailable")), \
+                 patch("sys.stdout",new_callable=io.StringIO):
+                for index in range(3):
+                    clock.return_value=100.+index*6
+                    helper.tick()
+                self.assertFalse(helper.can_schedule())
+
     def test_korea_and_both_winter_composites_pass_the_transport_contract(self):
         from public_charts_helper import smoke_renderer
         from public_charts.remote import image_size

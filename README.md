@@ -189,6 +189,9 @@ session, revision, target, dimensions and SHA-256 checks. Consumed results are
 deleted immediately. A 90-second heartbeat timeout or 180-second startup timeout
 returns unfinished tasks to GitHub; expired leases reject late results. This
 separate helper workflow never blocks final publication if the laptop goes away.
+Healthy coordinator control keeps the helper waiting through empty queues and
+`NotReady` responses for the batch lifetime; there is no three-minute idle exit.
+The startup timeout, stale-control checks and lost-heartbeat recovery still apply.
 The coordinator stops new assignments at its normal time budget and allows up to
 eight additional minutes for active helper tasks. No new Cloudflare settings or
 Google credentials are required. `verify_compute.yml` exercises transport without

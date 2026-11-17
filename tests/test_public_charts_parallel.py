@@ -460,6 +460,20 @@ class StagingTests(unittest.TestCase):
                           started=lambda item, active: stop.set(), can_schedule=lambda: not stop.is_set())
             self.assertEqual(hours, [0])
 
+    def test_healthy_helper_can_receive_work_after_the_idle_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hours=[]
+            started=time.monotonic()
+            def refresh():
+                return [target()] if time.monotonic()-started >= .5 else []
+            def healthy():
+                return not hours and time.monotonic()-started < 30
+            execute_leads(LeadQueue([],set(),1),directory,1,
+                          lambda item,staged:hours.append((item["hour"],staged["error"])),
+                          renderer=every_product_renderer,refresh=refresh,refresh_seconds=.2,
+                          idle_seconds=.01,keep_alive=healthy,can_schedule=healthy)
+            self.assertEqual(hours,[(0,None)])
+
     def test_stop_after_prefetch_does_not_start_a_memory_heavy_renderer(self):
         with tempfile.TemporaryDirectory() as directory:
             work, starts, received = Path(directory), [], []
