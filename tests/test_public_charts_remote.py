@@ -283,6 +283,17 @@ class ArtifactTests(unittest.TestCase):
 
 
 class ActionRoleTests(unittest.TestCase):
+    def test_transport_probe_passes_the_real_lossless_encoder(self):
+        from public_charts_helper import smoke_renderer
+        with tempfile.TemporaryDirectory() as directory:
+            existing = policy.expected_keys(*identity(target())) - {policy.key(*identity(target()),"gph500","asia")}
+            outputs = []
+            smoke_renderer(*identity(target()),directory,existing,lambda *args:outputs.append(args))
+            self.assertEqual(len(outputs),1)
+            with Image.open(outputs[0][2]) as image:
+                self.assertEqual(image.size,(910,660))
+                self.assertEqual(image.getpixel((0,0)),(0,80,180))
+
     def test_only_non_forced_continuous_production_adds_a_helper(self):
         env = {"CHART_WORK":"/tmp/charts","DRY_RUN":"false","HELPER_AVAILABLE":"true"}
         self.assertIn("--remote-helper",action_args("coordinator",env))

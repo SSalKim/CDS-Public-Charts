@@ -24,9 +24,7 @@ def smoke_renderer(model, cycle, hour, root, existing, publish, **kwargs):
         product, domain = key.split("/")[-2:]
         path = Path(root) / "images" / (product+"-"+domain+".webp")
         image = Image.new("RGB",PUBLIC_IMAGE_SIZES[domain],"white")
-        for x in range(24):
-            for y in range(24):
-                image.putpixel((x,y),(x*10,y*10,80))
+        image.paste((0,80,180),(0,0,128,128))
         encode(image,path)
         publish(product,domain,path)
     return {"complete":True}
