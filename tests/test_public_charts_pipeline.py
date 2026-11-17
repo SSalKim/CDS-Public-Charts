@@ -97,7 +97,7 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(policy.cycle_candidates("ecmwf", now), ["2026111606", "2026111518"])
         self.assertEqual(policy.cycle_candidates("ecmwf", now.replace(hour=2)), ["2026111518", "2026111506"])
 
-    def test_automatic_checks_start_three_hours_after_each_cycle_in_kst(self):
+    def test_automatic_checks_start_at_each_models_delay_in_kst(self):
         kst = timezone(timedelta(hours=9))
         for model in policy.RETENTION:
             for hour in (0, 6, 12, 18):
@@ -105,10 +105,11 @@ class PolicyTests(unittest.TestCase):
                 if not policy.supports_cycle(model, cycle):
                     continue
                 with self.subTest(model=model, cycle=cycle):
-                    start = (datetime(2026, 11, 17, hour, tzinfo=timezone.utc) + timedelta(hours=3)).astimezone(kst)
+                    delay = timedelta(hours=2, minutes=30) if model == "icon" else timedelta(hours=3)
+                    start = (datetime(2026, 11, 17, hour, tzinfo=timezone.utc) + delay).astimezone(kst)
                     before = start - timedelta(microseconds=1)
-                    self.assertFalse(policy.source_check_due(cycle, before))
-                    self.assertTrue(policy.source_check_due(cycle, start))
+                    self.assertFalse(policy.source_check_due(cycle, before, model=model))
+                    self.assertTrue(policy.source_check_due(cycle, start, model=model))
                     self.assertNotIn(cycle, {r["cycle"] for r in resolve_plan([model], requested_hours=[0], now=before)})
                     self.assertIn(cycle, {r["cycle"] for r in resolve_plan([model], requested_hours=[0], now=start)})
 

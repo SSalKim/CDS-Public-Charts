@@ -201,15 +201,23 @@ def extrema_candidates(value, latitude, longitude, radius_km, prominence, high, 
         return []
     smooth = smooth_valid(np.asarray(value, dtype=float),.8,valid_mask)
     search = smooth if valid_mask is None else np.where(valid_mask,smooth,-np.inf if high else np.inf)
-    neighborhood = (maximum_filter if high else minimum_filter)(search, footprint=footprint, mode="nearest")
     background = smooth_valid(smooth,(max(2,ry/2),max(2,rx/2)),valid_mask)
     strength = (smooth - background) * (1 if high else -1)
     tolerance = 64*np.finfo(float).eps*max(1, float(np.nanmax(np.abs(value))))
+    # Every circular extreme is also extreme in this inscribed, separable rectangle.
+    size = (2 * int(ry / np.sqrt(2)) + 1, 2 * int(rx / np.sqrt(2)) + 1)
+    neighborhood = (maximum_filter if high else minimum_filter)(search, size=size, mode="nearest")
     peaks = (smooth == neighborhood) & (strength > max(prominence, tolerance)) & np.isfinite(value)
     if valid_mask is not None:
         peaks &= binary_erosion(valid_mask,iterations=3)
     peaks[:2] = peaks[-2:] = False
     peaks[:, :2] = peaks[:, -2:] = False
+    if np.any(peaks):
+        padded = np.pad(search, ((ry, ry), (rx, rx)), mode="edge")
+        for row, col in np.argwhere(peaks):
+            neighbors = padded[row:row+2*ry+1, col:col+2*rx+1][footprint]
+            if np.any(neighbors > smooth[row,col] if high else neighbors < smooth[row,col]):
+                peaks[row,col] = False
     components, _ = label(peaks)
     result = []
     for number, region in enumerate(find_objects(components), 1):
@@ -230,8 +238,8 @@ def extrema_candidates(value, latitude, longitude, radius_km, prominence, high, 
     return sorted(result, reverse=True)
 
 
-def center_candidates(value, latitude, longitude, domain, kind, high, valid_mask=None):
-    prominence, radius = center_parameters(domain, kind)
+def center_candidates(value, latitude, longitude, domain, kind, high, valid_mask=None, *, model_id=None):
+    prominence, radius = center_parameters(domain, kind, model_id)
     radii = (radius, radius*2) if domain == "asia" and kind in ("pressure", "height") else (radius,)
     candidates = {}
     # Broad closed systems can look weak against a small-radius background.
@@ -509,7 +517,8 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     return extrema_candidates(value,arrays["latitude"],arrays["longitude"],radius,prominence,high,valid_mask)
                 if public and model_id=="aigfs" and korea and kind in ("height","pressure"):
                     return extrema_candidates(value,arrays["latitude"],arrays["longitude"],180,8 if kind=="height" else .7,high,valid_mask)
-                return center_candidates(value,arrays["latitude"],arrays["longitude"],domain,kind,high,valid_mask)
+                return center_candidates(value,arrays["latitude"],arrays["longitude"],domain,kind,high,valid_mask,
+                                         model_id=model_id if public else None)
             if strict or public and ((kind=="temperature" and model_id in ("gfs","aigfs")) or (model_id=="aigfs" and korea and kind in ("height","pressure"))):
                 all_candidates=[]
                 for mark,high,color in modes:
@@ -537,7 +546,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                                     path_effects=stroke, clip_on=True, gid=f"center-{kind}-{mark}")
 
         def numeric_extrema(value, kind, threshold=0,valid_mask=None,grid=None,color="black"):
-            settings = numeric_extrema_parameters(domain, kind)
+            settings = numeric_extrema_parameters(domain, kind, model_id if public else None)
             selected=base_grid if grid is None else grid
             modes = (True,) if kind == "precipitation" else (True, False)
             candidates = [item for high in modes for item in

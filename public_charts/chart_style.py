@@ -119,18 +119,23 @@ def barb_stride(domain):
     return (1, 2) if domain == "hkor" else (8, 8)
 
 
-def center_parameters(domain, kind):
+def center_parameters(domain, kind, model_id=None):
+    if model_id in {"cmc", "icon"} and kind == "temperature":
+        return (.2, 100) if domain == "hkor" else (.55, 450)
     if domain == "hkor":
         return 0, 60 if kind in ("temperature", "height") else 75
     return {"pressure": (.6, 500), "height": (4, 400), "temperature": (.35, 350)}[kind]
 
 
-def numeric_extrema_parameters(domain, kind):
+def numeric_extrema_parameters(domain, kind, model_id=None):
     korea = domain == "hkor"
     if kind == "precipitation":
         return {"radius": 90 if korea else 180, "prominence": .075 if korea else .2, "minimum": 1}
     if kind == "wind":
         return {"radius": 150 if korea else 350, "prominence": 1.5 if korea else 2.5, "minimum": 0}
+    if model_id in {"cmc", "icon"} and kind == "vorticity":
+        return {"radius": 150 if korea else 300, "prominence": .8 if korea else 1.5,
+                "minimum": 3 if korea else 4}
     return {"radius": 125 if korea else 250, "prominence": .5 if korea else 1, "minimum": 2}
 
 

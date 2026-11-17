@@ -14,6 +14,9 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   refresh and restoration of incomplete cycles. Older eligible unfinished work
   continues; Cloudflare itself is not paused. Explicit manual cycle requests
   can override the delay. These are earliest check times, not guaranteed arrivals.
+- ICON starts checks at +2h30 instead: 11:30, 17:30, 23:30 and 05:30 KST.
+  Its observed initial 12Z/18Z files were available around +2h39; the other
+  models retain the +3h gate.
 - `PUBLIC_CHARTS_ENABLED=true` enables production; `false` blocks production
   dispatches while still allowing a non-mutating dry run.
 - `PUBLIC_CHARTS_START_CYCLE=2026111512` preserves the production start boundary.
