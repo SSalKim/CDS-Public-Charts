@@ -134,7 +134,7 @@ def import_bundle(message, files, lease, work):
 
 class RemoteCoordinator:
     def __init__(self, transport, session, code_sha, queue, work, consume, *, minutes=20, clock=time.time,
-                 emit=None, can_assign=None, smoke=False):
+                 emit=None, can_assign=None, smoke=False, smoke_runner="github-hosted"):
         self.transport, self.session, self.code_sha = transport, validate_session(session), code_sha
         self.queue, self.work, self.consume = queue, work, consume
         self.clock, self.emit = clock, emit or (lambda item: print(json.dumps(item),flush=True))
@@ -145,6 +145,7 @@ class RemoteCoordinator:
         self.capacity, self.cmc_capacity, self.reported_active = 0, 0, set()
         self.next_poll, self.last_control, self.sequence, self.errors = 0, 0, 0, 0
         self.disabled, self.polling, self.smoke = False, False, smoke
+        self.smoke_runner = smoke_runner
 
     def publish_control(self, stop=False):
         now = self.clock()
@@ -158,7 +159,7 @@ class RemoteCoordinator:
     def start(self):
         try:
             self.publish_control()
-            self.transport.dispatch_helper(self.session,self.code_sha,self.smoke)
+            self.transport.dispatch_helper(self.session,self.code_sha,self.smoke,self.smoke_runner)
             self.emit({"event":"helper_requested","session":self.session})
         except (ArtifactError,ValueError,OSError,subprocess.SubprocessError) as error:
             self.disable(type(error).__name__)

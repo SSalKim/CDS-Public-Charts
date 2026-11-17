@@ -12,6 +12,10 @@ on:
       smoke:
         type: boolean
         default: false
+      smoke_runner:
+        type: choice
+        options: [github-hosted, laptop]
+        default: github-hosted
 permissions:
   contents: read
   actions: read
@@ -20,7 +24,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   compute:
-    runs-on: ${{ fromJSON(inputs.smoke && '"ubuntu-24.04"' || '["self-hosted","linux","cds-public-charts"]') }}
+    runs-on: ${{ fromJSON(inputs.smoke && inputs.smoke_runner != 'laptop' && '"ubuntu-24.04"' || '["self-hosted","linux","cds-public-charts"]') }}
     timeout-minutes: 35
     env:
       GH_TOKEN: ${{ github.token }}
@@ -35,6 +39,22 @@ jobs:
         with:
           ref: ${{ inputs.code_sha }}
           persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /public_charts/
+            /public_charts_action.py
+            /public_charts_helper.py
+            /public_charts_runtime.py
+            /requirements-public-charts.txt
+            /requirements-icon-charts.txt
+      - name: Verify compute entry points before installing dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f public_charts_action.py
+          test -f public_charts_helper.py
+          test -f public_charts_runtime.py
+          git ls-files -v -- public_charts_action.py public_charts_helper.py
       - name: Configure isolated compute paths
         shell: bash
         run: |

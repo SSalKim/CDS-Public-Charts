@@ -80,8 +80,10 @@ class ComputeHelper:
         self.sequence += 1
 
     def heartbeat(self, stopped=False):
-        self.upload({"kind":"heartbeat","generated_at":time.time(),"capacity":0 if stopped or self.low_memory else self.workers,
-                     "cmc_capacity":cmc_worker_count(self.workers),"active":list(self.tokens.values()),"stopped":stopped})
+        capacity = 0 if stopped or self.low_memory else self.workers
+        self.upload({"kind":"heartbeat","generated_at":time.time(),"capacity":capacity,
+                     "cmc_capacity":min(capacity,cmc_worker_count(self.workers)),
+                     "active":list(self.tokens.values()),"stopped":stopped})
         self.last_heartbeat = time.time()
 
     def targets(self):

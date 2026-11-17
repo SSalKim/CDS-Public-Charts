@@ -268,6 +268,13 @@ class ArtifactTests(unittest.TestCase):
             transport.read({"id":42})
         get.assert_not_called()
 
+    def test_laptop_transport_probe_selects_the_real_self_hosted_runner(self):
+        transport = GitHubArtifacts("owner/repo","private-token")
+        with patch.object(transport,"api") as api:
+            transport.dispatch_helper(SESSION,SHA,True,"laptop")
+        self.assertEqual(api.call_args.kwargs["json"]["inputs"]["smoke_runner"],"laptop")
+        self.assertEqual(api.call_args.kwargs["json"]["inputs"]["smoke"],"true")
+
     def test_malformed_api_artifact_entries_fail_closed(self):
         transport = GitHubArtifacts("owner/repo","private-token")
         for data in ({"artifacts":[None]}, {"artifacts":[{"name":"chart-control-test"}]}, []):
@@ -283,6 +290,14 @@ class ArtifactTests(unittest.TestCase):
 
 
 class ActionRoleTests(unittest.TestCase):
+    def test_stopped_helper_reports_zero_cmc_capacity(self):
+        from public_charts_helper import ComputeHelper
+        transport = FakeArtifacts()
+        helper = ComputeHelper(transport,SESSION,SHA,"unused",4)
+        helper.heartbeat(stopped=True)
+        self.assertEqual(transport.controls[-1]["capacity"],0)
+        self.assertEqual(transport.controls[-1]["cmc_capacity"],0)
+
     def test_transport_probe_passes_the_real_lossless_encoder(self):
         from public_charts_helper import smoke_renderer
         with tempfile.TemporaryDirectory() as directory:
@@ -308,6 +323,10 @@ class ActionRoleTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[1]/".github/workflows/public_charts_helper.yml").read_text()
         self.assertNotIn("secrets.",workflow)
         self.assertNotIn("public_charts_run.py",workflow)
+        self.assertIn("sparse-checkout-cone-mode: false",workflow)
+        for name in ("public_charts_action.py","public_charts_helper.py","public_charts_runtime.py"):
+            self.assertIn("/"+name,workflow)
+            self.assertIn("test -f "+name,workflow)
 
 
 if __name__ == "__main__":

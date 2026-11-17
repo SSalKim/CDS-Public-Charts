@@ -154,12 +154,13 @@ class GitHubArtifacts:
     def delete(self, artifact_id):
         self.api("DELETE", f"repos/{self.repository}/actions/artifacts/{int(artifact_id)}")
 
-    def dispatch_helper(self, session, code_sha, smoke=False):
+    def dispatch_helper(self, session, code_sha, smoke=False, smoke_runner="github-hosted"):
         validate_session(session)
-        if not re.fullmatch(r"[a-f0-9]{40}", code_sha):
+        if not re.fullmatch(r"[a-f0-9]{40}", code_sha) or smoke_runner not in {"github-hosted","laptop"}:
             raise ValueError("Invalid helper code revision")
         self.api("POST", f"repos/{self.repository}/actions/workflows/public_charts_helper.yml/dispatches",
-                 json={"ref": "main", "inputs": {"session": session, "code_sha": code_sha, "smoke": str(smoke).lower()}})
+                 json={"ref": "main", "inputs": {"session": session, "code_sha": code_sha,
+                       "smoke": str(smoke).lower(),"smoke_runner":smoke_runner}})
 
     def helper_run(self, session):
         payload = self.api("GET", f"repos/{self.repository}/actions/workflows/public_charts_helper.yml/runs",

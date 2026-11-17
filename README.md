@@ -189,8 +189,10 @@ returns unfinished tasks to GitHub; expired leases reject late results. This
 separate helper workflow never blocks final publication if the laptop goes away.
 The coordinator stops new assignments at its normal time budget and allows up to
 eight additional minutes for active helper tasks. No new Cloudflare settings or
-Google credentials are required. `verify_compute.yml` exercises two real hosted
-jobs and transport without any Drive writes before enabling dual computation.
+Google credentials are required. `verify_compute.yml` exercises transport without
+Drive writes; select `helper_runner=laptop` to test the real self-hosted workspace.
+The helper declares its complete required checkout list and checks its entry
+points before installation, so a reused sparse checkout cannot omit new scripts.
 
 After a laptop/WSL restart, run `~/actions-runner-cds-public-charts/start-charts.sh`
 in a separate WSL terminal and keep it running. This is not an OS autostart

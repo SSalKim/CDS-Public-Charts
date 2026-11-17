@@ -1,6 +1,12 @@
 name: Verify distributed chart compute
 on:
   workflow_dispatch:
+    inputs:
+      helper_runner:
+        description: Verify with a hosted helper or the idle dedicated laptop
+        type: choice
+        options: [github-hosted, laptop]
+        default: github-hosted
 permissions:
   contents: read
   actions: write
@@ -13,6 +19,7 @@ jobs:
       OPENBLAS_NUM_THREADS: '1'
       OMP_NUM_THREADS: '1'
       PYTHONUTF8: '1'
+      VERIFY_HELPER_RUNNER: ${{ inputs.helper_runner || 'github-hosted' }}
     steps:
       - uses: actions/checkout@v4
         with:

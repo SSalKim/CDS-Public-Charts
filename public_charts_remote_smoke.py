@@ -36,7 +36,9 @@ def main():
             completed.add(identity(target))
             remote_count.append(identity(target))
 
-    broker = RemoteCoordinator(GitHubArtifacts(),session,sha,queue,work,consume,minutes=5,smoke=True)
+    helper_runner = os.environ.get("VERIFY_HELPER_RUNNER","github-hosted")
+    broker = RemoteCoordinator(GitHubArtifacts(),session,sha,queue,work,consume,minutes=5,smoke=True,
+                               smoke_runner=helper_runner)
     broker.start()
     deadline = time.time()+360
     local_done = False
@@ -57,7 +59,7 @@ def main():
         if len(completed) != 4 or not local_done or len(set(remote_count)) != 3:
             raise RuntimeError("Two-job verification did not finish distinct leads")
         print(json.dumps({"event":"two_runner_verified","local_leads":1,"remote_leads":3,
-                          "drive_writes":0,"session":session}),flush=True)
+                          "drive_writes":0,"session":session,"helper_runner":helper_runner}),flush=True)
     finally:
         broker.close()
     return 0
