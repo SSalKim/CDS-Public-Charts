@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 import gc
+import json
 import time
 
 import numpy as np
@@ -18,6 +19,7 @@ from .sources import MODELS, collect, accumulation_hours, NotReady
 
 WINTER_COMPOSITE_SIZES = {False: (1750, 660), True: (600, 2000)}
 CUMULATIVE_WORK_BUDGET_SECONDS = 300
+INPUT_WORK_BUDGET_SECONDS = 180
 
 
 def crop(arrays, domain):
@@ -68,40 +70,37 @@ def encode(frame, path):
 def prepare_surface(model, cycle, hour, root, base, completed, force, checkpoint_root, progress):
     """Fetch winter/rain inputs while the main renderer draws upper-air charts."""
     started = time.monotonic()
-    interval = accumulation_hours(model, hour) or 0
     metadata = {}
     if hour:
-        base, metadata, _ = collect(model, cycle, hour, root)
+        base, metadata, _ = collect(model, cycle, hour, root,
+                                   upper_level=300 if "gph300" in policy.products(cycle) else 200,
+                                   deadline=started+INPUT_WORK_BUDGET_SECONDS)
     else:
         base = {**base, "precipitation": np.zeros_like(base["pressure_msl"], dtype=np.float64)}
-    extra = ExtraFields(root, model, cycle, deadline=started+CUMULATIVE_WORK_BUDGET_SECONDS)
-    if checkpoint_root is not None:
-        extra.checkpoints = Path(checkpoint_root) / cycle / model
     selected = crop(base, "hkor")
-    def done(product):
-        return not force and policy.key(model, cycle, hour, product, "hkor") in completed
-    needs_total = hour and not (done("acrain") and done("acrain1"))
-    winter_products = (("acptot", "acptot1", "acrain", "acrain1")
-                       if policy.supports_acrain(cycle, hour) else ("acptot", "acptot1"))
-    needs_winter = policy.winter(model, cycle) and not all(done(name) for name in winter_products)
-    total = None
-    if needs_total or needs_winter:
-        if progress:
-            progress("surface_phase", {"phase": "checkpoint_wait"})
-        with extra.checkpoint_lock():
-            if needs_total:
-                if progress:
-                    progress("surface_phase", {"phase": "total_precipitation"})
-                total = extra.total_rain(hour)
-            if needs_winter:
-                if progress:
-                    progress("surface_phase", {"phase": "winter_diagnostics"})
-                selected, _ = winter_fields(extra, base, hour, interval)
     if progress:
         progress("surface", {"observed_at": datetime.now(timezone.utc).isoformat(),
                              "seconds": round(time.monotonic() - started, 3),
-                             "sources": metadata.get("sources", []) + extra.client.records})
-    return base, selected, total
+                             "sources": metadata.get("sources", [])})
+    return base, selected, None
+
+
+def prepare_diagnostic(model,cycle,hour,root,base,checkpoint_root,progress,*,cumulative):
+    started=time.monotonic()
+    extra=ExtraFields(root,model,cycle,deadline=started+CUMULATIVE_WORK_BUDGET_SECONDS,progress=progress)
+    if checkpoint_root is not None:
+        extra.checkpoints=Path(checkpoint_root)/cycle/model
+    if progress:
+        progress("surface_phase",{"phase":"total_diagnostics" if cumulative else "window_diagnostics"})
+    total=(extra.total_rain(hour) if hour else None) if cumulative else None
+    selected=(winter_fields(extra,base,hour,accumulation_hours(model,hour) or 0,cumulative=cumulative)[0]
+              if policy.winter(model,cycle) else crop(base,"hkor"))
+    if progress:
+        metadata=Path(root)/"fields"/cycle/model/f"{hour:03}"/"metadata.json"
+        sources=json.loads(metadata.read_text(encoding="utf-8")).get("sources",[]) if metadata.exists() else []
+        progress("total" if cumulative else "window",{"observed_at":datetime.now(timezone.utc).isoformat(),
+                 "seconds":round(time.monotonic()-started,3),"sources":sources+extra.client.records})
+    return selected,total
 
 
 def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, checkpoint_root=None,
@@ -147,7 +146,9 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
         return frame
 
     started = time.monotonic()
-    base, metadata, _ = collect(model, cycle, hour, root, include_precipitation=False)
+    base, metadata, _ = collect(model, cycle, hour, root, include_precipitation=False,
+                               upper_level=300 if "gph300" in policy.products(cycle) else 200,
+                               deadline=started+INPUT_WORK_BUDGET_SECONDS)
     if progress:
         progress("base", {"observed_at": datetime.now(timezone.utc).isoformat(),
                           "seconds": round(time.monotonic() - started, 3),
@@ -184,6 +185,7 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
                 return {"complete": policy.expected_keys(model, cycle, hour) <= completed}
         if winter:
             amount = interpolate(total, selected["latitude"], selected["longitude"]) if total is not None else None
+            window_fields=None
             if hour == 0:
                 amount = np.zeros_like(selected["pressure_msl"], dtype=np.float64)
             for name, components in (("acptot", ("acptot", "acptot_snow", "acptot_snowdepth")),
@@ -192,11 +194,23 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
                     continue
                 if done(name, "hkor") and done(name + "1", "hkor"):
                     continue
+                if name == "acrain" and hour == 0 and window_fields is not None:
+                    selected,total=window_fields,None
+                    if progress:
+                        progress("total",{"observed_at":datetime.now(timezone.utc).isoformat(),"sources":[]})
+                else:
+                    selected,total=prepare_diagnostic(model,cycle,hour,root,base,checkpoint_root,progress,cumulative=name=="acrain")
+                if name == "acptot":
+                    window_fields=selected
+                if name == "acrain" and hour:
+                    amount=interpolate(total,selected["latitude"],selected["longitude"])
                 panels = [draw(selected, product, "hkor", accumulation=amount if product == "acrain" else None)
                           for product in components]
                 for suffix, vertical in (("", False), ("1", True)):
                     if not done(name + suffix, "hkor"):
                         emit(name + suffix, "hkor", compose(panels, vertical))
+                if name == "acptot":
+                    emit("surfce", "hkor", alias_of=("acptot", "hkor"))
             emit("surfce", "hkor", alias_of=("acptot", "hkor"))
         else:
             if not done("surfce", "hkor"):
@@ -204,6 +218,8 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
             for name in ("acptot", "acptot1"):
                 emit(name, "hkor", alias_of=("surfce", "hkor"))
             if policy.supports_acrain(cycle, hour) and not done("acrain", "hkor"):
+                if hour:
+                    _,total=prepare_diagnostic(model,cycle,hour,root,base,checkpoint_root,progress,cumulative=True)
                 amount = (np.zeros_like(selected["pressure_msl"], dtype=np.float64) if hour == 0 else
                           interpolate(total, selected["latitude"], selected["longitude"]))
                 emit("acrain", "hkor", draw(selected, "acrain", "hkor", accumulation=amount))

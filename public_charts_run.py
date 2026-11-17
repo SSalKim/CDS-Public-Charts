@@ -439,7 +439,7 @@ def run(args, store=None):
         if not acquired:
             stop_reason = "shared_laptop_lock"
             return False
-        if deadline is not None and time.monotonic() >= deadline:
+        if deadline is not None and time.monotonic() >= deadline+90:
             stop_reason = "time_budget"
             return False
         return True
@@ -481,7 +481,10 @@ def run(args, store=None):
                       "automatic_cycle_check_delay_hours": policy.SOURCE_CHECK_DELAY.total_seconds()/3600,
                       "cycle_check_delay_hours_by_model": {model: policy.source_check_delay(model).total_seconds()/3600
                                                             for model in args.models},
-                      "publication_interval_seconds": publication_interval, "streaming_images": not local}), flush=True)
+                      "publication_interval_seconds": publication_interval, "streaming_images": not local,
+                      "latency_policy":"20261117-v1","seasonal_upper_download":True,
+                      "current_precipitation_first":True,"prepared_cache_max_mib":512,
+                      "prepared_cache_ttl_hours":24,"batch_drain_seconds":90}), flush=True)
     sampler.start()
     failure = None
     try:
@@ -492,6 +495,7 @@ def run(args, store=None):
                       idle_seconds=max(120, minutes * 60), streaming=not local, prefetch=not local,
                       progress=lambda event: print(json.dumps(event), flush=True), on_idle=tick,
                       cleanup_staged=False,keep_alive=remote.keep_alive if remote else None,
+                      can_prepare=lambda:deadline is None or time.monotonic()<deadline-90,
                       memory_budget=memory_budget)
     except BudgetReached:
         pass

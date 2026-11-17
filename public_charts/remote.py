@@ -22,6 +22,8 @@ HEARTBEAT_SECONDS = 30
 LOST_HELPER_SECONDS = 90
 STARTUP_SECONDS = 180
 LEASE_SECONDS = 600
+PROGRESS_GRACE_SECONDS = 360
+MAX_LEASE_SECONDS = 1200
 POLL_SECONDS = 5
 
 
@@ -141,6 +143,7 @@ class RemoteCoordinator:
         self.can_assign = can_assign or (lambda: True)
         self.started, self.deadline = clock(), clock()+minutes*60
         self.leases, self.seen = {}, set()
+        self.progress_sequences = {}
         self.helper_id, self.last_heartbeat = None, None
         self.capacity, self.heavy_capacity, self.reported_active = 0, 0, set()
         self.next_poll, self.last_control, self.sequence, self.errors = 0, 0, 0, 0
@@ -184,6 +187,7 @@ class RemoteCoordinator:
         if self.disabled or self.polling or now < self.next_poll:
             return
         self.next_poll, self.polling = now+POLL_SECONDS, True
+        changed = False
         try:
             run = self.transport.helper_run(self.session) if self.helper_id is None else None
             if run:
@@ -209,6 +213,21 @@ class RemoteCoordinator:
                         self.capacity = message["capacity"]
                         self.heavy_capacity = heavy_capacity
                         self.reported_active = set(active)
+                        progress = message.get("progress",{})
+                        if not isinstance(progress,dict) or not set(progress) <= set(active):
+                            raise ValueError("Invalid helper progress")
+                        for token, item in progress.items():
+                            if (not isinstance(item,dict) or type(item.get("sequence")) is not int
+                                    or item["sequence"] < 1 or type(item.get("at")) not in (int,float)
+                                    or not math.isfinite(item["at"]) or not self.started-30 <= item["at"] <= now+30):
+                                raise ValueError("Invalid helper progress time")
+                            lease = self.leases.get(token)
+                            if lease is not None and item["sequence"] > self.progress_sequences.get(token,0):
+                                self.progress_sequences[token] = item["sequence"]
+                                if now <= lease["expires_at"] and now-item["at"] <= LOST_HELPER_SECONDS:
+                                    lease["expires_at"] = min(max(lease["expires_at"],item["at"]+PROGRESS_GRACE_SECONDS),
+                                                              lease["hard_expires_at"])
+                                    changed = True
                         if message.get("stopped"):
                             self.capacity = 0
                             for lease in self.leases.values():
@@ -220,6 +239,9 @@ class RemoteCoordinator:
                         lease = self.leases.get(message.get("lease"))
                         if lease is not None:
                             staged = import_bundle(message,files,lease,self.work)
+                            if staged["artifacts"] and now <= lease["expires_at"]:
+                                lease["expires_at"] = min(max(lease["expires_at"],now+PROGRESS_GRACE_SECONDS),lease["hard_expires_at"])
+                                changed = True
                             self.queue.rendered(lease["target"],staged)
                             if (not staged["partial"] and staged["error"] is None
                                     and not target_keys(lease["target"]) <= set(self.queue.known(lease["target"]))):
@@ -246,7 +268,6 @@ class RemoteCoordinator:
             if self.last_heartbeat is not None and now-self.last_heartbeat > LOST_HELPER_SECONDS:
                 self.disable("helper_heartbeat_lost")
                 return
-            changed = False
             for token, lease in list(self.leases.items()):
                 if now > lease["expires_at"]:
                     self.queue.reclaim(lease["target"])
@@ -262,7 +283,8 @@ class RemoteCoordinator:
                     break
                 token = uuid.uuid4().hex
                 self.leases[token] = {"id":token,"target":target,"existing":self.queue.known(target),
-                                      "expires_at":min(now+LEASE_SECONDS,self.deadline+480)}
+                                      "expires_at":min(now+LEASE_SECONDS,self.deadline+480),
+                                      "hard_expires_at":min(now+MAX_LEASE_SECONDS,self.deadline+480)}
                 self.emit({"event":"helper_lead_assigned",**target,"lease":token})
                 changed = True
             if changed or now-self.last_control >= HEARTBEAT_SECONDS:
@@ -270,7 +292,8 @@ class RemoteCoordinator:
             self.errors = 0
         except (ArtifactError,ValueError,KeyError,TypeError,OSError,subprocess.SubprocessError) as error:
             self.errors += 1
-            self.emit({"event":"helper_channel_retry","error":type(error).__name__,"attempt":self.errors})
+            self.emit({"event":"helper_channel_retry","error":type(error).__name__,"attempt":self.errors,
+                       **(error.details if isinstance(error,ArtifactError) else {})})
             if isinstance(error,ValueError) and str(error).startswith("Unexpected helper image dimensions:"):
                 self.emit({"event":"helper_image_rejected","reason":str(error)})
             if self.errors >= 3:

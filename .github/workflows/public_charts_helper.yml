@@ -105,7 +105,17 @@ jobs:
             public-charts-prefix-v1-${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py') }}-
       - name: Prepare chart maps
         run: python public_charts_runtime.py --prepare-maps
+      - uses: actions/cache/restore@v4
+        id: input-cache
+        continue-on-error: true
+        with:
+          path: ${{ env.CHART_WORK }}/raw-cache/prepared
+          key: public-charts-input-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: public-charts-input-v1-
+      - name: Limit restored input cache
+        run: python public_charts_runtime.py --prune-inputs "$CHART_WORK"
       - name: Compute leased forecast leads
+        id: compute
         uses: actions/github-script@v8
         with:
           script: |
@@ -115,6 +125,16 @@ jobs:
               child.on('error', reject);
               child.on('close', code => code === 0 ? resolve() : reject(new Error(`Compute helper exited (${code})`)));
             });
+      - name: Limit reusable regional inputs
+        id: input-prune
+        if: always()
+        run: python public_charts_runtime.py --prune-inputs "$CHART_WORK"
+      - uses: actions/cache/save@v4
+        continue-on-error: true
+        if: always() && steps.input-prune.outcome == 'success' && steps.input-cache.outputs.cache-primary-key != ''
+        with:
+          path: ${{ env.CHART_WORK }}/raw-cache/prepared
+          key: ${{ steps.input-cache.outputs.cache-primary-key }}
       - name: Prune verified calculation checkpoints
         id: prune
         if: always()

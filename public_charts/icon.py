@@ -21,6 +21,9 @@ BASE = "https://opendata.dwd.de/weather/nwp"
 GRID_VERSION = 1
 _REMAPPERS = {}
 _GRID_LOCK = threading.Lock()
+_FEED_LOCK = threading.Lock()
+_FEED_FAILURES = {}
+FEED_COOLDOWN_SECONDS = 300
 SURFACE = {"pressure_msl": "PMSL", "surface_pressure": "PS", "terrain_height": "HSURF",
            "temperature_2m": "T_2M", "dewpoint_2m": "TD_2M", "relative_humidity_2m": "RELHUM_2M",
            "wind_u_10m": "U_10M", "wind_v_10m": "V_10M", "precipitation": "TOT_PREC"}
@@ -88,18 +91,30 @@ def read_native(payload, cycle, hour, parameter, level=None, *, constant=False):
 
 
 def native(client, cycle, hour, parameter, level=None, *, constant=False):
+    client.context={"model":"icon","cycle":cycle,"hour":hour,"parameter":parameter,"level":level}
     def retrieve(url):
         # Switch exact-cycle feeds promptly instead of retrying a stalled socket for minutes.
         started = time.monotonic()
         try:
             payload = client.get(url,attempts=1,timeout=(10,15),total_timeout=30)
         except requests.RequestException as error:
+            feed = "v1" if "/v1/" in url else "legacy"
+            with _FEED_LOCK:
+                count, _ = _FEED_FAILURES.get(feed, (0, 0))
+                _FEED_FAILURES[feed] = (count+1, time.monotonic()+FEED_COOLDOWN_SECONDS if count+1 >= 2 else 0)
             print(json.dumps({"event":"icon_feed_retry","model":"icon","cycle":cycle,"hour":hour,
                               "parameter":parameter,"level":level,"feed":"v1" if "/v1/" in url else "legacy",
                               "error":type(error).__name__,"seconds":round(time.monotonic()-started,3)}),flush=True)
             raise
-        return read_native(payload, cycle, hour, parameter, level, constant=constant)
-    return Provider._mirrors(source_urls(cycle, hour, parameter, level, constant=constant), retrieve)
+        result = read_native(payload, cycle, hour, parameter, level, constant=constant)
+        with _FEED_LOCK:
+            _FEED_FAILURES.pop("v1" if "/v1/" in url else "legacy", None)
+        return result
+    urls = source_urls(cycle, hour, parameter, level, constant=constant)
+    with _FEED_LOCK:
+        urls = sorted(urls, key=lambda url: _FEED_FAILURES.get(
+            "v1" if "/v1/" in url else "legacy", (0, 0))[1] > time.monotonic())
+    return Provider._mirrors(urls, retrieve)
 
 
 def inverse_distance(distance):

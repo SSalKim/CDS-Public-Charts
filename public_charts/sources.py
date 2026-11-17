@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import re
 import time
+import uuid
+from urllib.parse import urlsplit
 
 import eccodes as ec
 import numpy as np
@@ -15,6 +17,7 @@ from urllib3.exceptions import HTTPError as RawHTTPError
 
 GRAVITY = 9.80665
 LEVELS = (200, 300, 500, 700, 850, 925)
+check_cancelled = lambda: None
 BOUNDS = (-5, 85, 20, 220)
 ECMWF_BASES = ("https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com",
                "https://storage.googleapis.com/ecmwf-open-data", "https://data.ecmwf.int/forecasts")
@@ -47,6 +50,12 @@ class NotReady(RuntimeError):
     """A missing file or required variable can be retried by the next polling pass."""
 
 
+class SourceDeferred(NotReady):
+    def __init__(self, reason="source_transfer_budget"):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def forecast_hours(model):
     interval = MODELS[model]["interval"]
     return tuple(range(0, 85, interval)) + (90, 96) + tuple(range(108, MODELS[model].get("max_hour",240)+1, 12))
@@ -58,8 +67,11 @@ def accumulation_hours(model,hour):
     return hour-hours[index-1] if index else None
 
 
-def required_fields(model=None):
-    result = {f"{family}_{level}" for level in LEVELS
+def required_fields(model=None, upper_level=None):
+    levels = LEVELS if upper_level is None else tuple(level for level in LEVELS if level not in (200, 300) or level == upper_level)
+    if upper_level not in (None, 200, 300):
+        raise ValueError("Unsupported upper level")
+    result = {f"{family}_{level}" for level in levels
               for family in ("geopotential", "temperature", "wind_u", "wind_v")}
     result |= {f"specific_humidity_{level}" for level in (700, 850, 925)}
     result |= {"pressure_msl"}
@@ -73,13 +85,13 @@ def required_fields(model=None):
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
 
 
 class HttpCache:
-    def __init__(self, root):
+    def __init__(self, root, *, deadline=None):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.session = requests.Session()
@@ -88,13 +100,19 @@ class HttpCache:
         self.bytes = 0
         self.hits = 0
         self.records = []
+        self.deadline = deadline
+        self.context = {}
 
     def file_size(self, url):
         # A compressed NOMADS HEAD can report 20 bytes for a multi-MB GRIB.
+        deadline = min(time.monotonic()+30, self.deadline or float("inf"))
         for attempt in range(3):
+            check_cancelled()
+            if time.monotonic() >= deadline:
+                raise SourceDeferred()
             try:
                 with self.session.get(url, headers={"Range": "bytes=0-0", "Accept-Encoding": "identity"},
-                                      stream=True, timeout=(15, 120)) as response:
+                                      stream=True, timeout=(5, 10)) as response:
                     self.requests += 1
                     if response.status_code in (404, 410):
                         raise NotReady(f"HTTP {response.status_code}: {url}")
@@ -117,6 +135,7 @@ class HttpCache:
         chunks, size = [], 0
         try:
             while True:
+                check_cancelled()
                 if time.monotonic() >= deadline:
                     raise requests.ReadTimeout("Source transfer exceeded its elapsed-time budget")
                 chunk = response.raw.read1(65536,decode_content=True)
@@ -129,7 +148,8 @@ class HttpCache:
         except RawHTTPError:
             raise requests.ConnectionError("Source stream failed") from None
 
-    def get(self, url, byte_range=None, *, cache=True, attempts=3, timeout=(15, 120), total_timeout=None):
+    def get(self, url, byte_range=None, *, cache=True, attempts=3, timeout=(10, 15), total_timeout=45):
+        check_cancelled()
         if attempts < 1:
             raise ValueError("At least one HTTP attempt is required")
         key = hashlib.sha256(f"{url}|{byte_range}".encode()).hexdigest()
@@ -150,37 +170,44 @@ class HttpCache:
                 return value
         headers = {} if byte_range is None else {"Range": f"bytes={byte_range[0]}-{byte_range[1]}",
                                                 "Accept-Encoding": "identity"}
+        started=time.monotonic()
+        deadline = min(started+(total_timeout or 45), self.deadline or float("inf"))
         for attempt in range(attempts):
             response = None
-            deadline = time.monotonic()+total_timeout if total_timeout is not None else None
             try:
-                response = self.session.get(url, headers=headers, timeout=timeout,
-                                            **({"stream":True} if deadline is not None else {}))
+                remaining = deadline-time.monotonic()
+                if remaining <= 0:
+                    raise SourceDeferred()
+                bounded_timeout = tuple(min(value, max(.1, remaining)) for value in timeout)
+                response = self.session.get(url, headers=headers, timeout=bounded_timeout, stream=True)
                 self.requests += 1
                 if response.status_code in (404, 410):
                     raise NotReady(f"HTTP {response.status_code}: {url}")
                 if response.status_code in (429, 500, 502, 503, 504) and attempt < attempts-1:
-                    time.sleep(min(30,max(2,Retry().get_retry_after(response) or 3)))
+                    time.sleep(min(max(0,deadline-time.monotonic()),30,max(2,Retry().get_retry_after(response) or 3)))
                     continue
                 response.raise_for_status()
-                if deadline is not None:
-                    value = self._bounded_body(response,deadline)
+                value = self._bounded_body(response,deadline) if response.raw is not None else response.content
                 break
             except (requests.ConnectionError, requests.Timeout):
                 if attempt == attempts-1:
                     raise
-                time.sleep(2 ** attempt)
+                time.sleep(min(2 ** attempt,max(0,deadline-time.monotonic())))
             finally:
-                if deadline is not None and response is not None:
+                if response is not None:
                     response.close()
-        if total_timeout is None:
-            value = response.content
         self.bytes += len(value)
         if byte_range is not None:
             first, last = byte_range
             if response.status_code != 206 or len(value) != last-first+1:
+                print(json.dumps({"event":"source_response_rejected",**self.context,
+                                  "source_host":urlsplit(url).hostname,"http_status":response.status_code,
+                                  "expected_bytes":last-first+1,"received_bytes":len(value)}),flush=True)
                 raise ValueError(f"Invalid byte-range response: {url}")
             if not response.headers.get("Content-Range", "").startswith(f"bytes {first}-{last}/"):
+                print(json.dumps({"event":"source_response_rejected",**self.context,
+                                  "source_host":urlsplit(url).hostname,"http_status":response.status_code,
+                                  "reason":"content_range"}),flush=True)
                 raise ValueError(f"Incorrect Content-Range: {url}")
         if not valid_payload(value):
             raise NotReady(f"GRIB message is not fully published yet: {url}")
@@ -189,6 +216,10 @@ class HttpCache:
                   "observed_at": datetime.now(timezone.utc).isoformat(),
                   "sha256": hashlib.sha256(value).hexdigest()}
         self.records.append(record)
+        print(json.dumps({"event":"source_received",**self.context,"source_host":urlsplit(url).hostname,
+                          "observed_at":record["observed_at"],"last_modified":record["last_modified"],
+                          "bytes":len(value),"seconds":round(time.monotonic()-started,3),
+                          "kind":"inventory" if url.endswith((".idx",".index")) else "field"}),flush=True)
         if cache:
             temporary = path.with_suffix(".tmp")
             temporary.write_bytes(value)
@@ -354,6 +385,7 @@ class Provider:
         self.model, self.client = model, client
 
     def fetch(self, cycle, hour, wanted):
+        self.client.context={"model":self.model,"cycle":cycle,"hour":hour}
         if self.model == "icon":
             from .icon import IconProvider
             if not hasattr(self, "_icon"):
@@ -378,7 +410,12 @@ class Provider:
             error.response.status_code in {429, 500, 502, 503, 504})
         if any(isinstance(error, NotReady) for error in failures) and all(
                 isinstance(error, NotReady) or transient(error) for error in failures):
+            deferred=next((error for error in failures if isinstance(error,SourceDeferred)),None)
+            if deferred is not None:
+                raise SourceDeferred(deferred.reason) from deferred
             raise NotReady("Source mirrors are not ready; transient mirror errors will also be retried") from failures[-1]
+        if failures and all(transient(error) for error in failures):
+            raise SourceDeferred("source_mirrors_transient") from failures[-1]
         # A real data/permission failure must not turn into an ordinary pending run.
         raise next((error for error in failures if not isinstance(error, NotReady)), failures[-1])
 
@@ -450,6 +487,7 @@ class Provider:
         return result
 
     def sflux(self, cycle, hour):
+        self.client.context={"model":self.model,"cycle":cycle,"hour":hour,"source_kind":"sflux"}
         if self.model!="gfs":
             raise ValueError("Only GFS provides this surface-flux source")
         relative=f"gfs.{cycle[:8]}/{cycle[8:]}/atmos/gfs.t{cycle[8:]}z.sfluxgrbf{hour:03}.grib2"
@@ -468,6 +506,7 @@ class Provider:
         return decode(self.client.get(url,(first,first+length-1)),cycle,hour,"precipitation_rate")
 
     def sflux_surface(self,cycle,hour,wanted):
+        self.client.context={"model":self.model,"cycle":cycle,"hour":hour,"source_kind":"sflux"}
         if self.model!="gfs":
             raise ValueError("GFS surface flux cannot replace another model's fields")
         relative=f"gfs.{cycle[:8]}/{cycle[8:]}/atmos/gfs.t{cycle[8:]}z.sfluxgrbf{hour:03}.grib2"
@@ -586,7 +625,7 @@ def collect_rainfall(provider,cycle,hour,interval):
     return np.sum(pieces,axis=0).astype(np.float32),reference,components
 
 
-def collect(model, cycle, hour, root, *, include_precipitation=True):
+def collect(model, cycle, hour, root, *, include_precipitation=True, upper_level=None, deadline=None):
     directory = Path(root) / "fields" / cycle / model / f"{hour:03}"
     directory.mkdir(parents=True, exist_ok=True)
     path, meta_path = directory/"fields.npz", directory/"metadata.json"
@@ -594,7 +633,7 @@ def collect(model, cycle, hour, root, *, include_precipitation=True):
     rain = accumulation_hours(model,hour) if include_precipitation else None
     sflux_rain = model=="gfs" and rain is not None
     collector_version=4
-    expected=required_fields(model)|({"precipitation"} if rain else set())
+    expected=required_fields(model,upper_level)|({"precipitation"} if rain else set())
     if sflux_rain:
         expected|={"precipitation_latitude","precipitation_longitude"}
     if path.exists() and meta_path.exists():
@@ -608,9 +647,9 @@ def collect(model, cycle, hour, root, *, include_precipitation=True):
                 return arrays, meta, {"requests": 0, "bytes": 0, "cached": True}
         else:
             meta={}
-    client = HttpCache(Path(root)/"grib-cache")
+    client = HttpCache(Path(root)/"grib-cache",deadline=deadline)
     provider = Provider(model, client)
-    wanted=required_fields()-arrays.keys()
+    wanted=required_fields(upper_level=upper_level)-arrays.keys()
     started = time.perf_counter()
     fields = provider.fetch(cycle, hour, wanted) if wanted else {}
     if "terrain_height" not in arrays:

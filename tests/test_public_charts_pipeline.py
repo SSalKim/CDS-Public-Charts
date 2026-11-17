@@ -291,7 +291,7 @@ class ProductionTests(unittest.TestCase):
     def test_zero_keeps_normal_titles_and_all_three_empty_winter_panels(self):
         entries = []
         with patch.object(producer, "collect", return_value=(self.base, {}, {})), \
-                patch.object(producer,"winter_fields",side_effect=lambda extra,base,hour,interval:(base,{})), \
+                patch.object(producer,"winter_fields",side_effect=lambda extra,base,hour,interval,**kwargs:(base,{})), \
                 patch.object(producer.gc, "collect") as collect_figures, \
                 patch.object(producer, "render", side_effect=self.picture) as render:
             result = producer.produce_lead("aifs", "2026111500", 0, self.root, set(),
@@ -330,7 +330,7 @@ class ProductionTests(unittest.TestCase):
         for model in ("aifs", "gfs", "cmc", "ecmwf"):
             cycle = "2026111618" if model == "ecmwf" else "2026111612"
             entries, sizes = [], {}
-            def winter(extra, base, hour, interval):
+            def winter(extra, base, hour, interval, **kwargs):
                 return {**base, "total_snowfall_water_equivalent": np.zeros((2, 2)),
                         "total_snowfall_depth_diagnostic": np.zeros((2, 2))}, {}
             def publish(product, domain, path, alias_of=None):
@@ -375,7 +375,7 @@ class ProductionTests(unittest.TestCase):
         existing = {key for key in policy.expected_keys("aifs", cycle, 0) if "/acrain" not in key}
         entries = []
         with patch.object(producer, "collect", return_value=(self.base, {}, {})), \
-                patch.object(producer, "winter_fields", side_effect=lambda extra,base,hour,interval:(base,{})), \
+                patch.object(producer, "winter_fields", side_effect=lambda extra,base,hour,interval,**kwargs:(base,{})), \
                 patch.object(ExtraFields, "total_rain", side_effect=AssertionError("No accumulation at zero")), \
                 patch.object(producer, "render", side_effect=self.picture) as render:
             result = producer.produce_lead("aifs", cycle, 0, self.root, existing,
