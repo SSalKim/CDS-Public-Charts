@@ -178,6 +178,17 @@ jobs:
       - name: Prepare map data
         if: env.DRY_RUN != 'true'
         run: python public_charts_runtime.py --prepare-maps
+      - uses: actions/cache/restore@v4
+        id: input-cache
+        continue-on-error: true
+        if: env.DRY_RUN != 'true'
+        with:
+          path: ${{ env.CHART_WORK }}/raw-cache/prepared
+          key: public-charts-input-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: public-charts-input-v1-
+      - name: Limit restored input cache
+        if: env.DRY_RUN != 'true'
+        run: python public_charts_runtime.py --prune-inputs "$CHART_WORK"
       - name: Produce available forecast leads
         id: generate
         continue-on-error: true
@@ -214,3 +225,13 @@ jobs:
       - name: Report production failure
         if: always() && steps.generate.outcome == 'failure'
         run: exit 1
+      - name: Limit reusable regional inputs
+        id: input-prune
+        if: always() && env.DRY_RUN != 'true'
+        run: python public_charts_runtime.py --prune-inputs "$CHART_WORK"
+      - uses: actions/cache/save@v4
+        continue-on-error: true
+        if: always() && env.DRY_RUN != 'true' && steps.input-prune.outcome == 'success' && steps.input-cache.outputs.cache-primary-key != ''
+        with:
+          path: ${{ env.CHART_WORK }}/raw-cache/prepared
+          key: ${{ steps.input-cache.outputs.cache-primary-key }}

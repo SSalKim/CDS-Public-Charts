@@ -18,8 +18,11 @@ from urllib.parse import urlsplit
 
 from . import policy
 from .resources import WorkerMemoryBudget
+from . import input_cache
 
 _EVENTS = _CANCELLED = None
+_TASK_FLAGS = None
+_TASK_SLOT = None
 
 
 def child_path(root, *parts):
@@ -44,9 +47,28 @@ def model_workspace(work, model):
     return child_path(work, "render-workers", model)
 
 
-def initialize_renderer(events=None, cancelled=None):
-    global _EVENTS, _CANCELLED
+def check_task_cancelled():
+    if ((_CANCELLED is not None and _CANCELLED.is_set()) or
+            _TASK_FLAGS is not None and _TASK_SLOT is not None and _TASK_FLAGS[_TASK_SLOT]):
+        from .sources import SourceDeferred
+        raise SourceDeferred("task_revoked")
+
+
+def invoke_task(slot, function, *args):
+    global _TASK_SLOT
+    _TASK_SLOT=slot
+    try:
+        return function(*args)
+    finally:
+        _TASK_SLOT=None
+
+
+def initialize_renderer(events=None, cancelled=None, task_flags=None):
+    global _EVENTS, _CANCELLED, _TASK_FLAGS
     _EVENTS, _CANCELLED = events, cancelled
+    _TASK_FLAGS=task_flags
+    from . import sources
+    sources.check_cancelled=check_task_cancelled
     if events is not None:
         events.cancel_join_thread()
     for name in list(os.environ):
@@ -86,6 +108,8 @@ def input_status(info):
 def error_record(exception):
     from .sources import NotReady
     error = {"type": type(exception).__name__, "pending": isinstance(exception, NotReady)}
+    if getattr(exception,"reason",None):
+        error["reason"] = exception.reason
     if not error["pending"]:
         frames = traceback.extract_tb(exception.__traceback__)
         error["location"] = [{"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
@@ -118,16 +142,19 @@ def prepare_lead(target, work):
     if watch:
         faulthandler.dump_traceback_later(180,repeat=True)
     try:
+        restored=input_cache.restore(work,target,root)
         arrays, metadata, statistics = collect(target["model"], target["cycle"], target["hour"], root,
-                                                include_precipitation=False)
+                                                include_precipitation=False,
+                                                upper_level=300 if "gph300" in policy.products(target["cycle"]) else 200,
+                                                deadline=started+180)
+        input_cache.save(work,target,root)
         del arrays
         status = input_status({"observed_at": datetime.now(timezone.utc).isoformat(),
                                "seconds": round(time.monotonic() - started, 3),
                                "sources": metadata.get("sources", [])})
         return {"error": None, "inputs": status, "pid":os.getpid(), "requests": statistics.get("requests", 0),
-                "bytes": statistics.get("bytes", 0)}
+                "bytes": statistics.get("bytes", 0),"reused_prepared":restored}
     except Exception as exception:
-        cleanup_raw(lead_workspace(work, target))
         return {"error": error_record(exception),"pid":os.getpid()}
     finally:
         if watch:
@@ -157,6 +184,7 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
         if _EVENTS is None:
             return
         while _CANCELLED is None or not _CANCELLED.is_set():
+            check_task_cancelled()
             try:
                 _EVENTS.put((kind, target, payload), timeout=.2)
                 return
@@ -165,7 +193,7 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
         raise RuntimeError("Chart publication stopped")
 
     def progress(phase, info):
-        if phase not in {"base", "surface"}:
+        if phase not in {"base", "surface", "window", "total"}:
             send("diagnostic", {"event": phase, **info})
             return
         status = preparation["inputs"] if phase == "base" and preparation else input_status(info)
@@ -175,7 +203,9 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
     def emit(product, domain, path, alias_of=None):
         if policy.key(model, cycle, hour, product, domain) not in expected:
             raise ValueError("Unexpected staged product")
-        phase = "base" if product in policy.products(cycle) else "surface"
+        phase = ("base" if product in policy.products(cycle) else "total" if product.startswith("acrain")
+                 else "window" if product.startswith("acptot") or product == "surfce" and domain == "hkor" and policy.winter(model,cycle)
+                 else "surface")
         artifact = {"product": product, "domain": domain, "alias_of": alias_of,
                     "created_at": datetime.now(timezone.utc).isoformat(), **inputs.get(phase, {})}
         if alias_of:
@@ -209,7 +239,9 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
         if watch:
             faulthandler.cancel_dump_traceback_later()
         if not raw_override:
-            cleanup_raw(workspace)
+            input_cache.save(work,target,raw)
+            if error is None:
+                cleanup_raw(workspace)
         gc.collect()
     return {"artifacts": artifacts, "result": result, "error": error,
             "render_seconds": round(time.monotonic() - started, 3), "pid": os.getpid(),
@@ -337,7 +369,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                   renderer=None, started=None, refresh=None, refresh_seconds=120,
                   can_schedule=None, idle_seconds=120, streaming=False, prefetch=False,
                   prefetcher=None, progress=None, on_idle=None, cleanup_staged=True, keep_alive=None,
-                  memory_budget=None):
+                  memory_budget=None, can_prepare=None, target_valid=None):
     """consume runs only on the main process, including after renderer failures."""
     if workers not in (1, 2, 3, 4) or workers > 1 and raw_override:
         raise ValueError("Use one to four workers; a local cache override requires one")
@@ -352,6 +384,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
     context = multiprocessing.get_context("spawn")
     events = context.Queue(maxsize=workers * 8) if streaming else None
     cancelled = context.Event()
+    task_flags = context.Array("b",workers,lock=False)
     try:
         if workers == 1 and not refresh and not streaming and not prefetch:
             while (target := queue.next(set())) is not None:
@@ -378,8 +411,9 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
             try:
                 with ProcessPoolExecutor(max_workers=workers, mp_context=context,
                                          initializer=initialize_renderer,
-                                         initargs=(events, cancelled)) as executor:
+                                         initargs=(events, cancelled,task_flags)) as executor:
                     pending, active, prepared, announced, finished = {}, set(), deque(), set(), set()
+                    task_slots={}
                     next_refresh = time.monotonic() + refresh_seconds
                     last_progress = time.monotonic()
                     memory_paused = False
@@ -428,7 +462,10 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                         known = policy.expected_keys(target["model"], target["cycle"], target["hour"]) & queue.existing
                         memory_budget.start("render",target)
                         try:
-                            future = executor.submit(stage_lead, target, work, known, force, None, renderer, preparation)
+                            slot=next(index for index in range(workers) if index not in task_slots.values())
+                            task_flags[slot]=0
+                            future = executor.submit(invoke_task,slot,stage_lead, target, work, known, force, None, renderer, preparation)
+                            task_slots[future]=slot
                         except BaseException:
                             memory_budget.finish("render",target)
                             raise
@@ -438,20 +475,31 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
 
                     try:
                         while not stop.is_set():
+                            if target_valid:
+                                for future,(_,target) in pending.items():
+                                    if not target_valid(target):
+                                        task_flags[task_slots[future]]=1
                             drain_events()
                             scheduling = can_schedule is None or can_schedule()
-                            if refresh and scheduling and time.monotonic() >= next_refresh:
+                            preparation_allowed = scheduling and (can_prepare is None or can_prepare())
+                            if refresh and preparation_allowed and time.monotonic() >= next_refresh:
                                 queue.refresh(refresh())
                                 cleanup_models.update(queue.queues)
                                 next_refresh = time.monotonic() + refresh_seconds
                             for _ in range(len(prepared)):
                                 target, preparation = prepared.popleft()
+                                if target_valid and not target_valid(target):
+                                    active.remove(identity(target))
+                                    error={"type":"SourceDeferred","pending":True,"reason":"task_revoked"}
+                                    queue.finished(target,error)
+                                    deliver(("lead",target,{"artifacts":[],"result":{},"error":error,"partial":False,"pid":None,"render_seconds":0}))
+                                    continue
                                 if (scheduling and (can_schedule is None or can_schedule())
                                         and len(pending) < workers and memory_budget.can_start()):
                                     submit_render(target, preparation)
                                 else:
                                     prepared.append((target, preparation))
-                            while (scheduling and (can_schedule is None or can_schedule()) and len(pending) < workers
+                            while (preparation_allowed and (can_schedule is None or can_schedule()) and len(pending) < workers
                                    and memory_budget.can_start()
                                    and (target := queue.next(active, preparing=prefetch)) is not None):
                                 active.add(identity(target))
@@ -459,7 +507,10 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 if prefetch:
                                     memory_budget.start("prepare",target)
                                     try:
-                                        future = executor.submit(prefetcher or prepare_lead, target, work)
+                                        slot=next(index for index in range(workers) if index not in task_slots.values())
+                                        task_flags[slot]=0
+                                        future = executor.submit(invoke_task,slot,prefetcher or prepare_lead, target, work)
+                                        task_slots[future]=slot
                                     except BaseException:
                                         memory_budget.finish("prepare",target)
                                         raise
@@ -490,6 +541,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                             drain_events()
                             for future in completed:
                                 kind, target = pending.pop(future)
+                                task_flags[task_slots.pop(future)]=0
                                 result = None
                                 try:
                                     result = future.result()
@@ -503,7 +555,8 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                     prepared.append((target, result))
                                     last_progress = time.monotonic()
                                     deliver(("progress", target, {"event": "prefetch_ready", **target,
-                                                                  **result.get("inputs", {})}))
+                                                                  **result.get("inputs", {}),
+                                                                  **{key:result.get(key) for key in ("requests","bytes","reused_prepared")}}))
                                     continue
                                 active.remove(identity(target))
                                 if kind == "prepare":

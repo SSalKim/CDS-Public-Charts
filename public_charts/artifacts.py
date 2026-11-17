@@ -19,7 +19,9 @@ SESSION_PATTERN = re.compile(r"[1-9][0-9]*-[1-9][0-9]*\Z")
 
 
 class ArtifactError(RuntimeError):
-    pass
+    def __init__(self, message, *, operation=None, http_status=None):
+        super().__init__(message)
+        self.details = {key:value for key,value in {"operation":operation,"http_status":http_status}.items() if value is not None}
 
 
 def validate_session(value):
@@ -70,14 +72,17 @@ class GitHubArtifacts:
     def api(self, method, endpoint, **kwargs):
         if not endpoint.startswith(f"repos/{self.repository}/actions/"):
             raise ArtifactError("Unexpected Actions endpoint")
+        operation=("artifact_lookup" if endpoint.endswith("/zip") else "artifact_list" if endpoint.endswith("/artifacts")
+                   else "helper_dispatch" if endpoint.endswith("/dispatches") else "helper_discovery" if endpoint.endswith("/runs")
+                   else "artifact_delete" if method == "DELETE" else "actions_request")
         try:
             response = self.http.request(method, "https://api.github.com/" + endpoint,
                                          timeout=(10, 30), allow_redirects=False, **kwargs)
             if response.status_code not in (200, 201, 202, 204, 302):
-                raise ArtifactError(f"Actions request failed: {response.status_code}")
+                raise ArtifactError(f"Actions request failed: {response.status_code}",operation=operation,http_status=response.status_code)
             return response
         except requests.RequestException as error:
-            raise ArtifactError(f"Actions transport failed: {type(error).__name__}") from None
+            raise ArtifactError(f"Actions transport failed: {type(error).__name__}",operation=operation) from None
 
     def list(self, run_id, prefix):
         result = []
@@ -106,7 +111,7 @@ class GitHubArtifacts:
         try:
             with requests.get(location, stream=True, allow_redirects=False, timeout=(10, 60)) as download:
                 if download.status_code != 200:
-                    raise ArtifactError("Artifact download failed")
+                    raise ArtifactError("Artifact download failed",operation="artifact_download",http_status=download.status_code)
                 chunks, size = [], 0
                 for chunk in download.iter_content(1024 * 1024):
                     size += len(chunk)
@@ -115,7 +120,7 @@ class GitHubArtifacts:
                     chunks.append(chunk)
             payload = b"".join(chunks)
         except requests.RequestException as error:
-            raise ArtifactError(f"Artifact download transport failed: {type(error).__name__}") from None
+            raise ArtifactError(f"Artifact download transport failed: {type(error).__name__}",operation="artifact_download") from None
         digest = item.get("digest")
         if digest and digest != "sha256:" + hashlib.sha256(payload).hexdigest():
             raise ArtifactError("Actions artifact digest mismatch")
@@ -144,7 +149,7 @@ class GitHubArtifacts:
             command = ["node", str(Path(__file__).parent / "transport/upload.cjs"), name, str(root)]
             result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=120)
             if result.returncode:
-                raise ArtifactError("Actions artifact upload failed")
+                raise ArtifactError("Actions artifact upload failed",operation="artifact_upload")
             marker = next((line for line in result.stdout.splitlines() if line.startswith("CHART_ARTIFACT_RESPONSE ")), None)
             if marker is None:
                 raise ArtifactError("Actions artifact upload returned no ID")

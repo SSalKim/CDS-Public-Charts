@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import time
+import uuid
 import numpy as np
 import metpy.calc as mpcalc
 from metpy.units import units
@@ -22,28 +23,38 @@ class DiagnosticDeferred(NotReady):
 
 
 class ExtraFields:
-    def __init__(self,root,model,cycle,*,deadline=None):
+    def __init__(self,root,model,cycle,*,deadline=None,progress=None):
         self.root=Path(root)/"extended-fields"/cycle/model
         self.model,self.cycle=model,cycle
-        self.client=HttpCache(Path(root)/"grib-cache")
+        self.client=HttpCache(Path(root)/"grib-cache",deadline=deadline)
         self.provider=Provider(model,self.client)
         self.notes=[]
         self.checkpoints=Path(root)/"checkpoints"/cycle/model
         self.deadline=deadline
+        self.progress=progress
 
     def check_budget(self,reason="cumulative_work_budget"):
+        from .sources import check_cancelled
+        check_cancelled()
         if self.deadline is not None and time.monotonic() >= self.deadline:
             raise DiagnosticDeferred(reason)
 
     @contextmanager
-    def checkpoint_lock(self):
+    def checkpoint_lock(self, *, commit=False):
         """Only cumulative-prefix calculation is serialized, not map rendering."""
         self.checkpoints.mkdir(parents=True,exist_ok=True)
         with (self.checkpoints/".writer.lock").open("a+b") as handle:
+            commit_deadline=time.monotonic()+5
+            def check_wait():
+                if commit:
+                    if time.monotonic() >= commit_deadline:
+                        raise DiagnosticDeferred("checkpoint_commit_budget")
+                else:
+                    self.check_budget("checkpoint_wait_budget")
             if os.name=="nt":
                 import msvcrt
                 while True:
-                    self.check_budget("checkpoint_wait_budget")
+                    check_wait()
                     try:
                         handle.seek(0)
                         msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
@@ -59,7 +70,7 @@ class ExtraFields:
             else:
                 import fcntl
                 while True:
-                    self.check_budget("checkpoint_wait_budget")
+                    check_wait()
                     try:
                         fcntl.flock(handle,fcntl.LOCK_EX | fcntl.LOCK_NB)
                         break
@@ -93,7 +104,7 @@ class ExtraFields:
     def save_checkpoint(self,name,arrays):
         path=self.checkpoints/name
         path.parent.mkdir(parents=True,exist_ok=True)
-        temporary=path.with_suffix(".tmp")
+        temporary=path.with_name(path.name+f".{uuid.uuid4().hex}.tmp")
         with temporary.open("wb") as stream:
             np.savez_compressed(stream,**arrays)
         temporary.replace(path)
@@ -176,7 +187,10 @@ class ExtraFields:
             else:
                 rain=field.values.astype(np.float64)
             total={"values":rain,"latitude":field.latitude,"longitude":field.longitude}
-            self.save_checkpoint(f"rain/{end:03}.npz",total)
+            with self.checkpoint_lock(commit=True):
+                self.save_checkpoint(f"rain/{end:03}.npz",total)
+            if self.progress:
+                self.progress("diagnostic_step_ready",{"kind":"rain","step_hour":end})
         return Decoded(total["values"].astype(np.float32),total["latitude"],total["longitude"],
                        {"startStep":0,"endStep":hour,"units":"mm"})
 
@@ -286,10 +300,20 @@ def snow_step(extra,end,cadence):
             "snowfall_water_equivalent":snow,"snowfall_depth_diagnostic":depth}
 
 
-def winter_fields(extra,base,hour,interval):
+def cached_snow_step(extra,end,cadence):
+    current=extra.checkpoint(f"steps/{end:03}.npz")
+    if current is None:
+        current=snow_step(extra,end,cadence)
+        extra.save_checkpoint(f"steps/{end:03}.npz",current)
+        if extra.progress:
+            extra.progress("diagnostic_step_ready",{"kind":"snow","step_hour":end})
+    return current
+
+
+def winter_fields(extra,base,hour,interval,*,cumulative=True):
     if extra.model=="aigfs":
         raise NotReady("AIGFS has no near-surface humidity or native snowfall in its open product")
-    target=extra.root/f"{hour:03}"/"winter-v2.npz"
+    target=extra.root/f"{hour:03}"/("winter-v2.npz" if cumulative else "winter-window-v2.npz")
     metadata_path=target.with_suffix(".json")
     if target.exists() and metadata_path.exists():
         metadata=json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -298,8 +322,8 @@ def winter_fields(extra,base,hour,interval):
                 return {key:archive[key] for key in archive.files},metadata
     cadence=MODELS[extra.model]["rain"]
     total_snow=total_depth=window_snow=window_depth=None
-    start=0
-    for previous_end in range(hour-interval,0,-cadence):
+    start=0 if cumulative else max(0,hour-interval)
+    for previous_end in (range(hour-interval,0,-cadence) if cumulative else ()):
         extra.check_budget()
         previous=extra.checkpoint(f"snow/{previous_end:03}.npz")
         if previous is not None:
@@ -316,9 +340,9 @@ def winter_fields(extra,base,hour,interval):
                     "total_snowfall_water_equivalent","total_snowfall_depth_diagnostic")})
     for end in range(start+cadence,hour+1,cadence):
         extra.check_budget()
-        current=extra.checkpoint(f"snow/{end:03}.npz")
+        current=extra.checkpoint(f"snow/{end:03}.npz") if cumulative else None
         if current is None:
-            current=snow_step(extra,end,cadence)
+            current=dict(cached_snow_step(extra,end,cadence))
             snow=current["snowfall_water_equivalent"]
             depth=current["snowfall_depth_diagnostic"]
             if total_snow is None:
@@ -328,7 +352,9 @@ def winter_fields(extra,base,hour,interval):
             total_depth=total_depth+depth
             current.update(total_snowfall_water_equivalent=total_snow,
                            total_snowfall_depth_diagnostic=total_depth)
-            extra.save_checkpoint(f"snow/{end:03}.npz",current)
+            if cumulative:
+                with extra.checkpoint_lock(commit=True):
+                    extra.save_checkpoint(f"snow/{end:03}.npz",current)
         total_snow=current["total_snowfall_water_equivalent"]
         total_depth=current["total_snowfall_depth_diagnostic"]
         snow=current["snowfall_water_equivalent"]

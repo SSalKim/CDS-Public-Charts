@@ -30,7 +30,7 @@ class FileSizeTests(unittest.TestCase):
         value.raw.read1.side_effect = [b"G",b"R",b"I"]
         value.close = Mock()
         self.client.session.get.return_value = value
-        with patch("public_charts.sources.time.monotonic",side_effect=[0,1,2,31]), \
+        with patch("public_charts.sources.time.monotonic",side_effect=[0,0,1,2,31]), \
                 self.assertRaises(requests.ReadTimeout):
             self.client.get("https://example.invalid/source.grib2",attempts=1,total_timeout=30)
         self.assertEqual(value.raw.read1.call_count,2)
@@ -201,7 +201,7 @@ class MirrorTests(unittest.TestCase):
         with self.assertRaises(NotReady):
             Provider("ecmwf",client).fetch("2026111606",0,{"pressure_msl"})
         client.get.side_effect=error
-        with self.assertRaises(requests.HTTPError):
+        with self.assertRaises(NotReady):
             Provider("ecmwf",client).fetch("2026111606",0,{"pressure_msl"})
 
     def test_wrong_cycle_primary_does_not_contaminate_secondary_result(self):

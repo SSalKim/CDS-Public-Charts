@@ -52,6 +52,7 @@ class ComputeHelper:
         self.work, self.workers, self.smoke = Path(work), workers, smoke
         self.parent_id = int(session.split("-")[0])
         self.control, self.tokens, self.waiting = {}, {}, {}
+        self.progress_records = {}
         self.queue = HelperQueue(self)
         self.sequence, self.next_poll, self.last_heartbeat = 0, 0, 0
         self.started, self.latest_control = time.time(), ""
@@ -81,11 +82,16 @@ class ComputeHelper:
         self.upload({"kind":"heartbeat","generated_at":time.time(),"capacity":capacity,
                      "heavy_capacity":min(capacity,budget["heavy_workers"]),
                      "heavy_active_workers":budget["heavy_active_workers"],
-                     "active":list(self.tokens.values()),"stopped":stopped})
+                     "active":list(self.tokens.values()),"stopped":stopped,
+                     "progress":{token:item for token,item in self.progress_records.items() if token in self.tokens.values()}})
         self.last_heartbeat = time.time()
 
     def targets(self):
         return [lease["target"] for lease in self.control.get("leases",[]) if self.valid_lease(lease)]
+
+    def target_valid(self,target):
+        token=self.tokens.get(identity(target))
+        return any(lease["id"] == token and self.valid_lease(lease) for lease in self.control.get("leases",[]))
 
     def poll_control(self):
         entries = self.transport.list(self.parent_id,f"chart-control-{self.session}-")
@@ -131,6 +137,8 @@ class ComputeHelper:
             self.tokens.pop(key,None)
 
     def consume(self, target, staged):
+        if staged["artifacts"]:
+            self.progress({**target,"event":"image_encoded"})
         key = identity(target)
         if key in self.waiting:
             previous = self.waiting[key][1]
@@ -138,6 +146,13 @@ class ComputeHelper:
         self.waiting[key] = (target,staged,time.time())
         if len(staged["artifacts"]) >= 4 or not staged.get("partial"):
             self.flush(key)
+
+    def progress(self, event):
+        token = self.tokens.get(identity(event)) if all(name in event for name in ("model","cycle","hour")) else None
+        if token and event.get("event") in {"prefetch_ready","inputs_ready","product_finished","image_encoded","diagnostic_step_ready"}:
+            previous = self.progress_records.get(token,{"sequence":0})
+            self.progress_records[token] = {"sequence":previous["sequence"]+1,"at":time.time()}
+        print(json.dumps(event),flush=True)
 
     def tick(self):
         now = time.time()
@@ -156,7 +171,8 @@ class ComputeHelper:
             self.transport_failures = 0
         except (ArtifactError,ValueError,KeyError,TypeError,OSError) as error:
             self.transport_failures += 1
-            print(json.dumps({"event":"helper_transport_retry","error":type(error).__name__,"attempt":self.transport_failures}),flush=True)
+            print(json.dumps({"event":"helper_transport_retry","error":type(error).__name__,"attempt":self.transport_failures,
+                              **(error.details if isinstance(error,ArtifactError) else {})}),flush=True)
             if self.transport_failures >= 3:
                 self.control = {"stop":True}
 
@@ -175,7 +191,8 @@ class ComputeHelper:
                           prefetch=not self.smoke, renderer=smoke_renderer if self.smoke else None,
                           refresh=self.targets,refresh_seconds=5,keep_alive=self.can_schedule,
                           can_schedule=self.can_schedule,on_idle=self.tick,
-                          progress=lambda event:print(json.dumps(event),flush=True),memory_budget=self.memory_budget)
+                          target_valid=self.target_valid,
+                          progress=self.progress,memory_budget=self.memory_budget)
             for key in list(self.waiting):
                 self.flush(key)
             if self.control:

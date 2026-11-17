@@ -33,6 +33,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare-maps", action="store_true")
     parser.add_argument("--prune-checkpoints", type=Path)
+    parser.add_argument("--prune-inputs", type=Path)
     args = parser.parse_args()
     if args.prepare_maps:
         import public_charts.plotter
@@ -44,6 +45,9 @@ def main():
             shapereader.natural_earth(resolution=resolution, category=category, name=name)
     if args.prune_checkpoints:
         prune_checkpoints(args.prune_checkpoints)
+    if args.prune_inputs:
+        from public_charts.input_cache import prune
+        prune(args.prune_inputs)
 
 
 if __name__ == "__main__":
