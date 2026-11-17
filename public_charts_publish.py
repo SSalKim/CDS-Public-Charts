@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import time
 
 MANIFEST = "data/public_charts_manifest.json"
@@ -18,40 +19,49 @@ def publish_manifest(root):
     path = root / MANIFEST
     if path.is_symlink() or not path.resolve().is_relative_to(root):
         raise PublicationError("Unsafe public manifest path")
-    expected = json.loads(path.read_text(encoding="utf-8"))
+    payload = path.read_bytes()
+    expected = json.loads(payload)
 
-    def git(*args, check=True):
-        return subprocess.run(["git", "-c", f"safe.directory={root.as_posix()}", *BOT_CONFIG, *args], cwd=root,
+    def git(*args, check=True, cwd=root):
+        return subprocess.run(["git", "-c", f"safe.directory={root.as_posix()}",
+                               "-c",f"safe.directory={Path(cwd).as_posix()}",*BOT_CONFIG, *args], cwd=cwd,
                               capture_output=True, text=True, encoding="utf-8", check=check, timeout=120)
 
     try:
-        git("add", "--", MANIFEST)
-        changed = git("diff", "--cached", "--quiet", "--", MANIFEST, check=False).returncode
-        if changed not in (0, 1):
-            raise PublicationError("Cannot inspect the public manifest diff")
-        if changed:
-            git("commit", "--only", "-m", "Update public chart availability", "--", MANIFEST)
-        # Preserve the path back to the runner's shallow boundary when main moves.
+        # Never rebase the checkout used by live Python processes and lazy imports.
         git("fetch", "origin", "main")
         published = json.loads(git("show", f"origin/main:{MANIFEST}").stdout)
+        changed = expected != published
         if expected != published:
             files = set(git("log", "--format=", "--name-only", "origin/main..HEAD").stdout.split())
-            if files != {MANIFEST}:
+            if files - {MANIFEST}:
                 raise PublicationError("Unpublished changes are not a manifest-only commit")
-            for attempt in range(3):
-                if git("push", "origin", "HEAD:main", check=False).returncode == 0:
-                    break
-                if attempt == 2:
-                    raise PublicationError("Public manifest push failed; cleanup is blocked")
-                git("pull", "--rebase", "origin", "main")
-                time.sleep(3)
+            with tempfile.TemporaryDirectory(prefix="chart-manifest-publish-") as temporary:
+                publication = Path(temporary).resolve()/"checkout"
+                git("worktree","add","--detach",str(publication),"origin/main")
+                try:
+                    destination=publication/MANIFEST
+                    destination.parent.mkdir(parents=True,exist_ok=True)
+                    destination.write_bytes(payload)
+                    git("add","--",MANIFEST,cwd=publication)
+                    git("commit","--only","-m","Update public chart availability","--",MANIFEST,cwd=publication)
+                    for attempt in range(3):
+                        if git("push", "origin", "HEAD:main", check=False,cwd=publication).returncode == 0:
+                            break
+                        if attempt == 2:
+                            raise PublicationError("Public manifest push failed; cleanup is blocked")
+                        git("pull", "--rebase", "origin", "main",cwd=publication)
+                        time.sleep(3)
+                finally:
+                    # Only this call's freshly created temporary worktree is removed.
+                    git("worktree","remove","--force",str(publication),check=False)
             git("fetch", "origin", "main")
             published = json.loads(git("show", f"origin/main:{MANIFEST}").stdout)
         if expected != published:
             raise PublicationError("Remote manifest differs; cleanup is blocked")
     except subprocess.CalledProcessError as error:
         operation = next((word for word in error.cmd if word in {
-            "add", "diff", "commit", "fetch", "show", "log", "push", "pull"}), "git")
+            "add", "diff", "commit", "fetch", "show", "log", "push", "pull", "worktree"}), "git")
         stderr = (error.stderr or "").lower()
         reason = next((label for pattern, label in (
             ("identity unknown", "missing_bot_identity"),

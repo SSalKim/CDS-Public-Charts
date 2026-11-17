@@ -103,6 +103,8 @@ class PublicationTests(unittest.TestCase):
         git(self.local, "push", "origin", "main")
         shallow = self.local.parent / "shallow-runner"
         git(self.local.parent, "clone", "--depth=1", self.remote.as_uri(), str(shallow))
+        frozen_head=git(shallow,"rev-parse","HEAD")
+        frozen_code=(shallow/"baseline.py").read_bytes()
         self.assertEqual(git(shallow, "rev-parse", "--is-shallow-repository").strip(), "true")
         (self.local / "code.py").write_text("value = 2\n", encoding="utf-8")
         git(self.local, "add", "code.py")
@@ -117,6 +119,10 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual(publish_manifest(shallow), expected)
         self.assertEqual(self.remote_manifest(), expected)
         self.assertEqual(git(self.remote, "show", "main:code.py").strip(), "value = 2")
+        self.assertEqual(git(shallow,"rev-parse","HEAD"),frozen_head)
+        self.assertEqual((shallow/"baseline.py").read_bytes(),frozen_code)
+        self.assertFalse((shallow/"code.py").exists())
+        self.assertEqual(len(git(shallow,"worktree","list","--porcelain").split("worktree "))-1,1)
 
 
 if __name__ == "__main__":
