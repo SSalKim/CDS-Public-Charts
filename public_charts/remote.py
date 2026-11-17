@@ -216,16 +216,16 @@ class RemoteCoordinator:
                         progress = message.get("progress",{})
                         if not isinstance(progress,dict) or not set(progress) <= set(active):
                             raise ValueError("Invalid helper progress")
-                        for token, item in progress.items():
-                            if (not isinstance(item,dict) or type(item.get("sequence")) is not int
-                                    or item["sequence"] < 1 or type(item.get("at")) not in (int,float)
-                                    or not math.isfinite(item["at"]) or not self.started-30 <= item["at"] <= now+30):
+                        for token, progress_item in progress.items():
+                            if (not isinstance(progress_item,dict) or type(progress_item.get("sequence")) is not int
+                                    or progress_item["sequence"] < 1 or type(progress_item.get("at")) not in (int,float)
+                                    or not math.isfinite(progress_item["at"]) or not self.started-30 <= progress_item["at"] <= now+30):
                                 raise ValueError("Invalid helper progress time")
                             lease = self.leases.get(token)
-                            if lease is not None and item["sequence"] > self.progress_sequences.get(token,0):
-                                self.progress_sequences[token] = item["sequence"]
-                                if now <= lease["expires_at"] and now-item["at"] <= LOST_HELPER_SECONDS:
-                                    lease["expires_at"] = min(max(lease["expires_at"],item["at"]+PROGRESS_GRACE_SECONDS),
+                            if lease is not None and progress_item["sequence"] > self.progress_sequences.get(token,0):
+                                self.progress_sequences[token] = progress_item["sequence"]
+                                if now <= lease["expires_at"] and now-progress_item["at"] <= LOST_HELPER_SECONDS:
+                                    lease["expires_at"] = min(max(lease["expires_at"],progress_item["at"]+PROGRESS_GRACE_SECONDS),
                                                               lease["hard_expires_at"])
                                     changed = True
                         if message.get("stopped"):

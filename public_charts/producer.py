@@ -202,8 +202,9 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
                     selected,total=prepare_diagnostic(model,cycle,hour,root,base,checkpoint_root,progress,cumulative=name=="acrain")
                 if name == "acptot":
                     window_fields=selected
-                if name == "acrain" and hour:
-                    amount=interpolate(total,selected["latitude"],selected["longitude"])
+                if name == "acrain":
+                    amount=(interpolate(total,selected["latitude"],selected["longitude"]) if hour else
+                            np.zeros_like(selected["pressure_msl"],dtype=np.float64))
                 panels = [draw(selected, product, "hkor", accumulation=amount if product == "acrain" else None)
                           for product in components]
                 for suffix, vertical in (("", False), ("1", True)):
