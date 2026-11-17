@@ -19,13 +19,16 @@ def smoke_renderer(model, cycle, hour, root, existing, publish, **kwargs):
     from PIL import Image
     from public_charts import policy
     from public_charts.producer import encode
-    for key in sorted(policy.expected_keys(model,cycle,hour)-existing):
+    for index,key in enumerate(sorted(policy.expected_keys(model,cycle,hour)-existing)):
         product, domain = key.split("/")[-2:]
         path = Path(root) / "images" / (product+"-"+domain+".webp")
         image = Image.new("RGB",image_size(product,domain,model,cycle),"white")
         image.paste((0,80,180),(0,0,128,128))
         encode(image,path)
         publish(product,domain,path)
+        if index == 0 and model == "gfs" and os.environ.get("HELPER_SMOKE") == "true":
+            # Keep one real lease alive across progress heartbeats, not just a quick bundle.
+            time.sleep(HEARTBEAT_SECONDS*2+5)
     return {"complete":True}
 
 

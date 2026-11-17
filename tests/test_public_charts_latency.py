@@ -113,16 +113,51 @@ class ProgressLeaseTests(unittest.TestCase):
         self.broker.tick()
         renewed=lease["expires_at"]
         self.assertGreater(renewed,initial)
+        self.assertEqual(self.broker.errors,0)
+        self.assertFalse(self.transport.entries)
         self.clock+=60
         self.transport.push(message("heartbeat",generated_at=self.clock,capacity=2,active=[token],
                                     progress={token:{"sequence":1,"at":self.clock}}))
         self.broker.tick()
         self.assertEqual(lease["expires_at"],renewed)
+        self.assertEqual(self.broker.errors,0)
+        self.assertFalse(self.broker.disabled)
+        self.assertFalse(self.transport.entries)
+
+    def test_multiple_progress_heartbeats_remain_healthy_and_consume_their_artifacts(self):
+        self.heartbeat()
+        tokens=list(self.broker.leases)
+        for sequence in range(1,5):
+            self.clock+=30
+            self.transport.push(message("heartbeat",generated_at=self.clock,capacity=2,active=tokens,
+                                        progress={token:{"sequence":sequence,"at":self.clock} for token in tokens}))
+            self.broker.tick()
+            self.assertEqual(self.broker.errors,0)
+            self.assertFalse(self.broker.disabled)
+            self.assertEqual(set(self.broker.leases),set(tokens))
+            self.assertFalse(self.transport.entries)
 
 
 class DiagnosticSeparationTests(unittest.TestCase):
     setUp=pipeline_tests.ProductionTests.setUp
     picture=staticmethod(pipeline_tests.ProductionTests.picture)
+
+    def test_zero_gfs_total_uses_the_selected_surface_grid_not_the_upper_grid(self):
+        selected={"latitude":np.array([31.,35.,39.]),"longitude":np.array([120.,123.,126.,129.]),
+                  "pressure_msl":np.full((3,4),101000.),"terrain_height":np.zeros((3,4)),
+                  "precipitation":np.zeros((3,4)),"total_snowfall_water_equivalent":np.zeros((3,4)),
+                  "total_snowfall_depth_diagnostic":np.zeros((3,4))}
+        def picture(arrays,cycle,hour,product,*args,**kwargs):
+            if product == "acrain":
+                self.assertEqual(args[2].shape,arrays["pressure_msl"].shape)
+                self.assertFalse(np.any(args[2]))
+            return self.picture()
+        with patch.object(producer,"collect",return_value=(self.base,{},{})), \
+                patch.object(producer,"winter_fields",return_value=(selected,{})), \
+                patch.object(producer,"render",side_effect=picture), \
+                patch.object(ExtraFields,"total_rain",side_effect=AssertionError("No zero-hour accumulation")):
+            result=producer.produce_lead("gfs","2026111712",0,self.root,set(),lambda *args,**kwargs:None)
+        self.assertTrue(result["complete"])
     def test_current_precipitation_is_published_even_when_total_is_deferred(self):
         entries=[]
         fields={**self.base,"precipitation":np.ones((2,2))}
