@@ -154,6 +154,43 @@ test("old chart trigger remains usable during code-first deployment", async () =
   assert(calls.at(-1).url.includes("/CDS-Public-Charts/"));
 });
 
+for (const cron of ["*/1 * * * *", "0-59 * * * *", "0-59/1 * * * *", "  */1   * *\t* *  "]) {
+  test(`equivalent every-minute expression routes charts: ${JSON.stringify(cron)}`, async () => {
+    const { dispatcher, calls } = fixture();
+    const pending = [];
+    dispatcher.scheduled({scheduledTime:Date.UTC(2026,10,17,0,9),cron},env,
+      {waitUntil:task=>pending.push(task)});
+    await Promise.all(pending);
+    assert.equal(calls.filter(call=>call.method==="POST").length,1);
+    assert(calls.at(-1).url.includes("/CDS-Public-Charts/"));
+    assert(!calls.some(call=>call.url.includes("/CDS/")));
+  });
+}
+
+test("step-one minute expression also respects duplicate-run protection", async () => {
+  const {dispatcher,calls}=fixture(()=>Response.json({workflow_runs:[{id:42,status:"in_progress"}]}));
+  const pending=[];
+  dispatcher.scheduled({scheduledTime:Date.UTC(2026,10,17,0,9),cron:"*/1 * * * *"},env,
+    {waitUntil:task=>pending.push(task)});
+  await Promise.all(pending);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].method,"GET");
+});
+
+test("unrecognized expressions leave a diagnostic without credentials", () => {
+  const {dispatcher,calls}=fixture();
+  const logs=[];
+  const original=console.warn;
+  try {
+    console.warn=line=>logs.push(JSON.parse(line));
+    dispatcher.scheduled({scheduledTime:Date.UTC(2026,10,17,0,9),cron:"unknown"},env,{waitUntil(){}});
+  } finally { console.warn=original; }
+  assert.equal(calls.length,0);
+  assert.equal(logs.length,1);
+  assert.equal(logs[0].reason,"Unrecognized cron expression");
+  assert(!JSON.stringify(logs).includes(env.GITHUB_TOKEN));
+});
+
 test("unknown and retired trigger expressions never dispatch", async () => {
   const {dispatcher,calls}=fixture();
   const pending=[];
@@ -224,8 +261,8 @@ test("health endpoint and retired manual URLs never call GitHub", async () => {
   const health = await dispatcher.fetch(new Request("https://worker.example/"), env);
   assert.equal(health.status, 200);
   const status=await health.json();
-  assert.equal(status.version, "20261117-charts-1min-v1");
-  assert.deepEqual(status.crons,{charts:"* * * * *",vtg:"9,19,29,39,49,59 * * * *"});
+  assert.equal(status.version, "20261117-charts-1min-v2");
+  assert.deepEqual(status.crons,{charts:"*/1 * * * *",vtg:"9,19,29,39,49,59 * * * *"});
   for (const target of ["gdm", "gdm-check", "dmdw"]) {
     assert.equal((await dispatcher.fetch(new Request(`https://worker.example/?target=${target}`), env)).status, 410);
   }

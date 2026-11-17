@@ -14,7 +14,7 @@ does not deploy the Worker or change its Cron Triggers.
 
 | Target | Cron (UTC) | GitHub workflow |
 | --- | --- | --- |
-| Public charts | `* * * * *` | `SSalKim/CDS-Public-Charts`, `public_charts.yml` |
+| Public charts | `*/1 * * * *` | `SSalKim/CDS-Public-Charts`, `public_charts.yml` |
 | Existing VTG | `9,19,29,39,49,59 * * * *` | `SSalKim/CDS`, `vtg.yml` |
 
 Replace the previous chart trigger `3,13,23,33,43,53 * * * *` with the every-minute
@@ -23,6 +23,10 @@ trigger: it accepts the previous chart schedule during this transition. Routing
 uses the exact trigger expression so chart checks and VTG both run at VTG minutes
 without rerouting chart ticks to VTG. Remove the retired GDM/DMDW triggers; unknown
 expressions are ignored. Existing GDM/DMDW repositories are not modified.
+Both `*/1 * * * *` and `* * * * *` are accepted, along with the equivalent full
+minute ranges `0-59` and `0-59/1`; install only one of these chart triggers.
+Whitespace is normalized before routing. Unknown expressions emit a sanitized
+`scheduler_skipped` warning rather than disappearing without a routing log.
 `wrangler.example.jsonc` shows the same schedules for CLI users; replace its
 placeholder with the existing Worker's real name before using it.
 
@@ -47,7 +51,7 @@ See [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configu
   it also blocks dispatch normally. Remove this explicit exception after GitHub
   repairs the orphan record. Deploy the updated Worker JavaScript to apply it;
   this explicit exception remains in place when upgrading to one-minute checks.
-  The read-only `GET /` health response reports version `20261117-charts-1min-v1`
+  The read-only `GET /` health response reports version `20261117-charts-1min-v2`
   for this replacement, allowing deployment verification without a dispatch.
 - An active production run normally costs one GitHub status GET per minute,
   about 60 requests/hour. With no active run the five status checks and one

@@ -2,7 +2,7 @@ const GITHUB_API = "https://api.github.com";
 const OWNER = "SSalKim";
 const REF = "main";
 const USER_AGENT = "cds-cloudflare-scheduler";
-const SCHEDULER_VERSION = "20261117-charts-1min-v1";
+const SCHEDULER_VERSION = "20261117-charts-1min-v2";
 const ACTIVE_STATUSES = ["in_progress", "queued", "waiting", "pending", "requested"];
 // Verified empty benchmark record; GitHub rejects both cancel APIs for this run.
 const EMPTY_QUEUED_CHART_RUN_IDS = new Set(["43883299059"]);
@@ -16,10 +16,11 @@ const TARGETS = {
   }
 };
 const CRONS = {
-  charts: "* * * * *",
+  charts: "*/1 * * * *",
   vtg: "9,19,29,39,49,59 * * * *"
 };
 const LEGACY_CHARTS_CRON = "3,13,23,33,43,53 * * * *";
+const MINUTE_CHART_CRONS = new Set([CRONS.charts, "* * * * *", "0-59 * * * *", "0-59/1 * * * *"]);
 
 export function createDispatcher(fetcher = fetch) {
   async function githubRequest(path, token, method = "GET", body) {
@@ -116,11 +117,16 @@ export function createDispatcher(fetcher = fetch) {
 
   function scheduled(event, env, ctx) {
     // The two triggers overlap at VTG minutes; route by trigger, not minute.
-    const target = event.cron === CRONS.charts || event.cron === LEGACY_CHARTS_CRON ? "charts"
-      : event.cron === CRONS.vtg ? "vtg" : null;
-    if (!target) return;
+    const cron = String(event.cron || "").trim().replace(/\s+/g, " ");
+    const target = MINUTE_CHART_CRONS.has(cron) || cron === LEGACY_CHARTS_CRON ? "charts"
+      : cron === CRONS.vtg ? "vtg" : null;
+    if (!target) {
+      console.warn(JSON.stringify({ event: "scheduler_skipped", version: SCHEDULER_VERSION,
+        cron: event.cron, ok: false, skipped: true, reason: "Unrecognized cron expression" }));
+      return;
+    }
     ctx.waitUntil(runTarget(target, env).then(result => {
-      console.log(JSON.stringify({ cron: event.cron, ...result }));
+      console.log(JSON.stringify({ event: "scheduler_result", version: SCHEDULER_VERSION, cron: event.cron, ...result }));
       if (!result.ok) {
         const status = result.status === 0 ? "network/response error"
           : Number.isInteger(result.status) ? `HTTP ${result.status}` : "no HTTP request sent";
