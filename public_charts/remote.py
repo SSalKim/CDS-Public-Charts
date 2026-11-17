@@ -225,6 +225,8 @@ class RemoteCoordinator:
                                 staged["error"] = {"type":"NotReady","pending":True,"phase":"surface",
                                                    "reason":"helper_incomplete_output"}
                             self.consume(lease["target"],staged)
+                            self.emit({"event":"helper_bundle_received",**lease["target"],"lease":lease["id"],
+                                       "images":len(staged["artifacts"]),"partial":staged["partial"]})
                             if not staged["partial"]:
                                 self.queue.finished(lease["target"],staged["error"])
                                 self.leases.pop(lease["id"])
