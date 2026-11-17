@@ -4,7 +4,14 @@ PUBLIC_PROFILE = "cds-public-v6"
 ASIA_LAYOUT_CUTOVER = "2026111606"
 KOREA_LAYOUT_CUTOVER = "2026111606"
 PUBLIC_IMAGE_SIZES = {"asia": (910, 660), "hkor": (640, 730)}
+PUBLIC_IMAGE_TRIM = {"hkor": (0, 2, 6, 3)}
 PUBLIC_MAP_AXES = {"hkor": (.004, .052, .926, .896)}
+
+
+def public_image_size(domain):
+    width, height = PUBLIC_IMAGE_SIZES[domain]
+    left, top, right, bottom = PUBLIC_IMAGE_TRIM.get(domain,(0,0,0,0))
+    return width-left-right, height-top-bottom
 
 
 def precipitation_threshold(cycle,hours=3):

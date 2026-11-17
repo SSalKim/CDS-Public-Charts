@@ -14,7 +14,7 @@ from PIL import Image
 
 from . import policy
 from .artifacts import ArtifactError, validate_session
-from .chart_style import PUBLIC_IMAGE_SIZES
+from .chart_style import public_image_size
 from .parallel import child_path, model_workspace
 
 SCHEMA = 1
@@ -46,7 +46,7 @@ def image_size(product, domain, model, cycle):
     if (product in {"acptot", "acrain", "acptot1", "acrain1"} and domain == "hkor"
             and policy.winter(model,cycle)):
         return (600, 2000) if product.endswith("1") else (1750, 660)
-    return PUBLIC_IMAGE_SIZES[domain]
+    return public_image_size(domain)
 
 
 def pack_bundle(lease, target, staged):
@@ -113,7 +113,7 @@ def import_bundle(message, files, lease, work):
             with Image.open(io.BytesIO(data)) as image:
                 expected = image_size(item["product"],item["domain"],target["model"],target["cycle"])
                 if image.size != expected or image.format != "WEBP":
-                    raise ValueError("Unexpected helper image dimensions")
+                    raise ValueError(f"Unexpected helper image dimensions: {image.size} != {expected}")
                 image.verify()
             directory.mkdir(parents=True,exist_ok=True)
             path = child_path(directory,hashlib.sha256(key.encode()).hexdigest()+".webp")
@@ -271,6 +271,8 @@ class RemoteCoordinator:
         except (ArtifactError,ValueError,KeyError,TypeError,OSError,subprocess.SubprocessError) as error:
             self.errors += 1
             self.emit({"event":"helper_channel_retry","error":type(error).__name__,"attempt":self.errors})
+            if isinstance(error,ValueError) and str(error).startswith("Unexpected helper image dimensions:"):
+                self.emit({"event":"helper_image_rejected","reason":str(error)})
             if self.errors >= 3:
                 self.disable("helper_channel_failed")
         finally:

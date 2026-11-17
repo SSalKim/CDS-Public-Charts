@@ -10,7 +10,7 @@ import time
 from public_charts.artifacts import ArtifactError, GitHubArtifacts, validate_session
 from public_charts.parallel import LeadQueue, execute_leads
 from public_charts.remote import (HEARTBEAT_SECONDS, POLL_SECONDS, SCHEMA, identity,
-                                  pack_bundle, target_keys, validate_message)
+                                  image_size, pack_bundle, target_keys, validate_message)
 from public_charts.resources import LaptopLease, ResourceSampler, available_memory, cmc_worker_count, windows_available_memory, worker_count
 
 
@@ -19,11 +19,10 @@ def smoke_renderer(model, cycle, hour, root, existing, publish, **kwargs):
     from PIL import Image
     from public_charts import policy
     from public_charts.producer import encode
-    from public_charts.chart_style import PUBLIC_IMAGE_SIZES
     for key in sorted(policy.expected_keys(model,cycle,hour)-existing):
         product, domain = key.split("/")[-2:]
         path = Path(root) / "images" / (product+"-"+domain+".webp")
-        image = Image.new("RGB",PUBLIC_IMAGE_SIZES[domain],"white")
+        image = Image.new("RGB",image_size(product,domain,model,cycle),"white")
         image.paste((0,80,180),(0,0,128,128))
         encode(image,path)
         publish(product,domain,path)

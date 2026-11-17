@@ -229,6 +229,22 @@ class BundleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             import_bundle(payload,{},self.lease,self.root)
 
+    def test_final_korea_dimensions_are_accepted_but_untrimmed_canvas_is_rejected(self):
+        for size in ((634,725),(640,730)):
+            with self.subTest(size=size):
+                path = self.root/"korea.webp"
+                Image.new("RGB",size,"white").save(path,"WEBP",lossless=True)
+                staged = {**self.staged,"artifacts":[{"product":"gph500","domain":"hkor","alias_of":None,"path":str(path)}]}
+                bundle, paths = pack_bundle(self.lease["id"],target(),staged)
+                files = {name:Path(file).read_bytes() for name,file in paths.items()}
+                if size == (634,725):
+                    result = import_bundle(bundle,files,self.lease,self.root)
+                    with Image.open(result["artifacts"][0]["path"]) as image:
+                        self.assertEqual(image.size,size)
+                else:
+                    with self.assertRaisesRegex(ValueError,"Unexpected helper image dimensions"):
+                        import_bundle(bundle,files,self.lease,self.root)
+
 
 class ArtifactTests(unittest.TestCase):
     @staticmethod
@@ -290,6 +306,22 @@ class ArtifactTests(unittest.TestCase):
 
 
 class ActionRoleTests(unittest.TestCase):
+    def test_korea_and_both_winter_composites_pass_the_transport_contract(self):
+        from public_charts_helper import smoke_renderer
+        from public_charts.remote import image_size
+        probes = (("gph500","asia"),("gph500","hkor"),("acptot","hkor"),("acptot1","hkor"))
+        existing = policy.expected_keys(*identity(target())) - {policy.key(*identity(target()),*item) for item in probes}
+        with tempfile.TemporaryDirectory() as directory:
+            outputs=[]
+            smoke_renderer(*identity(target()),directory,existing,lambda *args:outputs.append(args))
+            self.assertEqual(len(outputs),4)
+            expected = {(product,domain):image_size(product,domain,"gfs",target()["cycle"]) for product,domain in probes}
+            self.assertEqual(expected["gph500","hkor"],(634,725))
+            self.assertEqual(expected["acptot","hkor"],(1750,660))
+            self.assertEqual(expected["acptot1","hkor"],(600,2000))
+            for product,domain,path in outputs:
+                with Image.open(path) as image:
+                    self.assertEqual(image.size,expected[product,domain])
     def test_stopped_helper_reports_zero_cmc_capacity(self):
         from public_charts_helper import ComputeHelper
         transport = FakeArtifacts()

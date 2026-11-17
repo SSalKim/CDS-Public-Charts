@@ -34,7 +34,7 @@ from .chart_style import (map_spec, heading_style, source_note_alpha, STYLE_VERS
                          ISOTACH_LEVELS, ISOTACH_COLORS, THETA_LEVELS, THETA_COLORS, barb_stride,
                          center_parameters, numeric_extrema_parameters, contour_steps, surface_steps, upper_level,
                          stream_isotach_levels,stream_shading,
-                         PUBLIC_PROFILE, PUBLIC_IMAGE_SIZES, PUBLIC_RAIN_LEVELS, PUBLIC_RAIN_COLORS,
+                         PUBLIC_PROFILE, PUBLIC_IMAGE_SIZES, PUBLIC_IMAGE_TRIM, PUBLIC_RAIN_LEVELS, PUBLIC_RAIN_COLORS,
                          PUBLIC_MAP_AXES, precipitation_edge_levels,precipitation_threshold,
                          PUBLIC_SNOW_LEVELS,PUBLIC_SNOW_COLORS,PUBLIC_SNOW_OVER,SNOW_THRESHOLD,WINTER_HATCH_COLOR)
 from .dates import parse_cycle
@@ -872,8 +872,9 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
         frame=Image.fromarray(np.asarray(figure.canvas.buffer_rgba())).convert("RGB")
         if profile==PUBLIC_PROFILE:
             frame=frame.resize(PUBLIC_IMAGE_SIZES[domain],Image.Resampling.LANCZOS)
-            if korea:
-                frame=frame.crop((0,2,frame.width-6,frame.height-3))
+            if domain in PUBLIC_IMAGE_TRIM:
+                left,top,right,bottom=PUBLIC_IMAGE_TRIM[domain]
+                frame=frame.crop((left,top,frame.width-right,frame.height-bottom))
         if return_frame:
             return frame
         target = Path(target)

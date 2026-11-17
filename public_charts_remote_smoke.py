@@ -19,7 +19,8 @@ def main():
     sha = subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()
     work = Path(os.environ["RUNNER_TEMP"]) / "chart-remote-verification"
     targets = [{"model":model,"cycle":"2026111612","hour":0} for model in ("aifs","gfs","cmc","icon")]
-    existing = set().union(*(policy.expected_keys(*identity(target)) - {policy.key(*identity(target),"gph500","asia")}
+    probe_products = (("gph500","asia"),("gph500","hkor"),("acptot","hkor"),("acptot1","hkor"))
+    existing = set().union(*(policy.expected_keys(*identity(target)) - {policy.key(*identity(target),*item) for item in probe_products}
                              for target in targets))
     queue = LeadQueue(targets,existing,100)
     queue.model_parallel_limit = 4
