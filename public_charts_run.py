@@ -245,6 +245,7 @@ def run(args, store=None):
     publication_metrics, pending_aliases, uploading_keys = {}, [], set()
     last_publication = 0.
     publication_interval = getattr(args, "publish_interval_seconds", 15)
+    remote = None
 
     def save_state():
         if local:
@@ -360,6 +361,8 @@ def run(args, store=None):
                 reserve_by_account[account] = max(reserve_by_account[account], exception.size)
                 errors.append({"status": "budget", "error": str(exception)})
                 raise BudgetReached from None
+        if remote:
+            remote.tick()
         resolve_aliases()
         if not local and publication_dirty and time.monotonic() - last_publication >= publication_interval:
             snapshot()
@@ -458,12 +461,28 @@ def run(args, store=None):
         print(json.dumps({"event": "plan_refreshed", "candidates": len(planned)}), flush=True)
         return planned
 
+    if getattr(args,"remote_helper",False) and not local:
+        from public_charts.artifacts import ArtifactError, GitHubArtifacts
+        from public_charts.remote import RemoteCoordinator
+        try:
+            session = os.environ["GITHUB_RUN_ID"]+"-"+os.environ.get("GITHUB_RUN_ATTEMPT","1")
+            code_sha = subprocess.check_output(["git","-c",f"safe.directory={ROOT.as_posix()}","rev-parse","HEAD"],
+                                               cwd=ROOT,text=True).strip()
+            remote = RemoteCoordinator(GitHubArtifacts(),session,code_sha,queue,work,consume,minutes=minutes,
+                                       can_assign=lambda:not budget_blocked and acquired and
+                                       (deadline is None or time.monotonic()<deadline))
+            remote.start()
+        except (ArtifactError,KeyError,ValueError,OSError,subprocess.SubprocessError) as error:
+            print(json.dumps({"event":"helper_unavailable","error":type(error).__name__}),flush=True)
+            remote = None
+
     print(json.dumps({"event": "runtime_profile", "workers": args.workers, "upload_workers": upload_workers,
                       "cmc_workers": cmc_worker_count(args.workers),
                       "cpu_capacity": cpu_capacity(), "available_memory_mib": round(available_memory()/1024**2, 1) if available_memory() is not None else None,
                       "windows_available_memory_mib": round(windows_available_memory()/1024**2,1) if windows_available_memory() is not None else None,
                       "time_budget_minutes": minutes, "laptop_guard": lease.root is not None,
                       "same_model_parallelism": True, "source_refresh_seconds": getattr(args,"refresh_seconds",60),
+                      "coordinator": "github", "helper_enabled": bool(remote and not remote.disabled),
                       "automatic_cycle_check_delay_hours": policy.SOURCE_CHECK_DELAY.total_seconds()/3600,
                       "cycle_check_delay_hours_by_model": {model: policy.source_check_delay(model).total_seconds()/3600
                                                             for model in args.models},
@@ -477,12 +496,14 @@ def run(args, store=None):
                       refresh_seconds=getattr(args, "refresh_seconds", 60),
                       idle_seconds=max(120, minutes * 60), streaming=not local, prefetch=not local,
                       progress=lambda event: print(json.dumps(event), flush=True), on_idle=tick,
-                      cleanup_staged=False)
+                      cleanup_staged=False,keep_alive=remote.keep_alive if remote else None)
     except BudgetReached:
         pass
     except BaseException as exception:
         failure = exception
     finally:
+        if remote:
+            remote.close()
         try:
             while stream:
                 tick(block=True)
@@ -549,6 +570,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--local", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--remote-helper",action="store_true",help="GitHub-only coordinator with an optional compute helper")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--check-drive", action="store_true")
     parser.add_argument("--finalize-cleanup", action="store_true")
@@ -560,6 +582,8 @@ def main():
         parser.error("Continuous production allows 0-30 minutes; force and local mode require a bounded batch")
     if args.cache_root and args.workers != 1 or args.local and args.publish_incremental:
         parser.error("A local cache override requires one worker; local mode cannot publish to Git")
+    if args.remote_helper and (args.local or args.force or not args.time_budget_minutes):
+        parser.error("A compute helper requires non-forced continuous production")
     if args.max_leads < 1 or args.max_bytes < 1 or args.cache_root and not args.local:
         parser.error("Invalid batch/budget; cache-root is local-only")
     if args.check_drive or args.finalize_cleanup:

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import gc
 import faulthandler
+from functools import wraps
 import multiprocessing
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ import shutil
 import time
 import traceback
 from queue import Queue, Empty, Full
-from threading import Event, Thread
+from threading import Event, Thread, RLock
 from urllib.parse import urlsplit
 
 from . import policy
@@ -201,10 +202,19 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
             "prefetch_seconds": preparation["inputs"]["seconds"] if preparation else 0}
 
 
+def _queue_locked(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self.lock:
+            return method(self, *args, **kwargs)
+    return call
+
+
 class LeadQueue:
     """Fair model rotation, with isolated CMC leads filling spare render slots."""
 
     def __init__(self, targets, existing, max_leads, force=False):
+        self.lock, self.issued = RLock(), set()
         self.queues = {}
         for target in targets:
             self.queues.setdefault(target["model"], deque()).append(target)
@@ -221,7 +231,8 @@ class LeadQueue:
         self.readiness_gate = False
         self.ready_cycles = {(key.split("/")[0], key.split("/")[1]) for key in existing}
 
-    def next(self, active, *, preparing=False):
+    @_queue_locked
+    def next(self, active, *, preparing=False, limits=None):
         if self.attempts >= self.max_leads * len(self.queues) * 4:
             return None
         for _ in range(len(self.order)):
@@ -229,6 +240,8 @@ class LeadQueue:
             self.order.rotate(-1)
             active_count = sum(item == model if isinstance(item,str) else item[0] == model for item in active)
             limit = self.cmc_parallel_limit if model == "cmc" else self.model_parallel_limit
+            if limits is not None:
+                limit = limits.get(model, limit)
             if preparing:
                 limit += 1
             if (active_count >= limit or self.counts[model] + active_count >= self.max_leads
@@ -237,8 +250,12 @@ class LeadQueue:
             for _ in range(len(self.queues[model])):
                 target = self.queues[model].popleft()
                 cycle, hour = target["cycle"], target["hour"]
+                identity = model, cycle, hour
+                if identity in self.issued:
+                    self.queues[model].append(target)
+                    continue
                 if (self.readiness_gate and (model, cycle) not in self.ready_cycles
-                        and any(not isinstance(item, str) and item[:2] == (model, cycle) for item in active)):
+                        and any(item[:2] == (model, cycle) for item in self.issued)):
                     self.queues[model].append(target)
                     continue
                 if (model, cycle) in self.blocked or (model, cycle, hour) in active:
@@ -251,11 +268,14 @@ class LeadQueue:
                     continue
                 self.attempts += 1
                 self.model_attempts[model] += 1
+                self.issued.add(identity)
                 return target
         return None
 
+    @_queue_locked
     def finished(self, target, error):
         model, cycle = target["model"], target["cycle"]
+        self.issued.discard((model, cycle, target["hour"]))
         if not error:
             self.counts[model] += 1
         elif error["pending"]:
@@ -272,24 +292,40 @@ class LeadQueue:
             if self.failures[key] >= 2:
                 self.blocked.add(key)
 
+    @_queue_locked
     def refresh(self, targets):
         self.queues = {}
         for target in targets:
             self.queues.setdefault(target["model"], deque()).append(target)
+            self.counts.setdefault(target["model"],0)
+            self.model_attempts.setdefault(target["model"],0)
         self.order = deque(self.queues)
         now = time.monotonic()
         self.retry_after = {key:deadline for key,deadline in self.retry_after.items() if deadline > now}
         self.misses = {key:count for key,count in self.misses.items() if key in self.retry_after}
 
+    @_queue_locked
     def rendered(self, target, staged):
+        if staged["artifacts"]:
+            self.ready_cycles.add((target["model"],target["cycle"]))
         self.existing.update(policy.key(target["model"], target["cycle"], target["hour"],
                                         item["product"], item["domain"]) for item in staged["artifacts"])
+
+    @_queue_locked
+    def reclaim(self, target):
+        self.issued.discard((target["model"], target["cycle"], target["hour"]))
+        if not policy.expected_keys(target["model"],target["cycle"],target["hour"]) <= self.existing:
+            self.queues.setdefault(target["model"],deque()).appendleft(target)
+
+    @_queue_locked
+    def known(self, target):
+        return sorted(policy.expected_keys(target["model"],target["cycle"],target["hour"]) & self.existing)
 
 
 def execute_leads(queue, work, workers, consume, *, force=False, raw_override=None,
                   renderer=None, started=None, refresh=None, refresh_seconds=120,
                   can_schedule=None, idle_seconds=120, streaming=False, prefetch=False,
-                  prefetcher=None, progress=None, on_idle=None, cleanup_staged=True):
+                  prefetcher=None, progress=None, on_idle=None, cleanup_staged=True, keep_alive=None):
     """consume runs only on the main process, including after renderer failures."""
     if workers not in (1, 2, 3, 4) or workers > 1 and raw_override:
         raise ValueError("Use one to four workers; a local cache override requires one")
@@ -410,6 +446,9 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 else:
                                     submit_render(target)
                             if not pending:
+                                if keep_alive and keep_alive():
+                                    stop.wait(.2)
+                                    continue
                                 if not scheduling or (not prepared and
                                         (not refresh or time.monotonic() - last_progress >= idle_seconds)):
                                     break

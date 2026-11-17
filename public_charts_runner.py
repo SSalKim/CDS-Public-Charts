@@ -1,4 +1,4 @@
-"""Select only an explicitly matching, online and idle VTG laptop runner."""
+"""Keep publication on GitHub and discover an idle dedicated compute helper."""
 import argparse
 import json
 import os
@@ -40,11 +40,13 @@ def main():
                 result = choose(runners(repository), runners("SSalKim/CDS"))
             except Exception as exception:
                 print("Runner status unavailable; using GitHub-hosted.", type(exception).__name__, getattr(exception, "code", None))
-    print("Selected runner:", json.dumps(result))
+    helper = isinstance(result,list) and "cds-public-charts" in result
+    print("GitHub coordinator; optional compute helper:", json.dumps(result) if helper else "unavailable")
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a", encoding="utf-8") as stream:
-            stream.write("labels=" + json.dumps(result) + "\n")
+            stream.write('labels="ubuntu-24.04"\n')
+            stream.write("helper="+str(helper).lower()+"\n")
 
 
 if __name__ == "__main__":

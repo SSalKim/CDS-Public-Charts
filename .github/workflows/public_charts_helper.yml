@@ -1,0 +1,106 @@
+name: Public chart compute helper
+run-name: Chart compute helper ${{ inputs.session }}
+on:
+  workflow_dispatch:
+    inputs:
+      session:
+        type: string
+        required: true
+      code_sha:
+        type: string
+        required: true
+      smoke:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: cds-public-chart-compute-helper-${{ inputs.smoke && 'smoke' || 'production' }}
+  cancel-in-progress: true
+jobs:
+  compute:
+    runs-on: ${{ fromJSON(inputs.smoke && '"ubuntu-24.04"' || '["self-hosted","linux","cds-public-charts"]') }}
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HELPER_SESSION: ${{ inputs.session }}
+      HELPER_CODE_SHA: ${{ inputs.code_sha }}
+      HELPER_SMOKE: ${{ inputs.smoke }}
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.code_sha }}
+          persist-credentials: false
+      - name: Configure isolated compute paths
+        shell: bash
+        run: |
+          printf '%s\n' \
+            "CHART_WORK=$RUNNER_TEMP/cds-chart-helper" \
+            "PUBLIC_CHARTS_MAP_DIR=$RUNNER_TOOL_CACHE/cds-public-charts/maps-v1" \
+            "PUBLIC_CHARTS_ICON_GRID_DIR=$RUNNER_TOOL_CACHE/cds-public-charts/icon-grid-v1" \
+            "MPLCONFIGDIR=$RUNNER_TEMP/chart-helper-mpl" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.15'
+          cache: pip
+          cache-dependency-path: |
+            requirements-public-charts.txt
+            requirements-icon-charts.txt
+      - name: Install isolated calculation runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          hash="$(sha256sum requirements-public-charts.txt requirements-icon-charts.txt | sha256sum | cut -d ' ' -f 1)"
+          venv="$RUNNER_TOOL_CACHE/cds-public-charts/python-$hash"
+          if [ ! -x "$venv/bin/python" ]; then python -m venv "$venv"; fi
+          "$venv/bin/python" -m pip install -r requirements-icon-charts.txt
+          echo "$venv/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: public_charts/transport/package-lock.json
+      - name: Install artifact transport
+        working-directory: public_charts/transport
+        run: npm ci --ignore-scripts
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PUBLIC_CHARTS_MAP_DIR }}
+          key: public-charts-maps-v1
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PUBLIC_CHARTS_ICON_GRID_DIR }}
+          key: public-charts-icon-grid-v1
+      - uses: actions/cache/restore@v4
+        id: prefix-cache
+        with:
+          path: ${{ env.CHART_WORK }}/raw-cache/checkpoints
+          key: public-charts-helper-prefix-v1-${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            public-charts-helper-prefix-v1-${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py') }}-
+            public-charts-prefix-v1-${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py') }}-
+      - name: Prepare chart maps
+        run: python public_charts_runtime.py --prepare-maps
+      - name: Compute leased forecast leads
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {spawn} = require('node:child_process');
+            await new Promise((resolve, reject) => {
+              const child = spawn('python', ['public_charts_action.py', 'helper'], {stdio: 'inherit', env: process.env});
+              child.on('error', reject);
+              child.on('close', code => code === 0 ? resolve() : reject(new Error(`Compute helper exited (${code})`)));
+            });
+      - name: Prune verified calculation checkpoints
+        id: prune
+        if: always()
+        run: python public_charts_runtime.py --prune-checkpoints "$CHART_WORK/raw-cache/checkpoints"
+      - uses: actions/cache/save@v4
+        if: always() && steps.prune.outcome == 'success' && steps.prefix-cache.outputs.cache-primary-key != ''
+        with:
+          path: ${{ env.CHART_WORK }}/raw-cache/checkpoints
+          key: ${{ steps.prefix-cache.outputs.cache-primary-key }}

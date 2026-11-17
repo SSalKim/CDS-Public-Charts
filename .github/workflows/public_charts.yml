@@ -9,7 +9,7 @@ on:
         type: boolean
         default: true
       runner_mode:
-        description: Prefer an idle laptop or force GitHub-hosted
+        description: Add an idle laptop compute helper or use GitHub only
         type: choice
         options: [auto, github-hosted]
         default: auto
@@ -37,7 +37,7 @@ on:
         default: 0
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 concurrency:
@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     outputs:
-      labels: ${{ steps.runner.outputs.labels }}
+      helper: ${{ steps.runner.outputs.helper }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,7 +66,10 @@ jobs:
 
   produce:
     needs: route
-    runs-on: ${{ fromJson(needs.route.outputs.labels) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: write
     timeout-minutes: 45
     env:
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
@@ -94,6 +97,8 @@ jobs:
       TIME_BUDGET_INPUT: ${{ vars.PUBLIC_CHARTS_TIME_BUDGET_MINUTES || 20 }}
       MINUTES_INPUT: ${{ inputs.run_minutes || 0 }}
       FORCE_INPUT: ${{ inputs.force }}
+      HELPER_AVAILABLE: ${{ vars.PUBLIC_CHARTS_DUAL_COMPUTE_ENABLED == 'true' && needs.route.outputs.helper == 'true' && 'true' || 'false' }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -105,6 +110,7 @@ jobs:
             /public_charts_run.py
             /public_charts_runner.py
             /public_charts_runtime.py
+            /public_charts_action.py
             /public_charts_publish.py
             /public_charts_drive.py
             /vtg_drive_archive.py
@@ -139,6 +145,16 @@ jobs:
       - name: Verify separate Drive account before downloads
         if: env.DRY_RUN != 'true'
         run: python public_charts_run.py --check-drive
+      - uses: actions/setup-node@v4
+        if: env.HELPER_AVAILABLE == 'true' && env.DRY_RUN != 'true'
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: public_charts/transport/package-lock.json
+      - name: Install verified helper transport
+        if: env.HELPER_AVAILABLE == 'true' && env.DRY_RUN != 'true'
+        working-directory: public_charts/transport
+        run: npm ci --ignore-scripts
       - uses: actions/cache@v4
         if: env.DRY_RUN != 'true'
         with:
@@ -165,26 +181,15 @@ jobs:
       - name: Produce available forecast leads
         id: generate
         continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          args=(--workdir "$CHART_WORK" --max-leads "$LIMIT_INPUT" --workers "$WORKERS_INPUT" --upload-workers "$UPLOAD_WORKERS_INPUT")
-          if [ "$DRY_RUN" = 'true' ]; then args+=(--dry-run); fi
-          if [ "$DRY_RUN" != 'true' ]; then args+=(--publish-incremental); fi
-          if [ "$MODEL_INPUT" != 'all' ]; then args+=(--models "$MODEL_INPUT"); fi
-          if [ -n "$CYCLE_INPUT" ]; then args+=(--cycle "$CYCLE_INPUT"); fi
-          if [ -n "$START_CYCLE_INPUT" ]; then args+=(--start-cycle "$START_CYCLE_INPUT"); fi
-          if [ -n "$HOURS_INPUT" ]; then
-            read -ra hours <<< "${HOURS_INPUT//,/ }"
-            args+=(--hours "${hours[@]}")
-          fi
-          if [ -n "$MINUTES_INPUT" ] && [ "$MINUTES_INPUT" != '0' ]; then
-            args+=(--time-budget-minutes "$MINUTES_INPUT")
-          elif [ -z "$CYCLE_INPUT" ] && [ -z "$HOURS_INPUT" ] && [ "$FORCE_INPUT" != 'true' ]; then
-            args+=(--time-budget-minutes "$TIME_BUDGET_INPUT")
-          fi
-          if [ "$FORCE_INPUT" = 'true' ]; then args+=(--force); fi
-          python public_charts_run.py "${args[@]}"
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {spawn} = require('node:child_process');
+            await new Promise((resolve, reject) => {
+              const child = spawn('python', ['public_charts_action.py', 'coordinator'], {stdio: 'inherit', env: process.env});
+              child.on('error', reject);
+              child.on('close', code => code === 0 ? resolve() : reject(new Error(`Production exited (${code})`)));
+            });
       - name: Publish verified URL manifest only
         id: publish
         if: always() && env.DRY_RUN != 'true' && steps.generate.outcome != 'skipped'

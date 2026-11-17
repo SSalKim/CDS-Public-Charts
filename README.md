@@ -100,12 +100,13 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   by HPFX. Inventories and byte offsets are reloaded from each selected mirror;
   offsets from one host are never reused on another. Missing data stays pending,
   but corrupt data or permission errors are not hidden if every mirror fails.
-- The dedicated laptop label is `cds-public-charts`. Routing checks both this
-  repository and the original CDS runner status. A busy VTG runner causes
-  GitHub-hosted routing. On the shared laptop, chart production also holds a
-  host lock. VTG routing waits up to three minutes for that shared laptop, then
-  uses GitHub-hosted; it never interrupts an active chart batch.
-  The original VTG automation also takes the host lock before rendering.
+- GitHub-hosted `ubuntu-24.04` always coordinates production and exclusively
+  owns Drive uploads, public manifests, quota checks and deletion. When
+  `PUBLIC_CHARTS_DUAL_COMPUTE_ENABLED=true`, an idle dedicated laptop labeled
+  `cds-public-charts` may run a separate compute-only workflow. Routing checks
+  both repositories; a busy VTG runner prevents adding that helper. Both laptop
+  registrations retain their shared host lock. VTG waits up to three minutes
+  for the laptop before using GitHub-hosted, without interrupting chart work.
 - `run_minutes` is an optional manual validation input; explicit cycle/hour
   batches still use their lead limit unless a positive budget is supplied.
   No Cloudflare Worker changes are required for these defaults.
@@ -171,11 +172,23 @@ schedule from VTG, for example minute 03/13/23/33/43/53 UTC.
 
 ## Runner Routing
 
-`auto` uses the online, idle `LAPTOP-WOOJIN-CHARTS` runner labeled
-`cds-public-charts` in this repository, only when the original CDS VTG runner is
-also idle. Otherwise it uses `ubuntu-24.04`. Both registrations share a physical
-host lock. VTG waits up to three minutes for that laptop before falling back;
-CHART falls back immediately when it is busy and does not yield an active render.
+`auto` keeps the coordinator on `ubuntu-24.04` and adds an online, idle
+`LAPTOP-WOOJIN-CHARTS` compute helper when VTG is also idle and the dual-compute
+variable is enabled. `github-hosted` explicitly disables the helper. The laptop
+receives no Drive credentials, state files or deletion authority. Each machine
+uses its own resource-limited pool of up to four renderers. A single queue leases
+distinct model/cycle/lead tasks dynamically rather than fixing models to hosts.
+
+Control messages and small verified WebP batches use private, one-day Actions
+artifacts. Results are imported into the coordinator's normal upload queue after
+session, revision, target, dimensions and SHA-256 checks. Consumed results are
+deleted immediately. A 90-second heartbeat timeout or 180-second startup timeout
+returns unfinished tasks to GitHub; expired leases reject late results. This
+separate helper workflow never blocks final publication if the laptop goes away.
+The coordinator stops new assignments at its normal time budget and allows up to
+eight additional minutes for active helper tasks. No new Cloudflare settings or
+Google credentials are required. `verify_compute.yml` exercises two real hosted
+jobs and transport without any Drive writes before enabling dual computation.
 
 After a laptop/WSL restart, run `~/actions-runner-cds-public-charts/start-charts.sh`
 in a separate WSL terminal and keep it running. This is not an OS autostart
