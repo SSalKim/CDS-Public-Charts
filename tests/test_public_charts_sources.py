@@ -24,6 +24,32 @@ def response(status=206, content=b"G", content_range="bytes 0-0/3571212"):
 
 
 class FileSizeTests(unittest.TestCase):
+    def test_trickling_source_has_an_elapsed_deadline_and_is_not_cached_partially(self):
+        value = response(200,b"")
+        value.raw = Mock()
+        value.raw.read1.side_effect = [b"G",b"R",b"I"]
+        value.close = Mock()
+        self.client.session.get.return_value = value
+        with patch("public_charts.sources.time.monotonic",side_effect=[0,1,2,31]), \
+                self.assertRaises(requests.ReadTimeout):
+            self.client.get("https://example.invalid/source.grib2",attempts=1,total_timeout=30)
+        self.assertEqual(value.raw.read1.call_count,2)
+        self.assertEqual(list(Path(self.temporary.name).glob("*.bin")),[])
+        value.close.assert_called_once()
+
+    def test_bounded_stream_preserves_complete_grib_bytes_and_cache(self):
+        message = b"GRIB"+b"\0\0\0\2"+(20).to_bytes(8,"big")+b"7777"
+        value = response(200,b"")
+        value.raw = Mock()
+        value.raw.read1.side_effect = [message[:7],message[7:],b""]
+        value.close = Mock()
+        self.client.session.get.return_value = value
+        with patch("public_charts.sources.time.monotonic",return_value=0):
+            result = self.client.get("https://example.invalid/source.grib2",attempts=1,total_timeout=30)
+        self.assertEqual(result,message)
+        self.assertEqual(self.client.get("https://example.invalid/source.grib2"),message)
+        self.assertEqual(self.client.session.get.call_count,1)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

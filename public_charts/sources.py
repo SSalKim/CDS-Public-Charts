@@ -11,6 +11,7 @@ import eccodes as ec
 import numpy as np
 import requests
 from urllib3.util.retry import Retry
+from urllib3.exceptions import HTTPError as RawHTTPError
 
 GRAVITY = 9.80665
 LEVELS = (200, 300, 500, 700, 850, 925)
@@ -111,7 +112,24 @@ class HttpCache:
                     raise
                 time.sleep(2 ** attempt)
 
-    def get(self, url, byte_range=None, *, cache=True, attempts=3, timeout=(15, 120)):
+    @staticmethod
+    def _bounded_body(response, deadline):
+        chunks, size = [], 0
+        try:
+            while True:
+                if time.monotonic() >= deadline:
+                    raise requests.ReadTimeout("Source transfer exceeded its elapsed-time budget")
+                chunk = response.raw.read1(65536,decode_content=True)
+                if not chunk:
+                    return b"".join(chunks)
+                size += len(chunk)
+                if size > 64*1024**2:
+                    raise ValueError("Source message exceeds its byte limit")
+                chunks.append(chunk)
+        except RawHTTPError:
+            raise requests.ConnectionError("Source stream failed") from None
+
+    def get(self, url, byte_range=None, *, cache=True, attempts=3, timeout=(15, 120), total_timeout=None):
         if attempts < 1:
             raise ValueError("At least one HTTP attempt is required")
         key = hashlib.sha256(f"{url}|{byte_range}".encode()).hexdigest()
@@ -133,8 +151,11 @@ class HttpCache:
         headers = {} if byte_range is None else {"Range": f"bytes={byte_range[0]}-{byte_range[1]}",
                                                 "Accept-Encoding": "identity"}
         for attempt in range(attempts):
+            response = None
+            deadline = time.monotonic()+total_timeout if total_timeout is not None else None
             try:
-                response = self.session.get(url, headers=headers, timeout=timeout)
+                response = self.session.get(url, headers=headers, timeout=timeout,
+                                            **({"stream":True} if deadline is not None else {}))
                 self.requests += 1
                 if response.status_code in (404, 410):
                     raise NotReady(f"HTTP {response.status_code}: {url}")
@@ -142,12 +163,18 @@ class HttpCache:
                     time.sleep(min(30,max(2,Retry().get_retry_after(response) or 3)))
                     continue
                 response.raise_for_status()
+                if deadline is not None:
+                    value = self._bounded_body(response,deadline)
                 break
             except (requests.ConnectionError, requests.Timeout):
                 if attempt == attempts-1:
                     raise
                 time.sleep(2 ** attempt)
-        value = response.content
+            finally:
+                if deadline is not None and response is not None:
+                    response.close()
+        if total_timeout is None:
+            value = response.content
         self.bytes += len(value)
         if byte_range is not None:
             first, last = byte_range

@@ -50,7 +50,7 @@ class IconProviderTests(unittest.TestCase):
             values, _ = native(client,"2026111700",39,"FI",300)
         self.assertEqual([call.args[0] for call in client.get.call_args_list],list(source_urls("2026111700",39,"FI",300)))
         for call in client.get.call_args_list:
-            self.assertEqual(call.kwargs,{"attempts":1,"timeout":(10,30)})
+            self.assertEqual(call.kwargs,{"attempts":1,"timeout":(10,15),"total_timeout":30})
         decode.assert_called_once_with(b"second feed","2026111700",39,"FI",300,constant=False)
         np.testing.assert_array_equal(values,np.ones(2))
 

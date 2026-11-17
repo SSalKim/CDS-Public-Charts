@@ -5,11 +5,13 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 
 import eccodes as ec
 import metpy.calc as mpcalc
 from metpy.units import units
 import numpy as np
+import requests
 
 from .dates import parse_cycle
 from .sources import BOUNDS, Decoded, GRAVITY, Provider
@@ -88,7 +90,15 @@ def read_native(payload, cycle, hour, parameter, level=None, *, constant=False):
 def native(client, cycle, hour, parameter, level=None, *, constant=False):
     def retrieve(url):
         # Switch exact-cycle feeds promptly instead of retrying a stalled socket for minutes.
-        return read_native(client.get(url,attempts=1,timeout=(10,30)), cycle, hour, parameter, level, constant=constant)
+        started = time.monotonic()
+        try:
+            payload = client.get(url,attempts=1,timeout=(10,15),total_timeout=30)
+        except requests.RequestException as error:
+            print(json.dumps({"event":"icon_feed_retry","model":"icon","cycle":cycle,"hour":hour,
+                              "parameter":parameter,"level":level,"feed":"v1" if "/v1/" in url else "legacy",
+                              "error":type(error).__name__,"seconds":round(time.monotonic()-started,3)}),flush=True)
+            raise
+        return read_native(payload, cycle, hour, parameter, level, constant=constant)
     return Provider._mirrors(source_urls(cycle, hour, parameter, level, constant=constant), retrieve)
 
 
