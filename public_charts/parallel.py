@@ -437,9 +437,13 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                 except Empty:
                     if on_idle:
                         on_idle()
-                    if not scheduler.is_alive():
-                        raise RuntimeError("Renderer scheduler exited without a result")
-                    continue
+                    if scheduler.is_alive():
+                        continue
+                    # Publication may have outlasted a scheduler that queued its final event.
+                    try:
+                        kind, target, result = ready.get_nowait()
+                    except Empty:
+                        raise RuntimeError("Renderer scheduler exited without a result") from None
                 if kind == "done":
                     break
                 if kind == "error":

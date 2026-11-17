@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import time
 import threading
+from queue import Empty, Queue
 import unittest
 from unittest.mock import patch
 
@@ -259,6 +260,43 @@ class QueueTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    def test_completion_queued_during_idle_publication_is_not_lost(self):
+        class TimeoutOnce(Queue):
+            timed_out = False
+            def get(self, block=True, timeout=None):
+                if timeout is not None and not self.timed_out:
+                    self.timed_out = True
+                    raise Empty
+                return super().get(block, timeout)
+        def publish_while_scheduler_finishes():
+            for thread in threading.enumerate():
+                if thread.name == "chart-render-scheduler":
+                    thread.join(timeout=5)
+                    self.assertFalse(thread.is_alive())
+        with tempfile.TemporaryDirectory() as directory, patch("public_charts.parallel.Queue", TimeoutOnce):
+            execute_leads(LeadQueue([], set(), 1), directory, 2, lambda *args: None,
+                          on_idle=publish_while_scheduler_finishes)
+
+    def test_error_queued_during_idle_publication_keeps_its_original_cause(self):
+        class TimeoutOnce(Queue):
+            timed_out = False
+            def get(self, block=True, timeout=None):
+                if timeout is not None and not self.timed_out:
+                    self.timed_out = True
+                    raise Empty
+                return super().get(block, timeout)
+        def publish_while_scheduler_finishes():
+            for thread in threading.enumerate():
+                if thread.name == "chart-render-scheduler":
+                    thread.join(timeout=5)
+                    self.assertFalse(thread.is_alive())
+        def broken_guard():
+            raise ValueError("original scheduler failure")
+        with tempfile.TemporaryDirectory() as directory, patch("public_charts.parallel.Queue", TimeoutOnce), \
+                self.assertRaisesRegex(ValueError, "original scheduler failure"):
+            execute_leads(LeadQueue([], set(), 1), directory, 2, lambda *args: None,
+                          on_idle=publish_while_scheduler_finishes, can_schedule=broken_guard)
+
     def test_image_is_delivered_before_its_renderer_finishes(self):
         with tempfile.TemporaryDirectory() as directory:
             work, partials, finals = Path(directory), [], []
