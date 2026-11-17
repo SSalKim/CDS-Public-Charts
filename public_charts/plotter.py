@@ -421,7 +421,9 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             levels = np.arange(-99 if level < 700 else -60, 51, steps["temperature"])
             major = steps["temperature"]*major_every if major_every is not None else steps["temperature_major"]
             widths = np.where((levels-steps.get("temperature_anchor",0)) % major == 0, .85, .35) if major else .5
-            obj = contour(value, levels, "red", widths, 7 if level >= 700 else 7.7,valid_mask=field_masks.get(level))
+            labels = levels[levels%steps["temperature_label"]==0] if product=="gph500" and "temperature_label" in steps else None
+            obj = contour(value, levels, "red", widths, 7 if level >= 700 else 7.7,
+                          label_levels=labels,valid_mask=field_masks.get(level))
             obj.set_gid("temperature-contours")
 
         def filled(value, levels, colors, over,valid_mask=None,grid=None,colorbar_levels=None,colorbar_extendfrac=0):
@@ -816,7 +818,14 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             valid_mask=field_masks.get(level)
             filled(theta, THETA_LEVELS, colors, colors[-1],valid_mask)
             steps = contour_steps(domain, level,profile)
-            contour(theta, np.arange(240, 421, steps["theta_e"]), "#666666", .3, 6.7, label_color="black",valid_mask=valid_mask)
+            anchor=steps.get("theta_anchor",240)
+            first=240+(anchor-240)%steps["theta_e"]
+            levels=np.arange(first,421,steps["theta_e"])
+            labels=levels[(levels-anchor)%steps["theta_label"]==0] if "theta_label" in steps else None
+            # Public shading uses native theta; its contours must use the same field.
+            obj=contour(theta,levels,"#666666",.3,6.7,label_color="black",valid_mask=valid_mask,
+                        smooth=not public,label_levels=labels)
+            obj.set_gid("theta-e-contours")
             height = arrays[f"geopotential_{level}"] / 9.80665
             height_contour(height, level)
             temp = arrays[f"temperature_{level}"] - 273.15

@@ -1,5 +1,5 @@
 """Lightweight rendering contract, shared with the image cache."""
-STYLE_VERSION = 16
+STYLE_VERSION = 17
 PUBLIC_PROFILE = "cds-public-v6"
 ASIA_LAYOUT_CUTOVER = "2026111606"
 KOREA_LAYOUT_CUTOVER = "2026111606"
@@ -184,6 +184,11 @@ def contour_steps(domain, level, profile=None):
     if profile == PUBLIC_PROFILE and level in (200, 300, 500):
         steps.update(height_major=240, height_anchor=5580 if level == 500 else 9120,
                      temperature_major=12, temperature_anchor=0 if level == 500 else -48)
+    if profile == PUBLIC_PROFILE and not korea:
+        if level == 500:
+            steps.update(temperature_label=6)
+        elif level in (700,850,925):
+            steps.update(theta_anchor=333,theta_label=12)
     if profile == PUBLIC_PROFILE and korea:
         if level in (200,300):
             steps.update(temperature_major=4,temperature_anchor=-40)
