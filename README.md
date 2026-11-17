@@ -17,6 +17,11 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
 - ICON starts checks at +2h30 instead: 11:30, 17:30, 23:30 and 05:30 KST.
   Its observed initial 12Z/18Z files were available around +2h39; the other
   models retain the +3h gate.
+- Cumulative rain/snow preparation has a cooperative five-minute work budget,
+  including checkpoint-lock waits. Completed prefixes remain verified and are
+  resumed on the next attempt; no incomplete accumulation is plotted.
+  `surface_phase` and `product_started`/`product_finished` identify slow stages.
+  Active renderer tasks emit thread stacks after three minutes for diagnosis.
 - `PUBLIC_CHARTS_ENABLED=true` enables production; `false` blocks production
   dispatches while still allowing a non-mutating dry run.
 - `PUBLIC_CHARTS_START_CYCLE=2026111512` preserves the production start boundary.

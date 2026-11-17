@@ -17,6 +17,7 @@ from .quality import closed_contour_predicate
 from .sources import MODELS, collect, accumulation_hours, NotReady
 
 WINTER_COMPOSITE_SIZES = {False: (1750, 660), True: (600, 2000)}
+CUMULATIVE_WORK_BUDGET_SECONDS = 300
 
 
 def crop(arrays, domain):
@@ -73,7 +74,7 @@ def prepare_surface(model, cycle, hour, root, base, completed, force, checkpoint
         base, metadata, _ = collect(model, cycle, hour, root)
     else:
         base = {**base, "precipitation": np.zeros_like(base["pressure_msl"], dtype=np.float64)}
-    extra = ExtraFields(root, model, cycle)
+    extra = ExtraFields(root, model, cycle, deadline=started+CUMULATIVE_WORK_BUDGET_SECONDS)
     if checkpoint_root is not None:
         extra.checkpoints = Path(checkpoint_root) / cycle / model
     selected = crop(base, "hkor")
@@ -85,10 +86,16 @@ def prepare_surface(model, cycle, hour, root, base, completed, force, checkpoint
     needs_winter = policy.winter(model, cycle) and not all(done(name) for name in winter_products)
     total = None
     if needs_total or needs_winter:
+        if progress:
+            progress("surface_phase", {"phase": "checkpoint_wait"})
         with extra.checkpoint_lock():
             if needs_total:
+                if progress:
+                    progress("surface_phase", {"phase": "total_precipitation"})
                 total = extra.total_rain(hour)
             if needs_winter:
+                if progress:
+                    progress("surface_phase", {"phase": "winter_diagnostics"})
                 selected, _ = winter_fields(extra, base, hour, interval)
     if progress:
         progress("surface", {"observed_at": datetime.now(timezone.utc).isoformat(),
@@ -123,6 +130,8 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
 
     def draw(arrays, product, domain, *, accumulation=None, pressure_only=False):
         started = time.monotonic()
+        if progress:
+            progress("product_started", {"product": product, "domain": domain})
         frame = render(arrays, cycle, hour, product, domain, None, accumulation,
                       model_name=MODELS[model]["name"], precipitation_hours=interval,
                       precipitation_field="precipitation", source_note=MODELS[model]["attribution"],
@@ -132,6 +141,9 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
                       return_frame=True)
         gc.collect()
         timings["plot_seconds"] += time.monotonic() - started
+        if progress:
+            progress("product_finished", {"product": product, "domain": domain,
+                                           "seconds": round(time.monotonic()-started,3)})
         return frame
 
     started = time.monotonic()
@@ -157,6 +169,7 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
             base, selected, total = surface.result()
         except NotReady as error:
             return {"complete": False, "pending": str(error),
+                    "pending_reason": getattr(error,"reason",None),
                     **{key: round(value, 3) for key, value in timings.items()}}
 
     try:

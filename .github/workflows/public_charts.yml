@@ -157,6 +157,7 @@ jobs:
           key: public-charts-prefix-v1-${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             public-charts-prefix-v1-${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py') }}-
+            ${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py') == 'c0e69ec3d9c5f169751a0d78003ac188c34a002bac30477b66f00bdbf48b1aad' && 'public-charts-prefix-v1-45ab3468b0855fc956c4b2a725c4af444aedefc6bb47fe8d9f756cc3eedf6ac3-' || 'no-compatible-previous-prefix-' }}
             ${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py') == '45ab3468b0855fc956c4b2a725c4af444aedefc6bb47fe8d9f756cc3eedf6ac3' && 'public-charts-prefix-v1-342275140e4882c9ff142b51c84ba8f54721828e55dc4f6d9d0569ce532ecd33-' || 'no-compatible-legacy-prefix-' }}
       - name: Prepare map data
         if: env.DRY_RUN != 'true'

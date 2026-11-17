@@ -4,6 +4,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import gc
+import faulthandler
 import multiprocessing
 import os
 from pathlib import Path
@@ -99,6 +100,9 @@ def prepare_lead(target, work):
     from .sources import collect
     root = child_path(lead_workspace(work, target), "raw-cache")
     started = time.monotonic()
+    watch = _EVENTS is not None
+    if watch:
+        faulthandler.dump_traceback_later(180,repeat=True)
     try:
         arrays, metadata, statistics = collect(target["model"], target["cycle"], target["hour"], root,
                                                 include_precipitation=False)
@@ -112,6 +116,8 @@ def prepare_lead(target, work):
         cleanup_raw(lead_workspace(work, target))
         return {"error": error_record(exception)}
     finally:
+        if watch:
+            faulthandler.cancel_dump_traceback_later()
         gc.collect()
 
 
@@ -144,6 +150,9 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
         raise RuntimeError("Chart publication stopped")
 
     def progress(phase, info):
+        if phase not in {"base", "surface"}:
+            send("diagnostic", {"event": phase, **info})
+            return
         status = preparation["inputs"] if phase == "base" and preparation else input_status(info)
         inputs[phase] = status
         send("inputs", {"phase": phase, **status})
@@ -167,6 +176,9 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
         send("artifact", artifact)
 
     result, error = {}, None
+    watch = renderer is None and _EVENTS is not None
+    if watch:
+        faulthandler.dump_traceback_later(180,repeat=True)
     try:
         kwargs = {"force": force, "checkpoint_root": checkpoints}
         if renderer is None:
@@ -174,9 +186,13 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
         result = (renderer or produce_lead)(model, cycle, hour, raw, set(existing), emit, **kwargs)
         if result.get("pending") and not result.get("complete"):
             error = {"type": "NotReady", "pending": True, "phase": "surface"}
+            if result.get("pending_reason"):
+                error["reason"] = result["pending_reason"]
     except Exception as exception:
         error = error_record(exception)
     finally:
+        if watch:
+            faulthandler.cancel_dump_traceback_later()
         if not raw_override:
             cleanup_raw(workspace)
         gc.collect()
@@ -346,6 +362,8 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 continue
                             if kind == "inputs":
                                 deliver(("progress", target, {"event": "inputs_ready", **target, **payload}))
+                            elif kind == "diagnostic":
+                                deliver(("progress", target, {**target, **payload}))
                             else:
                                 fresh = announce(target, [payload])
                                 if fresh:

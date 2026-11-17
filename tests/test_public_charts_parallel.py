@@ -86,6 +86,13 @@ def every_product_renderer(model, cycle, hour, root, existing, emit, **kwargs):
     return {"complete": True}
 
 
+def diagnostic_renderer(model, cycle, hour, root, existing, emit, **kwargs):
+    from public_charts.parallel import _EVENTS
+    _EVENTS.put(("diagnostic", {"model": model, "cycle": cycle, "hour": hour},
+                 {"event": "product_started", "product": "gph500", "domain": "asia"}))
+    return every_product_renderer(model, cycle, hour, root, existing, emit, **kwargs)
+
+
 def concurrent_cmc_renderer(model, cycle, hour, root, existing, emit, *, checkpoint_root=None, **kwargs):
     import numpy as np
     from public_charts.extended_sources import ExtraFields
@@ -260,6 +267,23 @@ class QueueTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    def test_product_progress_is_forwarded_without_becoming_an_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            progress, received = [], []
+            execute_leads(LeadQueue([target()], set(), 1), directory, 2,
+                          lambda item, staged: received.extend(staged["artifacts"]),
+                          renderer=diagnostic_renderer, streaming=True, progress=progress.append)
+            self.assertTrue(received)
+            self.assertEqual(progress, [{**target(), "event": "product_started", "product": "gph500", "domain": "asia"}])
+
+    def test_cumulative_budget_defers_only_surface_and_keeps_its_reason(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("public_charts.producer.produce_lead", return_value={"complete": False,
+                      "pending": "cumulative_work_budget", "pending_reason": "cumulative_work_budget"}):
+            staged = stage_lead(target(), directory, set())
+            self.assertEqual(staged["error"], {"type": "NotReady", "pending": True,
+                                              "phase": "surface", "reason": "cumulative_work_budget"})
+
     def test_completion_queued_during_idle_publication_is_not_lost(self):
         class TimeoutOnce(Queue):
             timed_out = False

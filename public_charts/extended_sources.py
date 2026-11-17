@@ -15,14 +15,25 @@ from .diagnostics import interpolate,snow_ratio,wet_bulb_psychrometric
 from .chart_style import precipitation_threshold
 
 
+class DiagnosticDeferred(NotReady):
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
 class ExtraFields:
-    def __init__(self,root,model,cycle):
+    def __init__(self,root,model,cycle,*,deadline=None):
         self.root=Path(root)/"extended-fields"/cycle/model
         self.model,self.cycle=model,cycle
         self.client=HttpCache(Path(root)/"grib-cache")
         self.provider=Provider(model,self.client)
         self.notes=[]
         self.checkpoints=Path(root)/"checkpoints"/cycle/model
+        self.deadline=deadline
+
+    def check_budget(self,reason="cumulative_work_budget"):
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise DiagnosticDeferred(reason)
 
     @contextmanager
     def checkpoint_lock(self):
@@ -32,6 +43,7 @@ class ExtraFields:
             if os.name=="nt":
                 import msvcrt
                 while True:
+                    self.check_budget("checkpoint_wait_budget")
                     try:
                         handle.seek(0)
                         msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
@@ -46,7 +58,13 @@ class ExtraFields:
                     handle.write(b"0");handle.flush()
             else:
                 import fcntl
-                fcntl.flock(handle,fcntl.LOCK_EX)
+                while True:
+                    self.check_budget("checkpoint_wait_budget")
+                    try:
+                        fcntl.flock(handle,fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        time.sleep(.05)
             try:
                 yield
             finally:
@@ -83,6 +101,7 @@ class ExtraFields:
                     "sha256":hashlib.sha256(path.read_bytes()).hexdigest()})
 
     def get(self,hour,key,*,sflux=False):
+        self.check_budget()
         directory=self.root/f"{hour:03}"
         directory.mkdir(parents=True,exist_ok=True)
         path=directory/(("sflux_" if sflux else "")+key+".npz")
@@ -98,6 +117,7 @@ class ExtraFields:
 
     def prefetch(self,hour,keys,*,sflux=False):
         """Share one source inventory lookup for a group of same-hour fields."""
+        self.check_budget()
         missing=set()
         for key in keys:
             path=self.root/f"{hour:03}"/(("sflux_" if sflux else "")+key+".npz")
@@ -140,11 +160,13 @@ class ExtraFields:
         start=0
         total=None
         for end in range(hour,0,-cadence):
+            self.check_budget()
             total=self.checkpoint(f"rain/{end:03}.npz")
             if total is not None:
                 start=end
                 break
         for end in range(start+cadence,hour+1,cadence):
+            self.check_budget()
             rain,reference,_=collect_rainfall(self.provider,self.cycle,end,cadence)
             field=regional(Decoded(rain,reference.latitude,reference.longitude,{}))
             if total is not None:
@@ -278,6 +300,7 @@ def winter_fields(extra,base,hour,interval):
     total_snow=total_depth=window_snow=window_depth=None
     start=0
     for previous_end in range(hour-interval,0,-cadence):
+        extra.check_budget()
         previous=extra.checkpoint(f"snow/{previous_end:03}.npz")
         if previous is not None:
             total_snow=previous["total_snowfall_water_equivalent"].copy()
@@ -292,6 +315,7 @@ def winter_fields(extra,base,hour,interval):
                     "snowfall_water_equivalent","snowfall_depth_diagnostic",
                     "total_snowfall_water_equivalent","total_snowfall_depth_diagnostic")})
     for end in range(start+cadence,hour+1,cadence):
+        extra.check_budget()
         current=extra.checkpoint(f"snow/{end:03}.npz")
         if current is None:
             current=snow_step(extra,end,cadence)
