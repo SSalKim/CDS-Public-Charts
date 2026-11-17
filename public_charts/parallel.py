@@ -336,7 +336,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
     queue.cmc_parallel_limit = cmc_worker_count(workers, memory)
     queue.model_parallel_limit = workers
     if prefetch:
-        queue.retry_seconds = 120
+        queue.retry_seconds = 60
         queue.readiness_gate = True
     context = multiprocessing.get_context("spawn")
     events = context.Queue(maxsize=workers * 8) if streaming else None

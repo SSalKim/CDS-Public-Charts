@@ -6,7 +6,8 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
 
 - Images: existing, separate chart Google Drive account and folder.
 - Public index: `data/public_charts_manifest.json`; refreshed without Pages builds.
-- Scheduling: Cloudflare calls `public_charts.yml` every ten minutes.
+- Scheduling: Cloudflare checks `public_charts.yml` every minute and dispatches
+  only if no active or queued production run exists (Worker deployment required).
   There is intentionally no GitHub-native cron in this repository.
 - Automatic raw-source checks wait until initialization time + three hours:
   00Z from 12:00 KST, 06Z from 18:00 KST, 12Z from 00:00 KST the next day,
@@ -167,8 +168,9 @@ GET https://api.github.com/repos/SSalKim/CDS-Public-Charts/actions/workflows/pub
 
 Check GitHub responses, use bounded retries for transient errors and avoid
 dispatching if the status check fails. The workflow's concurrency group is a
-second safeguard, not a cross-repository lock. Offset the ten-minute Cloudflare
-schedule from VTG, for example minute 03/13/23/33/43/53 UTC.
+second safeguard, not a cross-repository lock. Use the every-minute chart trigger
+and keep VTG's 09/19/29/39/49/59 UTC trigger unchanged. Deploy the matching Worker;
+its routing uses the trigger expression because both schedules overlap.
 
 ## Runner Routing
 
@@ -214,8 +216,8 @@ See [setup and retention details](docs/public-charts-setup.md).
 ## Latency Target And Measurements
 
 The target is publication within 15 minutes of the necessary inputs becoming
-available, with 3-5 minutes preferred. This is not a proven SLA. Cloudflare still
-starts jobs every ten minutes; source outages, cold cumulative prefixes, startup
+available, with 3-5 minutes preferred. This is not a proven SLA. The one-minute
+Cloudflare trigger reduces idle gaps after deployment; source outages, cold cumulative prefixes, startup
 and bursts larger than capacity can add latency. CDS needs its next manifest check
 (20 seconds while viewing external models). There is no independent monitor of
 true first availability across all source mirrors.
@@ -229,6 +231,8 @@ over 900 seconds. Check source history separately before claiming the target was
 met. Runtime summaries include peak process-tree RSS and minimum free memory on
 Linux and Windows.
 
-`--refresh-seconds` defaults to 60 and `--publish-interval-seconds` to 15. Cloudflare
-configuration is unchanged. `Test public chart pipeline` runs offline regressions
+`--refresh-seconds` defaults to 60 and `--publish-interval-seconds` to 15. Live
+pending-source retries use 60 seconds, subject to worker capacity. The matching
+Worker JavaScript and chart Cron Trigger must both be deployed for the one-minute
+wake-up policy. `Test public chart pipeline` runs offline regressions
 on Linux when code changes; it has no Drive secrets and changes no operational data.

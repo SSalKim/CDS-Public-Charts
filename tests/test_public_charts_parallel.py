@@ -267,6 +267,13 @@ class QueueTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    def test_live_prefetch_rechecks_pending_inputs_after_one_minute(self):
+        queue = LeadQueue([target()],set(),2)
+        with tempfile.TemporaryDirectory() as directory:
+            execute_leads(queue,Path(directory),1,lambda *_:None,prefetch=True,can_schedule=lambda:False)
+        self.assertEqual(queue.retry_seconds,60)
+        self.assertTrue(queue.readiness_gate)
+
     def test_product_progress_is_forwarded_without_becoming_an_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             progress, received = [], []

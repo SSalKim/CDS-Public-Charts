@@ -126,24 +126,60 @@ test("failed or ambiguous POSTs are never retried", async () => {
   }
 });
 
-test("every daily cron slot routes correctly and the retired slot is inert", async () => {
+test("charts run every minute and VTG retains six independent hourly ticks", async () => {
   for (let minute = 0; minute < 60; minute += 1) {
     const { dispatcher, calls } = fixture();
     const pending = [];
-    dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 23, minute), cron: "test" },
+    dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 17, 0, minute), cron: "* * * * *" },
       env, { waitUntil: task => pending.push(task) });
+    if (minute % 10 === 9) {
+      dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 17, 0, minute), cron: "9,19,29,39,49,59 * * * *" },
+        env, { waitUntil: task => pending.push(task) });
+    }
     await Promise.all(pending);
     const posts = calls.filter(call => call.method === "POST");
-    assert.equal(posts.length, [3, 9].includes(minute % 10) ? 1 : 0);
-    if (posts.length) assert(posts[0].url.includes(minute % 10 === 3 ? "/CDS-Public-Charts/" : "/CDS/"));
+    assert.equal(posts.filter(call=>call.url.includes("/CDS-Public-Charts/")).length,1);
+    assert.equal(posts.filter(call=>call.url.includes("/CDS/")).length,minute % 10 === 9 ? 1 : 0);
     assert(!calls.some(call => call.url.includes("/GDM/") || call.url.includes("dmdw")));
   }
+});
+
+test("old chart trigger remains usable during code-first deployment", async () => {
+  const { dispatcher, calls } = fixture();
+  const pending = [];
+  dispatcher.scheduled({scheduledTime:Date.UTC(2026,10,17,0,3),cron:"3,13,23,33,43,53 * * * *"},
+    env,{waitUntil:task=>pending.push(task)});
+  await Promise.all(pending);
+  assert.equal(calls.filter(call=>call.method==="POST").length,1);
+  assert(calls.at(-1).url.includes("/CDS-Public-Charts/"));
+});
+
+test("unknown and retired trigger expressions never dispatch", async () => {
+  const {dispatcher,calls}=fixture();
+  const pending=[];
+  for(const cron of ["test","5,15,25,35,45,55 * * * *","3-53/10,5-55/10,9-59/10 * * * *"]){
+    dispatcher.scheduled({scheduledTime:Date.UTC(2026,10,17,0,9),cron},env,{waitUntil:task=>pending.push(task)});
+  }
+  await Promise.all(pending);
+  assert.equal(calls.length,0);
+});
+
+test("a full hour of one-minute ticks with active production never creates another run", async () => {
+  const {dispatcher,calls}=fixture(()=>Response.json({workflow_runs:[{id:42,status:"in_progress"}]}));
+  for(let minute=0;minute<60;minute++){
+    const pending=[];
+    dispatcher.scheduled({scheduledTime:Date.UTC(2026,10,17,0,minute),cron:"* * * * *"},
+      env,{waitUntil:task=>pending.push(task)});
+    await Promise.all(pending);
+  }
+  assert.equal(calls.length,60);
+  assert(!calls.some(call=>call.method==="POST"));
 });
 
 test("scheduled errors are visible without credentials in logs", async () => {
   const { dispatcher } = fixture(() => new Response("private", { status: 403 }));
   const pending = [];
-  dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 3), cron: "test" },
+  dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 3), cron: "* * * * *" },
     env, { waitUntil: task => pending.push(task) });
   await assert.rejects(pending[0], error => {
     assert.match(error.message, /\[charts\] HTTP 403: Workflow status unavailable/);
@@ -157,7 +193,7 @@ test("scheduled errors are visible without credentials in logs", async () => {
 test("scheduled dispatch failures identify the VTG target and HTTP code", async () => {
   const { dispatcher } = fixture(() => new Response("private upstream detail", { status: 404 }));
   const pending = [];
-  dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 9), cron: "test" },
+  dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 9), cron: "9,19,29,39,49,59 * * * *" },
     env, { waitUntil: task => pending.push(task) });
   await assert.rejects(pending[0], /\[vtg\] HTTP 404: GitHub dispatch failed/);
 });
@@ -165,7 +201,7 @@ test("scheduled dispatch failures identify the VTG target and HTTP code", async 
 test("scheduled missing-secret error is distinguishable without making a request", async () => {
   const { dispatcher, calls } = fixture();
   const pending = [];
-  dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 3), cron: "test" },
+  dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 3), cron: "* * * * *" },
     {}, { waitUntil: task => pending.push(task) });
   await assert.rejects(pending[0], /\[charts\] no HTTP request sent: Missing GITHUB_TOKEN secret/);
   assert.equal(calls.length, 0);
@@ -174,7 +210,7 @@ test("scheduled missing-secret error is distinguishable without making a request
 test("scheduled transport errors never expose raw exceptions", async () => {
   const { dispatcher } = fixture(() => { throw new Error("private transport detail"); });
   const pending = [];
-  dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 3), cron: "test" },
+  dispatcher.scheduled({ scheduledTime: Date.UTC(2026, 10, 16, 0, 3), cron: "* * * * *" },
     env, { waitUntil: task => pending.push(task) });
   await assert.rejects(pending[0], error => {
     assert.match(error.message, /\[charts\] network\/response error/);
@@ -187,7 +223,9 @@ test("health endpoint and retired manual URLs never call GitHub", async () => {
   const { dispatcher, calls } = fixture();
   const health = await dispatcher.fetch(new Request("https://worker.example/"), env);
   assert.equal(health.status, 200);
-  assert.equal((await health.json()).version, "20261116-orphan87-v1");
+  const status=await health.json();
+  assert.equal(status.version, "20261117-charts-1min-v1");
+  assert.deepEqual(status.crons,{charts:"* * * * *",vtg:"9,19,29,39,49,59 * * * *"});
   for (const target of ["gdm", "gdm-check", "dmdw"]) {
     assert.equal((await dispatcher.fetch(new Request(`https://worker.example/?target=${target}`), env)).status, 410);
   }

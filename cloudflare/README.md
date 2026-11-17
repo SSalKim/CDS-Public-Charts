@@ -14,12 +14,15 @@ does not deploy the Worker or change its Cron Triggers.
 
 | Target | Cron (UTC) | GitHub workflow |
 | --- | --- | --- |
-| Public charts | `3,13,23,33,43,53 * * * *` | `SSalKim/CDS-Public-Charts`, `public_charts.yml` |
+| Public charts | `* * * * *` | `SSalKim/CDS-Public-Charts`, `public_charts.yml` |
 | Existing VTG | `9,19,29,39,49,59 * * * *` | `SSalKim/CDS`, `vtg.yml` |
 
-The former GDM 03-minute slot now runs public charts. Remove the former DMDW
-05-minute trigger. This code ignores 05-minute events even if that old trigger
-has not yet been removed. Existing GDM/DMDW repositories are not modified.
+Replace the previous chart trigger `3,13,23,33,43,53 * * * *` with the every-minute
+trigger; do not leave both installed. Deploy the new code before changing the
+trigger: it accepts the previous chart schedule during this transition. Routing
+uses the exact trigger expression so chart checks and VTG both run at VTG minutes
+without rerouting chart ticks to VTG. Remove the retired GDM/DMDW triggers; unknown
+expressions are ignored. Existing GDM/DMDW repositories are not modified.
 `wrangler.example.jsonc` shows the same schedules for CLI users; replace its
 placeholder with the existing Worker's real name before using it.
 
@@ -33,7 +36,8 @@ See [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configu
 - Public charts receive `dry_run=false`, `runner_mode=auto`, `model=all`,
   `max_leads="2"`, `force=false`. Cycle and hour are deliberately unspecified.
   Send `max_leads` as a JSON string even though the workflow input is numeric;
-  GitHub rejects the JSON number with HTTP 422. The batch limit is still two.
+  GitHub rejects the JSON number with HTTP 422. Automatic production uses its
+  existing continuous time budget, not a new workflow or batch every minute.
 - Public charts are skipped if any run is in progress, queued, waiting, pending
   or requested. Each status is filtered server-side, avoiding history truncation.
 - One verified empty benchmark record, run `43883299059` (#87), is ignored only
@@ -42,9 +46,17 @@ See [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configu
   block dispatch, including a real run behind that record. If #87 actually starts,
   it also blocks dispatch normally. Remove this explicit exception after GitHub
   repairs the orphan record. Deploy the updated Worker JavaScript to apply it;
-  no Cron Trigger, token or repository setting changes are needed.
-  The read-only `GET /` health response reports version `20261116-orphan87-v1`
+  this explicit exception remains in place when upgrading to one-minute checks.
+  The read-only `GET /` health response reports version `20261117-charts-1min-v1`
   for this replacement, allowing deployment verification without a dispatch.
+- An active production run normally costs one GitHub status GET per minute,
+  about 60 requests/hour. With no active run the five status checks and one
+  dispatch cost at most 360 requests/hour before retries. VTG is unchanged.
+  The minute trigger closes the idle gap between workflows; it does not create
+  a new rendering job when one is already active. Continuous production refreshes
+  its plan every 60 seconds and rechecks pending inputs after 60 seconds when
+  renderer capacity is available. Startup, draining and busy workers can still
+  delay discovery; this is not a guaranteed one-minute source monitor.
 - A failed or invalid status lookup prevents a dispatch. GET requests retry
   once on transport/server failures; dispatch POSTs are never retried because
   an ambiguous timeout may already have started a run.

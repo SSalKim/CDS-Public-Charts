@@ -2,7 +2,7 @@ const GITHUB_API = "https://api.github.com";
 const OWNER = "SSalKim";
 const REF = "main";
 const USER_AGENT = "cds-cloudflare-scheduler";
-const SCHEDULER_VERSION = "20261116-orphan87-v1";
+const SCHEDULER_VERSION = "20261117-charts-1min-v1";
 const ACTIVE_STATUSES = ["in_progress", "queued", "waiting", "pending", "requested"];
 // Verified empty benchmark record; GitHub rejects both cancel APIs for this run.
 const EMPTY_QUEUED_CHART_RUN_IDS = new Set(["43883299059"]);
@@ -16,9 +16,10 @@ const TARGETS = {
   }
 };
 const CRONS = {
-  charts: "3,13,23,33,43,53 * * * *",
+  charts: "* * * * *",
   vtg: "9,19,29,39,49,59 * * * *"
 };
+const LEGACY_CHARTS_CRON = "3,13,23,33,43,53 * * * *";
 
 export function createDispatcher(fetcher = fetch) {
   async function githubRequest(path, token, method = "GET", body) {
@@ -114,8 +115,9 @@ export function createDispatcher(fetcher = fetch) {
   }
 
   function scheduled(event, env, ctx) {
-    const minute = new Date(event.scheduledTime).getUTCMinutes();
-    const target = minute % 10 === 3 ? "charts" : minute % 10 === 9 ? "vtg" : null;
+    // The two triggers overlap at VTG minutes; route by trigger, not minute.
+    const target = event.cron === CRONS.charts || event.cron === LEGACY_CHARTS_CRON ? "charts"
+      : event.cron === CRONS.vtg ? "vtg" : null;
     if (!target) return;
     ctx.waitUntil(runTarget(target, env).then(result => {
       console.log(JSON.stringify({ cron: event.cron, ...result }));
