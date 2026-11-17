@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from public_charts.resources import worker_count, cmc_worker_count, LaptopLease, ResourceSampler
+from public_charts.resources import worker_count, WorkerMemoryBudget, LaptopLease, ResourceSampler
 from public_charts_runner import choose
 
 
@@ -18,17 +18,11 @@ class ResourceTests(unittest.TestCase):
         self.assertEqual(worker_count("4", memory=10*1024**3, cpus=2), 2)
         self.assertEqual(worker_count(local=True), 1)
 
-    def test_observed_laptop_headroom_allows_three_total_but_only_two_cmc(self):
+    def test_observed_laptop_headroom_caps_only_the_total_pool(self):
         free=int(6.4*1024**3)
         workers=worker_count(memory=free,cpus=16)
         self.assertEqual(workers,3)
-        self.assertEqual(cmc_worker_count(workers,memory=free),2)
         self.assertEqual(worker_count("4",memory=free,cpus=16),3)
-
-    def test_cmc_memory_limits_leave_room_for_large_native_grids(self):
-        for gib,expected in ((2,1),(6,2),(10,3),(14,4)):
-            self.assertEqual(cmc_worker_count(4,memory=gib*1024**3),expected)
-        self.assertEqual(cmc_worker_count(1,memory=14*1024**3),1)
 
     def test_dedicated_chart_runner_is_selected_only_when_vtg_is_idle(self):
         chart = {"runners": [{"name": "LAPTOP-WOOJIN-CHARTS", "status": "online", "busy": False,
@@ -60,6 +54,86 @@ class ResourceTests(unittest.TestCase):
         values=sampler.finish()
         self.assertEqual(values["lowest_windows_available_memory_mib"],4096.)
         self.assertEqual(values["lowest_available_memory_mib"],9216.)
+
+
+class MemoryBudgetTests(unittest.TestCase):
+    def setUp(self):
+        self.free, self.host, self.now = 12*1024**3, None, 100.
+        self.rss = {}
+        self.budget = WorkerMemoryBudget(4,memory_reader=lambda:self.free,host_reader=lambda:self.host,
+                                         rss_reader=lambda pid:self.rss.get(pid),clock=lambda:self.now)
+
+    @staticmethod
+    def target(model="gfs",hour=0):
+        return {"model":model,"cycle":"2026111700","hour":hour}
+
+    def test_any_model_can_fill_four_slots_when_memory_is_available(self):
+        for model in ("cmc","icon","gfs","aifs"):
+            with self.subTest(model=model):
+                for hour in range(4):
+                    self.assertTrue(self.budget.can_start())
+                    self.budget.start("render",self.target(model,hour))
+                self.assertFalse(self.budget.can_start())
+                for hour in range(4):
+                    self.budget.finish("render",self.target(model,hour))
+
+    def test_actual_heavy_workers_pause_new_work_until_headroom_recovers(self):
+        for pid,model in ((10,"aifs"),(11,"gfs")):
+            item=self.target(model)
+            self.budget.start("render",item)
+            self.budget.observe("render",item,pid)
+            self.rss[pid]=2*1024**3
+        self.free=int(3.5*1024**3)
+        self.now+=2
+        self.assertFalse(self.budget.can_start())
+        self.assertEqual(self.budget.snapshot()["heavy_active_workers"],2)
+        self.assertEqual(self.budget.summary()["memory_pause_count"],1)
+        self.free=10*1024**3
+        self.now+=12
+        self.assertTrue(self.budget.can_start())
+        self.assertEqual(self.budget.summary()["memory_pause_seconds"],12.)
+        self.assertEqual(len(self.budget.tasks),2)
+
+    def test_low_windows_memory_can_pause_despite_free_wsl_allowance(self):
+        self.host=1024**3
+        self.assertFalse(self.budget.can_start())
+        self.host=8*1024**3
+        self.now+=2
+        self.assertTrue(self.budget.can_start())
+
+    def test_unstarted_jobs_reserve_memory_before_child_pid_arrives(self):
+        self.free=3*1024**3
+        self.assertTrue(self.budget.can_start())
+        self.budget.start("prepare",self.target(hour=0))
+        self.assertTrue(self.budget.can_start())
+        self.budget.start("prepare",self.target(hour=3))
+        self.assertFalse(self.budget.can_start())
+
+    def test_finished_jobs_record_peak_and_ignore_late_worker_start(self):
+        item=self.target("icon")
+        self.budget.start("render",item)
+        self.budget.observe("render",item,10)
+        self.rss[10]=2*1024**3
+        usage=self.budget.finish("render",item)
+        self.assertEqual(usage["worker_peak_rss_mib"],2048.)
+        self.assertTrue(usage["heavy_worker"])
+        self.budget.observe("render",item,10)
+        self.assertFalse(self.budget.tasks)
+        self.assertEqual(self.budget.snapshot()["worker_reserve_mib"],2560.)
+
+    def test_recent_light_work_eventually_releases_old_peak_reservation(self):
+        self.budget.recent_peaks.append(3*1024**3)
+        for hour in range(8):
+            item=self.target(hour=hour)
+            self.rss[10]=256*1024**2
+            self.budget.start("render",item)
+            self.budget.observe("render",item,10)
+            self.budget.finish("render",item)
+        self.assertEqual(self.budget.snapshot()["worker_reserve_mib"],1024.)
+
+    def test_missing_metrics_preserve_the_existing_worker_cap(self):
+        self.free=None
+        self.assertEqual(self.budget.snapshot()["capacity"],4)
 
 
 if __name__ == "__main__":

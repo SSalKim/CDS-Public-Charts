@@ -14,6 +14,7 @@ from PIL import Image
 
 from public_charts import policy
 from public_charts.parallel import LeadQueue, child_path, cleanup_raw, execute_leads, stage_lead
+from public_charts.resources import WorkerMemoryBudget
 from public_charts.sources import NotReady
 from public_charts_publish import MANIFEST, publish_manifest
 from public_charts_run import run
@@ -243,6 +244,7 @@ class QueueTests(unittest.TestCase):
     def test_cmc_uses_spare_slots_without_repeating_active_leads_after_refresh(self):
         targets = [target("cmc", h) for h in (72, 75, 78, 81)]
         queue = LeadQueue(targets, set(), 10)
+        queue.model_parallel_limit = 3
         active = set()
         for expected in targets[:3]:
             queue.refresh(targets)
@@ -257,6 +259,7 @@ class QueueTests(unittest.TestCase):
 
     def test_parallel_cmc_respects_total_quota_and_other_model_rotation(self):
         queue = LeadQueue([target("cmc", h) for h in (72, 75, 78)] + [target("gfs")], set(), 2)
+        queue.model_parallel_limit = 4
         self.assertEqual(queue.next(set()), target("cmc", 72))
         active = {("cmc", CYCLE, 72)}
         self.assertEqual(queue.next(active), target("gfs"))
@@ -367,12 +370,13 @@ class StagingTests(unittest.TestCase):
             extra.checkpoints = work / "raw-cache/checkpoints" / CYCLE / "gfs"
             self.assertEqual(extra.checkpoint("sample.npz")["values"].tolist(), [9])
 
-    def test_cmc_backlog_fills_three_slots_and_preserves_shared_checkpoints(self):
+    def test_cmc_backlog_can_fill_all_four_slots_and_preserves_shared_checkpoints(self):
         from public_charts.extended_sources import ExtraFields
         with tempfile.TemporaryDirectory() as directory:
             work, received, starts = Path(directory), [], []
+            (work / "expected-renderers").write_text("4")
             pending = [target(model) for model in ("aifs", "gfs", "aigfs")]
-            queue = LeadQueue(pending + [target("cmc", h) for h in (72, 75, 78)], set(), 10)
+            queue = LeadQueue(pending + [target("cmc", h) for h in (72, 75, 78, 81)], set(), 10)
             for item in pending:
                 queue.finished(item, {"type": "NotReady", "pending": True})
 
@@ -382,17 +386,17 @@ class StagingTests(unittest.TestCase):
                 self.assertTrue(all(Path(row["path"]).exists() for row in staged["artifacts"]))
                 received.append(staged["pid"])
 
-            with patch("public_charts.parallel.available_memory", return_value=10*1024**3):
-                execute_leads(queue, work, 4, consume, renderer=concurrent_cmc_renderer,
-                              started=lambda item, active: starts.append(active))
-            self.assertEqual(starts, [1, 2, 3])
-            self.assertEqual(len(set(received)), 3)
+            budget=WorkerMemoryBudget(4,memory_reader=lambda:12*1024**3,host_reader=lambda:None)
+            execute_leads(queue, work, 4, consume, renderer=concurrent_cmc_renderer,
+                          started=lambda item, active: starts.append(active),memory_budget=budget)
+            self.assertEqual(starts, [1, 2, 3, 4])
+            self.assertEqual(len(set(received)), 4)
             extra = ExtraFields(work, "cmc", CYCLE)
             extra.checkpoints = work / "raw-cache/checkpoints" / CYCLE / "cmc"
-            self.assertEqual(extra.checkpoint("sample.npz")["values"].tolist(), [225])
+            self.assertEqual(extra.checkpoint("sample.npz")["values"].tolist(), [306])
             self.assertFalse((work / "render-workers/cmc/leads").exists())
 
-    def test_laptop_cmc_backlog_stays_at_two_concurrent_leads(self):
+    def test_memory_headroom_limits_concurrency_without_a_model_specific_cap(self):
         with tempfile.TemporaryDirectory() as directory:
             work, starts, received=Path(directory), [], []
             (work / "expected-renderers").write_text("2")
@@ -400,11 +404,29 @@ class StagingTests(unittest.TestCase):
             def consume(item,staged):
                 self.assertIsNone(staged["error"])
                 received.append(item["hour"])
-            with patch("public_charts.parallel.available_memory",return_value=int(6.4*1024**3)):
-                execute_leads(queue,work,3,consume,renderer=concurrent_cmc_renderer,
-                              started=lambda item,active:starts.append(active))
+            budget=WorkerMemoryBudget(3,memory_reader=lambda:3*1024**3,host_reader=lambda:None,
+                                       rss_reader=lambda pid:None)
+            execute_leads(queue,work,3,consume,renderer=concurrent_cmc_renderer,
+                          started=lambda item,active:starts.append(active),memory_budget=budget)
             self.assertEqual(sorted(received),[72,75,78])
             self.assertEqual(max(starts),2)
+
+    def test_paused_pool_resumes_queued_work_when_memory_recovers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovered, received, idle = threading.Event(), [], []
+            budget=WorkerMemoryBudget(2,memory_reader=lambda:(8 if recovered.is_set() else .5)*1024**3,
+                                       host_reader=lambda:None)
+            def on_idle():
+                idle.append(True)
+                recovered.set()
+            execute_leads(LeadQueue([target()],set(),1),directory,2,
+                          lambda item,staged:received.append(staged),renderer=every_product_renderer,
+                          on_idle=on_idle,memory_budget=budget)
+            self.assertTrue(idle)
+            self.assertEqual(len(received),1)
+            self.assertIsNone(received[0]["error"])
+            self.assertEqual(budget.summary()["memory_pause_count"],1)
+            self.assertFalse(budget.tasks)
 
     def test_checkpoint_lock_releases_after_error(self):
         from public_charts.extended_sources import ExtraFields

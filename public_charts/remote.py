@@ -142,7 +142,7 @@ class RemoteCoordinator:
         self.started, self.deadline = clock(), clock()+minutes*60
         self.leases, self.seen = {}, set()
         self.helper_id, self.last_heartbeat = None, None
-        self.capacity, self.cmc_capacity, self.reported_active = 0, 0, set()
+        self.capacity, self.heavy_capacity, self.reported_active = 0, 0, set()
         self.next_poll, self.last_control, self.sequence, self.errors = 0, 0, 0, 0
         self.disabled, self.polling, self.smoke = False, False, smoke
         self.smoke_runner = smoke_runner
@@ -199,15 +199,15 @@ class RemoteCoordinator:
                         if files or type(message.get("capacity")) is not int or not 0 <= message["capacity"] <= 4:
                             raise ValueError("Invalid helper capacity")
                         at = float(message.get("generated_at",0))
-                        active, cmc_capacity = message.get("active",[]), message.get("cmc_capacity",self.capacity)
+                        active, heavy_capacity = message.get("active",[]), message.get("heavy_capacity",message["capacity"])
                         if (not math.isfinite(at) or at > now+30 or at < self.started-30
-                                or type(cmc_capacity) is not int or not 0 <= cmc_capacity <= message["capacity"]
+                                or type(heavy_capacity) is not int or not 0 <= heavy_capacity <= message["capacity"]
                                 or not isinstance(active,list) or len(active) > 4
                                 or any(not isinstance(token,str) or not re.fullmatch(r"[a-f0-9]{32}",token) for token in active)):
                             raise ValueError("Invalid helper heartbeat time")
                         self.last_heartbeat = max(self.last_heartbeat or 0,min(now,at))
                         self.capacity = message["capacity"]
-                        self.cmc_capacity = cmc_capacity
+                        self.heavy_capacity = heavy_capacity
                         self.reported_active = set(active)
                         if message.get("stopped"):
                             self.capacity = 0
@@ -257,7 +257,7 @@ class RemoteCoordinator:
             while (self.last_heartbeat is not None and self.can_assign() and now < self.deadline
                    and len(self.leases)+orphaned < self.capacity):
                 active = {identity(lease["target"]) for lease in self.leases.values()}
-                target = self.queue.next(active,limits={"cmc":self.cmc_capacity})
+                target = self.queue.next(active)
                 if target is None:
                     break
                 token = uuid.uuid4().hex

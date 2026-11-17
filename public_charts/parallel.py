@@ -17,7 +17,7 @@ from threading import Event, Thread, RLock
 from urllib.parse import urlsplit
 
 from . import policy
-from .resources import available_memory, cmc_worker_count
+from .resources import WorkerMemoryBudget
 
 _EVENTS = _CANCELLED = None
 
@@ -96,10 +96,23 @@ def error_record(exception):
     return error
 
 
+def report_worker(phase, target):
+    if _EVENTS is None:
+        return
+    while _CANCELLED is None or not _CANCELLED.is_set():
+        try:
+            _EVENTS.put(("worker",target,{"phase":phase,"pid":os.getpid()}),timeout=.2)
+            return
+        except Full:
+            pass
+    raise RuntimeError("Chart calculation stopped")
+
+
 def prepare_lead(target, work):
     """Bounded disk-backed lookahead; no image allocation or Drive credentials."""
     from .sources import collect
     root = child_path(lead_workspace(work, target), "raw-cache")
+    report_worker("prepare",target)
     started = time.monotonic()
     watch = _EVENTS is not None
     if watch:
@@ -111,11 +124,11 @@ def prepare_lead(target, work):
         status = input_status({"observed_at": datetime.now(timezone.utc).isoformat(),
                                "seconds": round(time.monotonic() - started, 3),
                                "sources": metadata.get("sources", [])})
-        return {"error": None, "inputs": status, "requests": statistics.get("requests", 0),
+        return {"error": None, "inputs": status, "pid":os.getpid(), "requests": statistics.get("requests", 0),
                 "bytes": statistics.get("bytes", 0)}
     except Exception as exception:
         cleanup_raw(lead_workspace(work, target))
-        return {"error": error_record(exception)}
+        return {"error": error_record(exception),"pid":os.getpid()}
     finally:
         if watch:
             faulthandler.cancel_dump_traceback_later()
@@ -136,6 +149,7 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
     staged = child_path(model_root, "staged", cycle, f"{hour:03}")
     staged.mkdir(parents=True, exist_ok=True)
     artifacts = []
+    report_worker("render",target)
     started = time.monotonic()
     inputs = {}
 
@@ -211,7 +225,7 @@ def _queue_locked(method):
 
 
 class LeadQueue:
-    """Fair model rotation, with isolated CMC leads filling spare render slots."""
+    """Fair model rotation and disjoint lead claims for both compute nodes."""
 
     def __init__(self, targets, existing, max_leads, force=False):
         self.lock, self.issued = RLock(), set()
@@ -225,23 +239,20 @@ class LeadQueue:
         self.failures, self.model_attempts = {}, dict.fromkeys(self.queues, 0)
         self.attempts = 0
         self.retry_after = {}
-        self.cmc_parallel_limit = 3
         self.model_parallel_limit = 1
         self.retry_seconds = 600
         self.readiness_gate = False
         self.ready_cycles = {(key.split("/")[0], key.split("/")[1]) for key in existing}
 
     @_queue_locked
-    def next(self, active, *, preparing=False, limits=None):
+    def next(self, active, *, preparing=False):
         if self.attempts >= self.max_leads * len(self.queues) * 4:
             return None
         for _ in range(len(self.order)):
             model = self.order[0]
             self.order.rotate(-1)
             active_count = sum(item == model if isinstance(item,str) else item[0] == model for item in active)
-            limit = self.cmc_parallel_limit if model == "cmc" else self.model_parallel_limit
-            if limits is not None:
-                limit = limits.get(model, limit)
+            limit = self.model_parallel_limit
             if preparing:
                 limit += 1
             if (active_count >= limit or self.counts[model] + active_count >= self.max_leads
@@ -325,15 +336,15 @@ class LeadQueue:
 def execute_leads(queue, work, workers, consume, *, force=False, raw_override=None,
                   renderer=None, started=None, refresh=None, refresh_seconds=120,
                   can_schedule=None, idle_seconds=120, streaming=False, prefetch=False,
-                  prefetcher=None, progress=None, on_idle=None, cleanup_staged=True, keep_alive=None):
+                  prefetcher=None, progress=None, on_idle=None, cleanup_staged=True, keep_alive=None,
+                  memory_budget=None):
     """consume runs only on the main process, including after renderer failures."""
     if workers not in (1, 2, 3, 4) or workers > 1 and raw_override:
         raise ValueError("Use one to four workers; a local cache override requires one")
     if renderer is not None and prefetcher is None:
         prefetch = False
     cleanup_models = set(queue.queues)
-    memory = available_memory()
-    queue.cmc_parallel_limit = cmc_worker_count(workers, memory)
+    memory_budget = memory_budget or WorkerMemoryBudget(workers)
     queue.model_parallel_limit = workers
     if prefetch:
         queue.retry_seconds = 60
@@ -371,6 +382,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                     pending, active, prepared, announced, finished = {}, set(), deque(), set(), set()
                     next_refresh = time.monotonic() + refresh_seconds
                     last_progress = time.monotonic()
+                    memory_paused = False
 
                     def identity(target):
                         return target["model"], target["cycle"], target["hour"]
@@ -396,7 +408,9 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 break
                             if identity(target) in finished:
                                 continue
-                            if kind == "inputs":
+                            if kind == "worker":
+                                memory_budget.observe(payload["phase"],target,payload["pid"])
+                            elif kind == "inputs":
                                 deliver(("progress", target, {"event": "inputs_ready", **target, **payload}))
                             elif kind == "diagnostic":
                                 deliver(("progress", target, {**target, **payload}))
@@ -412,7 +426,12 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
 
                     def submit_render(target, preparation=None):
                         known = policy.expected_keys(target["model"], target["cycle"], target["hour"]) & queue.existing
-                        future = executor.submit(stage_lead, target, work, known, force, None, renderer, preparation)
+                        memory_budget.start("render",target)
+                        try:
+                            future = executor.submit(stage_lead, target, work, known, force, None, renderer, preparation)
+                        except BaseException:
+                            memory_budget.finish("render",target)
+                            raise
                         pending[future] = ("render", target)
                         if started:
                             started(target, len(pending))
@@ -427,25 +446,38 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 next_refresh = time.monotonic() + refresh_seconds
                             for _ in range(len(prepared)):
                                 target, preparation = prepared.popleft()
-                                limit = queue.cmc_parallel_limit if target["model"] == "cmc" else workers
-                                running = sum(kind == "render" and item["model"] == target["model"]
-                                              for kind, item in pending.values())
                                 if (scheduling and (can_schedule is None or can_schedule())
-                                        and len(pending) < workers and running < limit):
+                                        and len(pending) < workers and memory_budget.can_start()):
                                     submit_render(target, preparation)
                                 else:
                                     prepared.append((target, preparation))
                             while (scheduling and (can_schedule is None or can_schedule()) and len(pending) < workers
+                                   and memory_budget.can_start()
                                    and (target := queue.next(active, preparing=prefetch)) is not None):
                                 active.add(identity(target))
                                 finished.discard(identity(target))
                                 if prefetch:
-                                    future = executor.submit(prefetcher or prepare_lead, target, work)
+                                    memory_budget.start("prepare",target)
+                                    try:
+                                        future = executor.submit(prefetcher or prepare_lead, target, work)
+                                    except BaseException:
+                                        memory_budget.finish("prepare",target)
+                                        raise
                                     pending[future] = ("prepare", target)
                                     deliver(("progress", target, {"event": "prefetch_started", **target}))
                                 else:
                                     submit_render(target)
+                            state = memory_budget.snapshot()
+                            pressured = state["active_workers"] < workers and state["capacity"] <= state["active_workers"]
+                            if pressured != memory_paused and renderer is None:
+                                deliver(("progress",{}, {"event":"worker_memory_paused" if pressured else "worker_memory_resumed",**state}))
+                            memory_paused = pressured
                             if not pending:
+                                with queue.lock:
+                                    waiting_for_memory = pressured and (prepared or any(queue.queues.values()))
+                                if scheduling and waiting_for_memory:
+                                    stop.wait(.2)
+                                    continue
                                 if keep_alive and keep_alive():
                                     stop.wait(.2)
                                     continue
@@ -458,7 +490,14 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                             drain_events()
                             for future in completed:
                                 kind, target = pending.pop(future)
-                                result = future.result()
+                                result = None
+                                try:
+                                    result = future.result()
+                                finally:
+                                    usage = memory_budget.finish(kind,target,result.get("pid") if result else None)
+                                if renderer is None and usage["worker_peak_rss_mib"]:
+                                    deliver(("progress",target,{"event":"worker_memory",**target,"phase":kind,**usage}))
+                                result.update(usage)
                                 if kind == "prepare" and not result["error"]:
                                     queue.ready_cycles.add((target["model"], target["cycle"]))
                                     prepared.append((target, result))
@@ -478,8 +517,9 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 finished.add(identity(target))
                                 deliver(("lead", target, result))
                     finally:
-                        for future in pending:
+                        for future,(phase,target) in pending.items():
                             future.cancel()
+                            memory_budget.finish(phase,target)
             except BaseException as exception:
                 deliver(("error", exception, None))
             finally:

@@ -44,9 +44,7 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
 - Inside that one job, isolated workers share download preparation and rendering.
   Any model can borrow idle slots for different forecast leads; models rotate fairly
   and each model's newest cycle is prioritized before historical backfill.
-  CMC keeps its memory-dependent rendering cap: two concurrent CMC leads
-  on the laptop with about 6.4 GiB available, three at 8 GiB, or four at 12 GiB.
-  Each lead has
+  There are no CMC/ICON-specific concurrency limits. Each lead has
   separate raw scratch files. Shared cumulative rain/snow checkpoints are protected
   by a per-cycle process lock; only prefix calculation is serialized, not rendering.
   Only the coordinator uploads to Drive, updates manifests, publishes Git commits,
@@ -61,8 +59,12 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   only the coordinator reserves bytes, records results and publishes URLs.
 - Rendering defaults to `auto`: up to four processes, limited by effective CPU
   and available memory (including WSL/container limits). Windows host headroom is
-  also sampled: new scheduling stops below 1 GiB free on Windows or 512 MiB in Linux.
-  Already running work is drained, not killed. Set
+  also sampled. Model-independent admission reserves 1 GiB free in Linux and
+  1.5 GiB on Windows, plus growth room for every active worker. New starts pause
+  under memory pressure and resume when headroom recovers; running work is not
+  killed. The per-worker reservation is at least 1 GiB or 125% of the largest
+  measured peak among active and the last eight completed tasks, whichever is
+  greater. Peaks are sampled, not an OS-enforced hard memory limit. Set
   `PUBLIC_CHARTS_WORKERS=1` to restore sequential rendering.
   Total renderer caps are four at 8 GiB available, three at 6 GiB, two below that,
   and one below 3 GiB. Explicit worker requests cannot bypass these limits.
@@ -232,6 +234,11 @@ proof of first availability. `observed_ready_over_15m` flags observed-ready dela
 over 900 seconds. Check source history separately before claiming the target was
 met. Runtime summaries include peak process-tree RSS and minimum free memory on
 Linux and Windows.
+`heavy_workers` replaces the former CMC-specific counter. It is the current
+admission estimate, not extra processes; workers using at least 1 GiB RSS count
+as `heavy_active_workers`. `worker_memory`, `worker_memory_paused/resumed` and
+`memory_pause_count/seconds` record per-task peaks and recoverable scheduling
+pauses separately on each compute node. Only that node's memory gates its pool.
 
 `--refresh-seconds` defaults to 60 and `--publish-interval-seconds` to 15. Live
 pending-source retries use 60 seconds, subject to worker capacity. The matching

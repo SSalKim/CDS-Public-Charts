@@ -11,7 +11,7 @@ from public_charts.artifacts import ArtifactError, GitHubArtifacts, validate_ses
 from public_charts.parallel import LeadQueue, execute_leads
 from public_charts.remote import (HEARTBEAT_SECONDS, POLL_SECONDS, SCHEMA, identity,
                                   image_size, pack_bundle, target_keys, validate_message)
-from public_charts.resources import LaptopLease, ResourceSampler, available_memory, cmc_worker_count, windows_available_memory, worker_count
+from public_charts.resources import LaptopLease, ResourceSampler, WorkerMemoryBudget, worker_count
 
 
 def smoke_renderer(model, cycle, hour, root, existing, publish, **kwargs):
@@ -54,7 +54,8 @@ class ComputeHelper:
         self.control, self.tokens, self.waiting = {}, {}, {}
         self.queue = HelperQueue(self)
         self.sequence, self.next_poll, self.last_heartbeat = 0, 0, 0
-        self.started, self.latest_control, self.low_memory = time.time(), "", False
+        self.started, self.latest_control = time.time(), ""
+        self.memory_budget = WorkerMemoryBudget(workers)
         self.transport_failures = 0
 
     def valid_lease(self, lease):
@@ -62,11 +63,7 @@ class ComputeHelper:
                 and time.time() < lease["expires_at"] and time.time() < self.control.get("deadline",0))
 
     def can_schedule(self):
-        if self.transport.created >= 350 or self.low_memory or time.time()-self.started >= 28*60:
-            return False
-        free, host = available_memory(), windows_available_memory()
-        if ((free is not None and free < 512*1024**2) or (host is not None and host < 1024**3)):
-            self.low_memory = True
+        if self.transport.created >= 350 or time.time()-self.started >= 28*60:
             return False
         if not self.control:
             return time.time()-self.started < 180
@@ -79,9 +76,11 @@ class ComputeHelper:
         self.sequence += 1
 
     def heartbeat(self, stopped=False):
-        capacity = 0 if stopped or self.low_memory else self.workers
+        budget = self.memory_budget.snapshot()
+        capacity = 0 if stopped else budget["capacity"]
         self.upload({"kind":"heartbeat","generated_at":time.time(),"capacity":capacity,
-                     "cmc_capacity":min(capacity,cmc_worker_count(self.workers)),
+                     "heavy_capacity":min(capacity,budget["heavy_workers"]),
+                     "heavy_active_workers":budget["heavy_active_workers"],
                      "active":list(self.tokens.values()),"stopped":stopped})
         self.last_heartbeat = time.time()
 
@@ -168,19 +167,21 @@ class ComputeHelper:
         sampler.start()
         try:
             self.tick()
-            print(json.dumps({"event":"helper_runtime","workers":self.workers,"session":self.session,"smoke":self.smoke}),flush=True)
+            print(json.dumps({"event":"helper_runtime","workers":self.workers,"session":self.session,"smoke":self.smoke,
+                              "heavy_workers":self.memory_budget.snapshot()["heavy_workers"],
+                              "resource_policy":"measured_worker_memory"}),flush=True)
             execute_leads(self.queue,self.work,self.workers,self.consume,streaming=True,
                           prefetch=not self.smoke, renderer=smoke_renderer if self.smoke else None,
                           refresh=self.targets,refresh_seconds=5,idle_seconds=180,
                           can_schedule=self.can_schedule,on_idle=self.tick,
-                          progress=lambda event:print(json.dumps(event),flush=True))
+                          progress=lambda event:print(json.dumps(event),flush=True),memory_budget=self.memory_budget)
             for key in list(self.waiting):
                 self.flush(key)
             if self.control:
                 self.heartbeat(stopped=True)
         finally:
             lease.close()
-            print(json.dumps({"event":"helper_resources",**sampler.finish()}),flush=True)
+            print(json.dumps({"event":"helper_resources",**sampler.finish(),**self.memory_budget.summary()}),flush=True)
         return 0
 
 

@@ -18,7 +18,7 @@ from public_charts.parallel import LeadQueue, child_path, cleanup_raw, cleanup_s
 from public_charts_publish import publish_manifest
 from public_charts.uploads import UploadPool, UploadBudgetExceeded, StreamingUploads
 from public_charts.resources import (LaptopLease, ResourceSampler, available_memory, windows_available_memory,
-                                     cpu_capacity, worker_count, cmc_worker_count)
+                                     cpu_capacity, worker_count, WorkerMemoryBudget)
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "data/public_charts_manifest.json"
@@ -419,12 +419,14 @@ def run(args, store=None):
                               "event": "render_finished", "prefetch_seconds": staged.get("prefetch_seconds", 0),
                               "publication_pending": bool(uploading_keys or publication_dirty),
                               "upload_workers": upload_workers,
+                              "worker_peak_rss_mib":staged.get("worker_peak_rss_mib"),
                               "renderer_pid": staged["pid"]}), flush=True)
 
     def started(target, active):
         print(json.dumps({**target, "event": "render_started", "active_workers": active}), flush=True)
 
     lease, sampler = LaptopLease(), ResourceSampler()
+    memory_budget = WorkerMemoryBudget(args.workers)
     acquired = lease.acquire()
     deadline = time.monotonic() + minutes*60 if minutes else None
     stop_reason = None
@@ -439,14 +441,6 @@ def run(args, store=None):
             return False
         if deadline is not None and time.monotonic() >= deadline:
             stop_reason = "time_budget"
-            return False
-        free_memory = available_memory()
-        if free_memory is not None and free_memory < 512*1024**2:
-            stop_reason = "memory_headroom"
-            return False
-        host_memory = windows_available_memory()
-        if host_memory is not None and host_memory < 1024**3:
-            stop_reason = "windows_memory_headroom"
             return False
         return True
 
@@ -477,7 +471,8 @@ def run(args, store=None):
             remote = None
 
     print(json.dumps({"event": "runtime_profile", "workers": args.workers, "upload_workers": upload_workers,
-                      "cmc_workers": cmc_worker_count(args.workers),
+                      "heavy_workers":memory_budget.snapshot()["heavy_workers"],
+                      "resource_policy":"measured_worker_memory",
                       "cpu_capacity": cpu_capacity(), "available_memory_mib": round(available_memory()/1024**2, 1) if available_memory() is not None else None,
                       "windows_available_memory_mib": round(windows_available_memory()/1024**2,1) if windows_available_memory() is not None else None,
                       "time_budget_minutes": minutes, "laptop_guard": lease.root is not None,
@@ -496,7 +491,8 @@ def run(args, store=None):
                       refresh_seconds=getattr(args, "refresh_seconds", 60),
                       idle_seconds=max(120, minutes * 60), streaming=not local, prefetch=not local,
                       progress=lambda event: print(json.dumps(event), flush=True), on_idle=tick,
-                      cleanup_staged=False,keep_alive=remote.keep_alive if remote else None)
+                      cleanup_staged=False,keep_alive=remote.keep_alive if remote else None,
+                      memory_budget=memory_budget)
     except BudgetReached:
         pass
     except BaseException as exception:
@@ -516,7 +512,7 @@ def run(args, store=None):
         cleanup_staging(work, args.models)
         resolve_aliases()
         lease.close()
-        resource_usage = sampler.finish()
+        resource_usage = {**sampler.finish(),**memory_budget.summary()}
         save_state()
         if not local:
             kept, delete_ids = snapshot()

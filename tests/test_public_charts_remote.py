@@ -104,7 +104,7 @@ class RemoteCoordinatorTests(unittest.TestCase):
         self.broker.start()
 
     def heartbeat(self,**extra):
-        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=2,cmc_capacity=1,active=[],**extra))
+        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=2,heavy_capacity=1,active=[],**extra))
         self.broker.tick()
 
     def test_offline_helper_leases_are_reclaimed_without_publishing(self):
@@ -125,6 +125,23 @@ class RemoteCoordinatorTests(unittest.TestCase):
         self.assertTrue(self.broker.disabled)
         self.assertFalse(self.queue.issued)
         self.assertIsNotNone(self.queue.next(set()))
+
+    def test_memory_capacity_drop_keeps_inflight_leases_and_recovers(self):
+        self.heartbeat()
+        leased=set(self.broker.leases)
+        self.queue.refresh([target(),target("aifs"),target("icon"),target("cmc")])
+        self.clock+=6
+        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=0,heavy_capacity=0,
+                                    active=list(leased),stopped=False))
+        self.broker.tick()
+        self.assertEqual(set(self.broker.leases),leased)
+        self.assertFalse(self.broker.disabled)
+        self.clock+=6
+        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=4,heavy_capacity=4,
+                                    active=list(leased),stopped=False))
+        self.broker.tick()
+        self.assertEqual(len(self.broker.leases),4)
+        self.assertTrue(leased <= set(self.broker.leases))
 
     def test_stale_session_is_rejected_without_consuming_output(self):
         self.transport.push({**message("heartbeat",capacity=2),"session":"999-1"})
@@ -177,7 +194,7 @@ class RemoteCoordinatorTests(unittest.TestCase):
         self.heartbeat()
         token, lease = next(iter(self.broker.leases.items()))
         self.clock += 601
-        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=2,cmc_capacity=1,
+        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=2,heavy_capacity=1,
                                     active=list(self.broker.leases)))
         self.broker.tick()
         self.assertNotIn(token,self.broker.leases)
@@ -190,7 +207,7 @@ class RemoteCoordinatorTests(unittest.TestCase):
         self.assertIsNotNone(self.queue.next(set()))
 
     def test_nonfinite_heartbeat_is_rejected(self):
-        self.transport.push(message("heartbeat",generated_at=float("nan"),capacity=2,cmc_capacity=1,active=[]))
+        self.transport.push(message("heartbeat",generated_at=float("nan"),capacity=2,heavy_capacity=1,active=[]))
         self.broker.tick()
         self.assertIsNone(self.broker.last_heartbeat)
         self.assertFalse(self.queue.issued)
@@ -322,13 +339,31 @@ class ActionRoleTests(unittest.TestCase):
             for product,domain,path in outputs:
                 with Image.open(path) as image:
                     self.assertEqual(image.size,expected[product,domain])
-    def test_stopped_helper_reports_zero_cmc_capacity(self):
+    def test_stopped_helper_reports_zero_heavy_capacity(self):
         from public_charts_helper import ComputeHelper
         transport = FakeArtifacts()
         helper = ComputeHelper(transport,SESSION,SHA,"unused",4)
         helper.heartbeat(stopped=True)
         self.assertEqual(transport.controls[-1]["capacity"],0)
-        self.assertEqual(transport.controls[-1]["cmc_capacity"],0)
+        self.assertEqual(transport.controls[-1]["heavy_capacity"],0)
+
+    def test_helper_memory_pause_is_recoverable_without_stopping_or_losing_leases(self):
+        from public_charts_helper import ComputeHelper
+        from public_charts.resources import WorkerMemoryBudget
+        transport=FakeArtifacts()
+        helper=ComputeHelper(transport,SESSION,SHA,"unused",4)
+        free=[512*1024**2]
+        helper.memory_budget=WorkerMemoryBudget(4,memory_reader=lambda:free[0],host_reader=lambda:None)
+        helper.tokens[identity(target())]="b"*32
+        helper.heartbeat()
+        self.assertEqual(transport.controls[-1]["capacity"],0)
+        self.assertFalse(transport.controls[-1]["stopped"])
+        self.assertTrue(helper.can_schedule())
+        free[0]=12*1024**3
+        helper.memory_budget.snapshot(force=True)
+        helper.heartbeat()
+        self.assertEqual(transport.controls[-1]["capacity"],4)
+        self.assertEqual(transport.controls[-1]["active"],["b"*32])
 
     def test_transport_probe_passes_the_real_lossless_encoder(self):
         from public_charts_helper import smoke_renderer
