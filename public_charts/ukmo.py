@@ -45,6 +45,8 @@ class NativeReader:
         self.deadline=deadline
         self.fallback=Path(fallback) if fallback is not None else None
         self.bounds=tuple(bounds)
+        self.wrap_longitude=policy.ukmo_dateline_enabled(cycle) and self.bounds[3]>180
+        self.longitude_version=2 if self.wrap_longitude else 1
         self.records=[]
         self.requests=self.bytes=0
         self.grid=None
@@ -57,7 +59,7 @@ class NativeReader:
 
     def path(self,hour,token,levels=()):
         suffix="_"+"-".join(map(str,levels)) if levels else ""
-        directory=self.root if self.bounds==BOUNDS else self.root/"asia"
+        directory=self.root if self.bounds==BOUNDS else self.root/("asia-east-v2" if self.wrap_longitude else "asia")
         return directory/f"{self.cycle}_{hour:03}_{token}{suffix}.npz"
 
     def cached(self,path,hour,token,levels):
@@ -66,6 +68,8 @@ class NativeReader:
             if (meta.get("cycle"),meta.get("hour"),meta.get("token"),meta.get("levels"))!=(self.cycle,hour,token,list(levels)):
                 return None
             if tuple(meta.get("bounds",BOUNDS))!=self.bounds:
+                return None
+            if meta.get("longitude_version",1)!=self.longitude_version:
                 return None
             if meta.get("sha256")!=hashlib.sha256(path.read_bytes()).hexdigest():
                 return None
@@ -76,11 +80,15 @@ class NativeReader:
         except (OSError,ValueError,KeyError):
             return None
 
-    @staticmethod
-    def validate_grid(arrays):
+    def validate_grid(self,arrays):
         lat,lon=arrays["latitude"],arrays["longitude"]
         if len(lat)<2 or len(lon)<2 or not (np.diff(lat)>0).all() or not (np.diff(lon)>0).all():
             raise ValueError("Invalid UKMO native coordinates")
+        if self.wrap_longitude:
+            spacing=float(np.median(np.diff(lon)))
+            if (lon[0]-self.bounds[2]>spacing*1.1 or self.bounds[3]-lon[-1]>spacing*1.1
+                    or np.max(np.diff(lon))>spacing*1.1):
+                raise ValueError("UKMO wrapped coordinates do not cover the requested longitude range")
         for key,values in arrays.items():
             if not np.isfinite(values).all() or key not in {"latitude","longitude"} and values.shape!=(len(lat),len(lon)):
                 raise ValueError("Invalid UKMO regional field")
@@ -156,8 +164,12 @@ class NativeReader:
                         or int(data["time"][()])!=int((run+timedelta(hours=hour)).timestamp())):
                     raise ValueError("UKMO initialization/valid-time mismatch")
                 lat,lon=data["latitude"][()],data["longitude"][()]
+                if self.wrap_longitude:
+                    lon=lon%360
                 yi=np.flatnonzero((lat>=self.bounds[0])&(lat<=self.bounds[1]))
                 xi=np.flatnonzero((lon>=self.bounds[2])&(lon<=self.bounds[3]))
+                if self.wrap_longitude:
+                    xi=xi[np.argsort(lon[xi])]
                 candidates=[(name,value) for name,value in data.items() if isinstance(value,h5py.Dataset)
                             and value.ndim in (2,3) and value.shape[-2:]==(len(lat),len(lon))
                             and name not in {"flag","status_flag"}]
@@ -167,14 +179,24 @@ class NativeReader:
                 if bool(levels)!=(variable.ndim==3):
                     raise ValueError("Unexpected UKMO pressure coordinate")
                 arrays={"latitude":lat[yi],"longitude":lon[xi]}
+                # Keep the two native slabs separate; wrapping must not fetch all longitudes.
+                column_runs=np.split(xi,np.flatnonzero(np.diff(xi)!=1)+1)
+                def read_region(dataset,level_index,dtype):
+                    chunks=[]
+                    for columns in column_runs:
+                        select=(slice(yi[0],yi[-1]+1),slice(columns[0],columns[-1]+1))
+                        if level_index is not None:
+                            select=(level_index,*select)
+                        chunks.append(np.asarray(dataset[select],dtype=dtype))
+                    return np.concatenate(chunks,axis=-1) if len(chunks)>1 else chunks[0]
                 for level in levels or (None,):
-                    select=(slice(yi[0],yi[-1]+1),slice(xi[0],xi[-1]+1))
+                    level_index=None
                     if level is not None:
                         indices=np.flatnonzero(np.isclose(data["pressure"][()],level*100))
                         if len(indices)!=1:
                             raise ValueError("Missing UKMO pressure level")
-                        select=(int(indices[0]),*select)
-                    values=np.asarray(variable[select],dtype=np.float64)
+                        level_index=int(indices[0])
+                    values=read_region(variable,level_index,np.float64)
                     if "_FillValue" in variable.attrs:
                         values[values==variable.attrs["_FillValue"]]=np.nan
                     suffix="" if level is None else f"_{level}"
@@ -183,7 +205,7 @@ class NativeReader:
                     if level is not None:
                         if flag is None:
                             raise ValueError("UKMO pressure field lacks its terrain status flag")
-                        arrays["flag"+suffix]=np.asarray(data[flag][select],dtype=np.int8)
+                        arrays["flag"+suffix]=read_region(data[flag],level_index,np.int8)
                 if (np.diff(arrays["latitude"])<0).all():
                     arrays={key:value[::-1] if key=="latitude" else value if key=="longitude" else value[::-1,:]
                             for key,value in arrays.items()}
@@ -194,7 +216,7 @@ class NativeReader:
                     if isinstance(value,np.generic): return value.item()
                     return value
                 meta={"url":url,"cycle":self.cycle,"hour":hour,"token":token,"levels":list(levels),"variable":name,
-                      "bounds":list(self.bounds),
+                      "bounds":list(self.bounds),"longitude_version":self.longitude_version,
                       "attrs":{key:plain(value) for key,value in variable.attrs.items() if key not in {"DIMENSION_LIST","REFERENCE_LIST"}},
                       "bounds_seconds":plain(data["forecast_period_bnds"][()]) if "forecast_period_bnds" in data else None}
         self.records.append({"source_host":"met-office-atmospheric-model-data.s3.eu-west-2.amazonaws.com",
@@ -221,7 +243,7 @@ def collect_ukmo(cycle,hour,root,*,deadline=None,upper_level=None):
     root=Path(root)
     full=policy.ukmo_full_catalog(cycle,hour)
     upper_level=upper_level or (300 if "gph300" in policy.products(cycle) else 200)
-    version=2 if full else 1
+    version=(3 if policy.ukmo_dateline_enabled(cycle) else 2) if full else 1
     directory=root/"fields"/cycle/"ukmo"/f"{hour:03}"
     path=directory/"fields.npz"
     try:
@@ -290,7 +312,7 @@ class RainDiagnostics(ExtraFields):
                                  bounds=ASIA_BOUNDS if asia else BOUNDS)
         self.native.grid=base["latitude"],base["longitude"]
         self.shape=base["pressure_msl"].shape
-        self.prefix_name="rain-asia-v1" if asia else "rain-korea-v1"
+        self.prefix_name=("rain-asia-east-v2" if policy.ukmo_dateline_enabled(cycle) else "rain-asia-v1") if asia else "rain-korea-v1"
 
     def step(self,end):
         name=f"{self.prefix_name}/steps/{end:03}.npz"

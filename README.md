@@ -43,6 +43,12 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   aliases from earlier cycles are accepted at their published revisions and are
   not rebuilt for these changes. Missing older products may still be completed;
   nothing already published is rolled back or deleted for a style update.
+- UKMO Asia longitude wrapping starts at initialization `2026111812`. Native
+  -180..180 coordinates are converted to 0..360 and the 20..180 / 180..220 slabs
+  are read separately, with values and terrain flags reordered together. The
+  native, collected-field and Asia precipitation caches are versioned to exclude
+  earlier truncated grids. Render revision 11 applies only to new UKMO Asia
+  charts; earlier Asia images, Korea and other models are unchanged.
 - `PUBLIC_CHARTS_ENABLED=true` enables production; `false` blocks production
   dispatches while still allowing a non-mutating dry run.
 - `PUBLIC_CHARTS_START_CYCLE=2026111512` preserves the production start boundary.
