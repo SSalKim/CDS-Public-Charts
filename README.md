@@ -23,6 +23,17 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   resumed on the next attempt; no incomplete accumulation is plotted.
   `surface_phase` and `product_started`/`product_finished` identify slow stages.
   Active renderer tasks emit thread stacks after three minutes for diagnosis.
+- Winter precipitation hatching uses the same continuous SWE field, validity mask,
+  and strict `>0.25 kg/m2` cutoff as the corresponding snowfall panel, for both
+  interval `acptot` and total `acrain`. Exactly 0.25 is excluded; a separately
+  interpolated categorical boundary or the last subinterval's flag is not used.
+  Native SWE (AIFS/ECMWF/CMC/ICON) and native GFS phase sampling are unchanged.
+- UKMO uses the exp3 surface-temperature/RH occurrence filter on each diagnostic
+  3h interval (native 6h after f144) before summing SWE. The three occurrence
+  branches are ORed, and convective-dominant cold snow is not excluded by type.
+  `ukmo-winter-v2-exp3` isolates both step and cumulative checkpoints from v1.
+  Render revision 8 refreshes only supported winter Korea composites and aliases;
+  published older images remain visible until replacement, behind new operational work.
 - `PUBLIC_CHARTS_ENABLED=true` enables production; `false` blocks production
   dispatches while still allowing a non-mutating dry run.
 - `PUBLIC_CHARTS_START_CYCLE=2026111512` preserves the production start boundary.

@@ -11,14 +11,15 @@ import requests
 
 from . import policy
 from .dates import parse_cycle
-from .diagnostics import snow_ratio,wet_bulb_psychrometric
+from .diagnostics import snow_ratio,surface_snow_possible,wet_bulb_psychrometric
+from .chart_style import SNOW_THRESHOLD
 from .extended_sources import ExtraFields,DiagnosticDeferred
 from .sources import NotReady,SourceDeferred,atomic_json
 
 BASE="https://met-office-atmospheric-model-data.s3.eu-west-2.amazonaws.com"
 BOUNDS=(29,45,115,138)
 PROFILE_LEVELS=(1000,975,950,925,900,850,800,750,700)
-DIAGNOSTIC_VERSION="ukmo-winter-v1"
+DIAGNOSTIC_VERSION="ukmo-winter-v2-exp3"
 
 
 def source_url(cycle,hour,token):
@@ -350,13 +351,20 @@ class WinterDiagnostics(ExtraFields):
         t850=source.field(end,"temperature_on_pressure_levels",(850,),unit="K")[0]
         if not np.isfinite(rh).all(): raise ValueError("Nonfinite UKMO screen RH")
         # Out-of-range cells are already excluded by sr_valid; do not discard the whole lead.
-        valid=(rh>=-.2)&(rh<=100.2)&(t850["flag_850"]==0)
+        humidity_valid=(rh>=-.2)&(rh<=100.2)
+        valid=humidity_valid&(t850["flag_850"]==0)
         ratio,depth,_=snow_ratio(rain,t-273.15,np.clip(rh,0,100),t850["value_850"]-273.15,interval_hours=max(3,native_interval(end)))
-        result={"rain":rain,"swe":snow,"raw_swe":raw,"depth":depth,"sr_valid":valid}
+        # Filter each native diagnostic interval before window/cumulative summation (exp3).
+        phase=surface_snow_possible(rain,t-273.15,np.clip(rh,0,100))&humidity_valid
+        filtered=np.where(phase,snow,0.)
+        result={"rain":rain,"swe":filtered,"raw_swe":raw,"unfiltered_swe":snow,
+                "snow_phase_valid":phase,"depth":depth,"sr_valid":valid}
         with self.checkpoint_lock(commit=True): self.save_checkpoint(name,result)
         if self.progress:
             self.progress("ukmo_snow_qc",{"hour":end,"limited_cells":int((raw>snow+1e-6).sum()),
-                                         "limited_swe_sum":float((raw-snow).sum()),"sr_invalid_cells":int((~valid).sum())})
+                                         "limited_swe_sum":float((raw-snow).sum()),"sr_invalid_cells":int((~valid).sum()),
+                                         "surface_filtered_cells":int((snow>filtered).sum()),
+                                         "surface_filtered_swe_sum":float((snow-filtered).sum())})
         return result
 
     def prefix(self,end):
@@ -390,7 +398,7 @@ class WinterDiagnostics(ExtraFields):
         rh=self.base["relative_humidity_2m"]
         dew=mpcalc.dewpoint_from_relative_humidity(self.base["temperature_2m"]*units.K,np.clip(rh,.01,100)/100).to("K").m
         wet=wet_bulb_psychrometric(self.base["temperature_2m"],dew,self.base["surface_pressure"])
-        arrays={**self.base,"precipitation":window["rain"],"snow_expected":(window["swe"]>.01).astype(float),
+        arrays={**self.base,"precipitation":window["rain"],"snow_expected":(window["swe"]>SNOW_THRESHOLD).astype(float),
                 "snowfall_water_equivalent":window["swe"],"snowfall_depth_diagnostic":window["depth"],
                 "total_snowfall_water_equivalent":total["swe"],"total_snowfall_depth_diagnostic":total["depth"],
                 "wet_bulb_2m":wet}

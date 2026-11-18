@@ -13,7 +13,7 @@ from metpy.units import units
 
 from .sources import Decoded,HttpCache,Provider,NotReady,MODELS,atomic_json,collect_rainfall,rainfall_interval
 from .diagnostics import interpolate,snow_ratio,wet_bulb_psychrometric
-from .chart_style import precipitation_threshold
+from .chart_style import precipitation_threshold,SNOW_THRESHOLD
 from . import policy
 
 
@@ -372,7 +372,9 @@ def winter_fields(extra,base,hour,interval,*,cumulative=True):
         metadata=json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata.get("interval")==interval and hashlib.sha256(target.read_bytes()).hexdigest()==metadata.get("sha256"):
             with np.load(target,allow_pickle=False) as archive:
-                return {key:archive[key] for key in archive.files},metadata
+                cached={key:archive[key] for key in archive.files}
+            cached["snow_expected"]=(cached["snowfall_water_equivalent"]>SNOW_THRESHOLD).astype(float)
+            return cached,metadata
     cadence=MODELS[extra.model]["rain"]
     total_snow=total_depth=window_snow=window_depth=None
     start=0 if cumulative else max(0,hour-interval)
@@ -422,6 +424,7 @@ def winter_fields(extra,base,hour,interval,*,cumulative=True):
         last.update(snowfall_water_equivalent=window_snow,snowfall_depth_diagnostic=window_depth)
     if last is None:
         raise ValueError("Winter diagnostic requires a positive lead on its native cadence")
+    last["snow_expected"]=(last["snowfall_water_equivalent"]>SNOW_THRESHOLD).astype(float)
     lat,lon=last["latitude"],last["longitude"]
     for key in ("pressure_msl","terrain_height","geopotential_925","geopotential_850","temperature_925",
                 "temperature_850","wind_u_925","wind_v_925"):

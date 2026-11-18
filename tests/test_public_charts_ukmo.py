@@ -178,7 +178,51 @@ class UkmoDiagnosticsTests(unittest.TestCase):
             step=diag.step(15)
             self.assertFalse(step["sr_valid"][0,0])
             self.assertTrue(step["sr_valid"][0,1])
-            np.testing.assert_allclose(step["swe"],3.)
+            np.testing.assert_allclose(step["unfiltered_swe"],3.)
+            np.testing.assert_allclose(step["swe"],[[0.,3.],[3.,3.]])
+
+    def test_exp3_keeps_cold_convective_snow_but_filters_warm_saturated_cells(self):
+        with tempfile.TemporaryDirectory() as root:
+            diag=WinterDiagnostics(root,"2026111800",base(),6)
+            source=FakeNative()
+            original=source.value
+            def value(hour,token,unit,**kwargs):
+                if token=="temperature_at_screen_level":
+                    return np.array([[-2.,4.],[0.,2.]])+273.15
+                if token=="relative_humidity_at_screen_level":
+                    return np.array([[.95,.95],[.5,.5]])
+                if token=="snowfall_rate":
+                    return np.zeros((2,2))
+                if token.startswith("snowfall_rate_from_convection"):
+                    return np.full((2,2),.001/3600)
+                return original(hour,token,unit,**kwargs)
+            source.value=value
+            diag.native=source
+            step=diag.step(3)
+            np.testing.assert_allclose(step["unfiltered_swe"],3.)
+            np.testing.assert_array_equal(step["snow_phase_valid"],[[True,False],[True,True]])
+            np.testing.assert_allclose(step["swe"],[[3.,0.],[3.,3.]])
+
+    def test_exp3_filters_each_step_before_accumulating_and_ignores_v1_caches(self):
+        with tempfile.TemporaryDirectory() as root:
+            diag=WinterDiagnostics(root,"2026111800",base(),6)
+            old={"rain":np.full((2,2),999.),"swe":np.full((2,2),999.),
+                 "depth":np.full((2,2),999.),"sr_valid":np.ones((2,2),dtype=bool)}
+            diag.save_checkpoint("ukmo-winter-v1/steps/003.npz",old)
+            diag.save_checkpoint("ukmo-winter-v1/totals/006.npz",old)
+            source=FakeNative()
+            original=source.value
+            def value(hour,token,unit,**kwargs):
+                if token=="temperature_at_screen_level":
+                    return np.full((2,2),277.15 if hour==3 else 268.)
+                return original(hour,token,unit,**kwargs)
+            source.value=value
+            diag.native=source
+            total=diag.prefix(6)
+            np.testing.assert_allclose(total["rain"],6.)
+            np.testing.assert_allclose(total["swe"],3.)
+            np.testing.assert_allclose(diag.step(3)["swe"],0.)
+            np.testing.assert_allclose(diag.step(6)["swe"],3.)
 
     def test_each_native_interval_is_bounded_before_accumulating(self):
         with tempfile.TemporaryDirectory() as root:

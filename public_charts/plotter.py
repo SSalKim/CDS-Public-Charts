@@ -50,6 +50,12 @@ RAIN_COLORS = ["#c5c0ff", "#aaaaff", "#8ca7ef", "#75b5d9", "#79cfb3", "#8bdf94",
 VORT_COLORS = ["#ffffc1", "#fff59b", "#ffeb78", "#ffda58", "#ffc64a", "#ffac3b", "#ff902e", "#ff6e24", "#ff481c", "#f92314"]
 
 
+def snow_display_values(value):
+    """Exclude exact cutoff plateaus without changing interpolated SWE boundaries."""
+    values=np.asarray(value,dtype=float)
+    return np.where(values==SNOW_THRESHOLD,np.nextafter(SNOW_THRESHOLD,-np.inf),values)
+
+
 def draw_time_footer(figure,pos,init,hour,size,*,public,korea):
     """Center proportional-font UTC/KST tokens in shared, borderless columns."""
     font=FontProperties(family="DejaVu Sans",size=size)
@@ -459,8 +465,9 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                              sizes={"emptybarb": .07})
             artist.set_gid("wind-barbs")
 
-        def hatch(value,low,high,color,*,clip_to=None,gid="hatched-field",pattern="|||"):
-            artist=ax.contourf(projected[:,:,0],projected[:,:,1],np.ma.masked_where(~visible,value),
+        def hatch(value,low,high,color,*,clip_to=None,gid="hatched-field",pattern="|||",valid_mask=None):
+            allowed=visible if valid_mask is None else visible&valid_mask
+            artist=ax.contourf(projected[:,:,0],projected[:,:,1],np.ma.masked_where(~allowed,value),
                                levels=[low,high],colors="none",hatches=[pattern],transform=projection,zorder=3,
                                corner_mask=True)
             artist.set_edgecolor(color)
@@ -600,7 +607,8 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     rain_levels=(threshold,*legend_levels[1:])
                     palette=PUBLIC_SNOW_COLORS if snow_panel else PUBLIC_RAIN_COLORS
                     # contourf closes its top interval on the right; 100 belongs to the green overflow here.
-                    shade=np.where(precip==100,np.nextafter(100.,np.inf),precip) if snow_panel else precip
+                    shade=snow_display_values(precip) if snow_panel else precip
+                    shade=np.where(shade==100,np.nextafter(100.,np.inf),shade) if snow_panel else shade
                     rain_fill=filled(shade,rain_levels,palette,PUBLIC_SNOW_OVER if snow_panel else palette[-1],
                                      grid=rain_grid,valid_mask=precip_valid,colorbar_levels=legend_levels,colorbar_extendfrac=.045 if snow_panel else 0)
                     selected=base_grid if rain_grid is None else rain_grid
@@ -635,8 +643,14 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     title=f"MSLP, Accum.Snow Amount(cm) by SR Ratio and Precip.Area[{hour-precipitation_hours:03}-{hour:03}]"
                     rain=arrays["precipitation"]
                     hatch(rain,precipitation_threshold(cycle),max(float(np.max(rain))+1,1),WINTER_HATCH_COLOR,gid="rain-area-hatch")
-                elif product=="acptot" and "snow_expected" in arrays:
-                    hatch(arrays["snow_expected"],.5,1.5,"#ff00ff",clip_to=rain_fill if public else None,gid="snow-area-hatch")
+                if public and not pressure_only and product in {"acptot","acrain"}:
+                    snow_key=("total_" if product=="acrain" else "")+"snowfall_water_equivalent"
+                    if snow_key in arrays:
+                        snow=snow_display_values(arrays[snow_key])
+                        hatch(snow,SNOW_THRESHOLD,max(float(np.max(snow))+1,1),"#ff00ff",
+                              gid="snow-area-hatch",valid_mask=field_masks.get(snow_key))
+                elif not public and product=="acptot" and "snow_expected" in arrays:
+                    hatch(arrays["snow_expected"],.5,1.5,"#ff00ff",gid="snow-area-hatch")
             elif product=="acptot_snow":
                 numeric_extrema(np.maximum(precip, 0), "precipitation", threshold, grid=rain_grid,valid_mask=precip_valid)
                 heights=np.arange(0,4501,30)
@@ -736,7 +750,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                 obj.set_gid("thickness-temperature-contours")
                 centers(temperature,(("W",True,"red"),("C",False,"blue")),"temperature",strict=True)
                 if "snowfall_water_equivalent" in arrays:
-                    snow=arrays["snowfall_water_equivalent"]
+                    snow=snow_display_values(arrays["snowfall_water_equivalent"]) if public else arrays["snowfall_water_equivalent"]
                     hatch(snow,SNOW_THRESHOLD,max(float(np.max(snow))+1,1),"#ff00ff",gid="thickness-snow-hatch",pattern="---")
                     footer=f"Snow > {SNOW_THRESHOLD:g} kg/m2"
                 else:

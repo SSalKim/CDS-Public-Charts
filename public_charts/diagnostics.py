@@ -13,15 +13,22 @@ def interpolate(field,latitude,longitude,*,nearest=False):
     return values.astype(np.float32)
 
 
-def snow_ratio(rain_mm,temperature_c,relative_humidity,t850_c,*,interval_hours=3):
-    """Manual p88; natural log and a 3h-equivalent intensity are explicit conventions."""
+def surface_snow_possible(rain_mm,temperature_c,relative_humidity):
+    """OR of the manual's three surface temperature/humidity occurrence conditions."""
     rain=np.asarray(rain_mm,dtype=float)
     rh=np.asarray(relative_humidity,dtype=float)
     temp=np.asarray(temperature_c,dtype=float)
+    valid=(rain>0)&np.isfinite(rain)&np.isfinite(temp)&np.isfinite(rh)&(rh>=0)&(rh<=100)
+    return (((rh>=75)&(temp<=.9)&(rh<(-100/13)*temp+102.5)) |
+            ((temp>.9)&(rh<(-100/13)*temp+89.5)) | ((temp<=.9)&(rh<75))) & valid
+
+
+def snow_ratio(rain_mm,temperature_c,relative_humidity,t850_c,*,interval_hours=3):
+    """Manual p88; natural log and a 3h-equivalent intensity are explicit conventions."""
+    rain=np.asarray(rain_mm,dtype=float)
+    temp=np.asarray(temperature_c,dtype=float)
     t850=np.asarray(t850_c,dtype=float)
-    valid=(rain>0)&np.isfinite(rain)&np.isfinite(temp)&np.isfinite(rh)&np.isfinite(t850)&(rh>=0)&(rh<=100)
-    possible=(((rh>=75)&(temp<=.9)&(rh<(-100/13)*temp+102.5)) |
-              ((temp>.9)&(rh<(-100/13)*temp+89.5)) | ((temp<=.9)&(rh<75))) & valid
+    possible=surface_snow_possible(rain,temp,relative_humidity)&np.isfinite(t850)
     a=np.where(t850>-8,np.where(temp>0,-2.912,-3.688),np.where(temp>0,-3.235,-3.738))
     b=np.where(t850>-8,np.where(temp>0,9.4944,14.914),np.where(temp>0,11.203,20.784))
     equivalent_3h=rain*3/interval_hours
