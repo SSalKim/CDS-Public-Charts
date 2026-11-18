@@ -63,7 +63,7 @@ class StorageTests(unittest.TestCase):
 
     def test_balanced_routes_and_legacy_ownership_are_independent(self):
         self.assertEqual({model for model, account in ROUTES.items() if account == "primary"},
-                         {"gfs", "cmc", "ecmwf"})
+                         {"gfs", "cmc", "ecmwf", "ukmo"})
         self.assertEqual(self.pool.account_for_key("aifs/2026111612/000/gph500/asia"), "secondary")
         self.stores["primary"].files = [{"id": "legacy-aifs", "appProperties": {"kind": "image"}}]
         inventory = self.pool.inventory()

@@ -7,3 +7,5 @@ Pillow==11.2.1
 requests==2.32.4
 eccodes==2.50.1
 beautifulsoup4==4.15.0
+h5py==3.16.0
+fsspec==2026.6.0

@@ -298,7 +298,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
            precipitation_field="total_precipitation_3h", source_note=None,
            pressure_only=False, upper_level_override=None, physical_barb_spacing=False,
            profile=None, model_id=None, field_masks=None,contour_filter=None,diagnostic_snowfall=False,
-           return_frame=False):
+           diagnostic_label=None,return_frame=False):
     started = time.perf_counter()
     xx, yy = np.meshgrid(arrays["longitude"], arrays["latitude"])
     plate = ccrs.PlateCarree()
@@ -581,9 +581,11 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
         footer = ""
         snow_products={"acptot_snow","acptot_snowdepth","acrain_snow","acrain_snowdepth"}
         if product in {"surfce","acrain","acptot",*snow_products}:
+            precip_valid=None
             if product in snow_products:
                 key=("total_" if product.startswith("acrain") else "")+("snowfall_depth_diagnostic" if product.endswith("snowdepth") else "snowfall_water_equivalent")
                 precip=arrays[key]
+                precip_valid=field_masks.get(key)
             else:
                 precip = accumulation if product == "acrain" else (None if pressure_only else arrays[precipitation_field])
             if precip is None and not pressure_only:
@@ -600,10 +602,10 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     # contourf closes its top interval on the right; 100 belongs to the green overflow here.
                     shade=np.where(precip==100,np.nextafter(100.,np.inf),precip) if snow_panel else precip
                     rain_fill=filled(shade,rain_levels,palette,PUBLIC_SNOW_OVER if snow_panel else palette[-1],
-                                     grid=rain_grid,colorbar_levels=legend_levels,colorbar_extendfrac=.045 if snow_panel else 0)
+                                     grid=rain_grid,valid_mask=precip_valid,colorbar_levels=legend_levels,colorbar_extendfrac=.045 if snow_panel else 0)
                     selected=base_grid if rain_grid is None else rain_grid
                     coordinates=selected["projected"]
-                    rain_values=np.ma.masked_where(~selected["visible"],precip)
+                    rain_values=np.ma.masked_where(~(selected["visible"] if precip_valid is None else selected["visible"]&precip_valid),precip)
                     edge=ax.contour(coordinates[:,:,0],coordinates[:,:,1],rain_values,
                                     levels=precipitation_edge_levels(float(np.max(precip)),threshold),colors="#282828",
                                     linewidths=.35,transform=projection,zorder=3,corner_mask=True)
@@ -620,7 +622,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                               label_levels=levels[levels % steps["label"] == 0],valid_mask=field_masks.get("pressure_msl"),quality_kind="pressure")
                 obj.set_gid("pressure-contours")
                 if not pressure_only:
-                    numeric_extrema(np.maximum(precip, 0), "precipitation", threshold,grid=rain_grid)
+                    numeric_extrema(np.maximum(precip, 0), "precipitation", threshold,grid=rain_grid,valid_mask=precip_valid)
                 pressure_centers()
                 title = "MSLP(hPa)" if pressure_only else f"MSLP(hPa) and Accum. Precip(mm)[{hour-precipitation_hours:03}-{hour:03}]"
                 if product=="acrain":
@@ -636,14 +638,14 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                 elif product=="acptot" and "snow_expected" in arrays:
                     hatch(arrays["snow_expected"],.5,1.5,"#ff00ff",clip_to=rain_fill if public else None,gid="snow-area-hatch")
             elif product=="acptot_snow":
-                numeric_extrema(np.maximum(precip, 0), "precipitation", threshold, grid=rain_grid)
+                numeric_extrema(np.maximum(precip, 0), "precipitation", threshold, grid=rain_grid,valid_mask=precip_valid)
                 heights=np.arange(0,4501,30)
                 obj=contour(arrays["geopotential_925"]/9.80665,heights,"black",np.where((heights-810)%60==0,.9,.42),quality_kind=925)
                 obj.set_gid("snow-height-contours")
                 temperatures=np.arange(-60,4,3)
                 obj=contour(arrays["temperature_925"]-273.15,temperatures,"red",np.where(temperatures%6==0,.85,.35))
                 obj.set_gid("snow-temperature-contours")
-                obj=contour(arrays["wet_bulb_2m"],[1.2],"#f28c00",1.2,label_levels=[])
+                obj=contour(arrays["wet_bulb_2m"],[1.2],"#f28c00",1.2,label_levels=[],valid_mask=field_masks.get("wet_bulb_2m"))
                 obj.set_gid("wet-bulb-contour")
                 thickness=(arrays["geopotential_850"]-arrays["geopotential_1000"])/9.80665
                 hatch(thickness,1281,1297,WINTER_HATCH_COLOR,gid="thickness-hatch")
@@ -865,7 +867,11 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             note_x=(pos.x0+pos.x1)/2
             if public and korea:
                 note_x=(footer_blocks["valid"][1]+footer_blocks["init"][0])/2
-            figure.text(note_x,pos.y0-(.019 if public else .010),footer,size=fs(5.5 if korea else 7),color="navy",ha="center",gid="rain-threshold-note")
+            note_y=pos.y0-(.019 if public else .010)
+            if diagnostic_label and product in snow_products:
+                figure.text(note_x,note_y,diagnostic_label,size=fs(5.5 if korea else 7),color="navy",ha="center",gid="diagnostic-snow-note")
+                note_y-=.015
+            figure.text(note_x,note_y,footer,size=fs(5.5 if korea else 7),color="navy",ha="center",gid="rain-threshold-note")
         if source_note:
             note_y=.008 if korea else .012
             source_note="Plotted by WooJin Kim\n"+source_note.replace("Data Sourced from","Data sourced from",1)

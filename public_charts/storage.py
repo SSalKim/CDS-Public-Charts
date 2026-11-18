@@ -7,7 +7,7 @@ from public_charts_drive import ChartDriveError, ChartDriveStore
 
 LAYOUT = "balanced-v1"
 ROUTES = {"gfs": "primary", "cmc": "primary", "ecmwf": "primary",
-          "aifs": "secondary", "aigfs": "secondary", "icon": "secondary"}
+          "aifs": "secondary", "aigfs": "secondary", "icon": "secondary", "ukmo": "primary"}
 
 
 def balanced_enabled():

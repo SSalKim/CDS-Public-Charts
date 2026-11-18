@@ -43,6 +43,9 @@ def probe_sources(target):
         path=(f"{cycle[:8]}/WXO-DD/model_gdps/15km/{cycle[8:]}/{hour:03}/"
               f"{cycle[:8]}T{cycle[8:]}Z_MSC_GDPS_Pressure_MSL_LatLon0.15_PT{hour:03}H.grib2")
         return [(f"{base}/{path}","metadata") for base in CANADA_BASES]
+    if model=="ukmo":
+        from .ukmo import source_url
+        return [(source_url(cycle,hour,"pressure_at_mean_sea_level"),"metadata")]
     from .icon import source_urls
     return [(url,"metadata") for url in source_urls(cycle,hour,"FI",500)]
 

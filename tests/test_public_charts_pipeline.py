@@ -54,11 +54,11 @@ class PolicyTests(unittest.TestCase):
         for model in policy.RETENTION:
             timeline = policy.hours(model)
             self.assertEqual(timeline[0], 0)
-            self.assertEqual(timeline[-1], 144 if model == "ecmwf" else 180 if model == "icon" else 240)
-            self.assertEqual(len(timeline), 35 if model == "ecmwf" else 38 if model == "icon" else 29 if model in {"aifs", "aigfs"} else 43)
+            self.assertEqual(timeline[-1], 144 if model in {"ecmwf","ukmo"} else 180 if model == "icon" else 240)
+            self.assertEqual(len(timeline), 35 if model in {"ecmwf","ukmo"} else 38 if model == "icon" else 29 if model in {"aifs", "aigfs"} else 43)
             self.assertTrue({84, 90, 96, 108, 120} <= set(timeline))
             keys = policy.expected_keys(model, "2026111606" if model == "ecmwf" else "2026111500", 0)
-            self.assertTrue(any("/surfce/" in key for key in keys))
+            self.assertEqual(any("/surfce/" in key for key in keys),model!="ukmo")
             self.assertFalse(any("/acrain" in key for key in keys))
 
     def test_seasons_are_distinct(self):
@@ -111,7 +111,8 @@ class PolicyTests(unittest.TestCase):
                     self.assertFalse(policy.source_check_due(cycle, before, model=model))
                     self.assertTrue(policy.source_check_due(cycle, start, model=model))
                     self.assertNotIn(cycle, {r["cycle"] for r in resolve_plan([model], requested_hours=[0], now=before)})
-                    self.assertIn(cycle, {r["cycle"] for r in resolve_plan([model], requested_hours=[0], now=start)})
+                    self.assertEqual(cycle in {r["cycle"] for r in resolve_plan([model], requested_hours=[0], now=start)},
+                                     cycle>=policy.start_cycle(model))
 
     def test_previous_cycle_remains_eligible_while_new_cycle_waits(self):
         now = datetime(2026, 11, 16, 13, tzinfo=timezone.utc)
@@ -192,10 +193,12 @@ class PolicyTests(unittest.TestCase):
 
     def test_retention_9_and_5_not_dates_only(self):
         rows = []
+        now = datetime(2026, 11, 18, tzinfo=timezone.utc)
         for model, count in policy.RETENTION.items():
-            cycles = policy.cycle_candidates(model, datetime(2026, 11, 16, tzinfo=timezone.utc), count + 3)
-            rows.extend(row(model=model, cycle=cycle) for cycle in cycles)
-        kept, delete = policy.retain(rows)
+            cycles = policy.cycle_candidates(model, now, count + 3)
+            options = {"product":"acptot","domain":"hkor"} if model=="ukmo" else {}
+            rows.extend(row(model=model, cycle=cycle, **options) for cycle in cycles)
+        kept, delete = policy.retain(rows, now=now)
         for model, count in policy.RETENTION.items():
             self.assertEqual(sum(r["model"] == model for r in kept), count)
         self.assertEqual(len(delete), 3*len(policy.RETENTION))
@@ -353,6 +356,7 @@ class ProductionTests(unittest.TestCase):
             self.assertFalse(np.any(calls[1].args[0]["total_snowfall_water_equivalent"]))
             self.assertFalse(np.any(calls[2].args[0]["total_snowfall_depth_diagnostic"]))
             self.assertTrue(all(call.kwargs["precipitation_hours"] == 0 for call in calls))
+            self.assertTrue(all(call.kwargs["diagnostic_label"]==("Diagnostic" if model=="gfs" else None) for call in calls))
 
     def test_zero_total_rain_only_and_summer_keep_single_frame_alias(self):
         for model, cycle in (("aigfs", "2026111612"), ("gfs", "2027070100")):

@@ -59,7 +59,7 @@ def resolve_plan(models, cycle=None, requested_hours=None, now=None, start_cycle
         depth = policy.RETENTION[model] if start_cycle else 2
         cycles = [cycle] if cycle else policy.cycle_candidates(model, now - policy.source_check_delay(model), depth)
         floor = policy.start_cycle(model, start_cycle)
-        cycles = [selected for selected in cycles if selected >= floor]
+        cycles = [selected for selected in cycles if selected >= floor and policy.retention_current(model,selected,now)]
         for selected in cycles:
             if not policy.supports_cycle(model, selected) and len(models)>1:
                 continue
@@ -214,7 +214,7 @@ def run(args, store=None):
             previous=sorted({row["cycle"] for row in rows.values() if row["model"]==model},reverse=True)[:policy.RETENTION[model]]
             for cycle in previous:
                 if ((model,cycle) not in planned and cycle >= policy.start_cycle(model,args.start_cycle)
-                        and policy.source_check_due(cycle, model=model)):
+                        and policy.source_check_due(cycle, model=model) and policy.retention_current(model,cycle)):
                     plan.extend({"model":model,"cycle":cycle,"hour":hour} for hour in policy.hours(model, cycle))
         order = {model: index for index, model in enumerate(args.models)}
         plan.sort(key=lambda target: (order[target["model"]], -int(target["cycle"]), target["hour"]))
@@ -247,6 +247,8 @@ def run(args, store=None):
     publication_interval = getattr(args, "publish_interval_seconds", 15)
     remote = None
     source_monitor = None
+    from public_charts.kma_gate import KmaReleaseGate
+    kma_gate=KmaReleaseGate() if not local else None
 
     def save_state():
         if local:
@@ -280,7 +282,7 @@ def run(args, store=None):
         last_publication = time.monotonic()
         publication_dirty = False
         now = datetime.now(timezone.utc)
-        retained_keys = {policy.row_key(row) for row in kept}
+        retained_keys = {policy.row_key(row) for row in manifest["charts"]}
         for entry_key, item in list(publication_metrics.items()):
             if entry_key not in retained_keys:
                 continue
@@ -294,7 +296,8 @@ def run(args, store=None):
                     event[label] = round(max(0, (now - datetime.fromisoformat(item[source])).total_seconds()), 3)
             event["observed_ready_over_15m"] = event.get("ready_to_publish_seconds", 0) > 900
             print(json.dumps(event), flush=True)
-        publication_metrics.clear()
+        for entry_key in retained_keys:
+            publication_metrics.pop(entry_key,None)
         return kept, delete_ids
 
     class BudgetReached(Exception):
@@ -351,7 +354,7 @@ def run(args, store=None):
                 pending_aliases.remove(item)
 
     def tick(*, block=False):
-        nonlocal reserve_bytes, budget_blocked
+        nonlocal reserve_bytes, budget_blocked, publication_dirty
         if stream:
             try:
                 stream.poll(block=block)
@@ -365,6 +368,8 @@ def run(args, store=None):
         if remote:
             remote.tick()
         resolve_aliases()
+        if kma_gate and kma_gate.poll(rows):
+            publication_dirty=True
         if not local and publication_dirty and time.monotonic() - last_publication >= publication_interval:
             snapshot()
 
@@ -453,7 +458,7 @@ def run(args, store=None):
         planned = resolve_plan(args.models, args.cycle, args.hours, start_cycle=args.start_cycle)
         cycles = {(item["model"], item["cycle"]) for item in planned}
         for model, cycle in previous_cycles - cycles:
-            if cycle >= policy.start_cycle(model,args.start_cycle) and policy.source_check_due(cycle, model=model):
+            if cycle >= policy.start_cycle(model,args.start_cycle) and policy.source_check_due(cycle, model=model) and policy.retention_current(model,cycle):
                 planned.extend({"model": model, "cycle": cycle, "hour": hour} for hour in policy.hours(model, cycle))
         order = {model: index for index, model in enumerate(args.models)}
         planned.sort(key=lambda target: (order[target["model"]], -int(target["cycle"]), target["hour"]))
@@ -524,6 +529,9 @@ def run(args, store=None):
             uploader.close()
         if source_monitor:
             source_monitor.close()
+        if kma_gate:
+            kma_gate.close()
+            kma_gate.poll(rows)
         cleanup_staging(work, args.models)
         resolve_aliases()
         lease.close()

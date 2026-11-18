@@ -153,6 +153,42 @@ class LayoutTests(unittest.TestCase):
                            profile=PUBLIC_PROFILE, return_frame=True)
         self.assertIn("4", labels)
 
+    def test_ukmo_diagnostic_label_is_above_snow_threshold_without_extra_source_line(self):
+        latitude,longitude=np.linspace(29,45,41),np.linspace(115,138,47)
+        x,y=np.meshgrid(longitude,latitude)
+        snow=4*np.exp(-((x-127)**2+(y-38)**2))
+        arrays={"latitude":latitude,"longitude":longitude,"pressure_msl":101000+10*y,
+                "precipitation":snow,"snowfall_water_equivalent":snow,"snowfall_depth_diagnostic":snow,
+                "total_snowfall_water_equivalent":snow,"total_snowfall_depth_diagnostic":snow,
+                "geopotential_925":(810+5*(y-38))*9.80665,"geopotential_850":(1500+5*(y-38))*9.80665,
+                "geopotential_1000":(210+0*y)*9.80665,"temperature_925":273.15+y-38,
+                "wet_bulb_2m":1.2+.5*(y-38),"wind_u_925":5+0*x,"wind_v_925":5+0*y}
+        close=plt.close
+        for product in ("acptot_snow","acptot_snowdepth","acrain_snow","acrain_snowdepth","acptot"):
+            with self.subTest(product=product):
+                def capture(figure):
+                    if hasattr(figure,"axes"):
+                        texts={text.get_gid():text for text in figure.texts}
+                        threshold=texts["rain-threshold-note"]
+                        if product.endswith(("snow","snowdepth")):
+                            label=texts["diagnostic-snow-note"]
+                            self.assertEqual(label.get_text(),"Diagnostic")
+                            renderer=figure.canvas.get_renderer()
+                            self.assertGreaterEqual(label.get_window_extent(renderer).y0,threshold.get_window_extent(renderer).y1)
+                            self.assertIn("Snow > 0.25",threshold.get_text())
+                            self.assertGreater(threshold.get_window_extent(renderer).y0,0)
+                        else:
+                            self.assertNotIn("diagnostic-snow-note",texts)
+                        source=next(t for ax in figure.axes for t in ax.texts if t.get_gid()=="source-note")
+                        self.assertEqual(source.get_text(),"Plotted by WooJin Kim\nData sourced from Met Office")
+                    close(figure)
+                with patch("cartopy.mpl.geoaxes.GeoAxes.add_feature"), \
+                     patch.object(plotter,"korean_admin_boundaries",return_value=[]), \
+                     patch.object(plotter.plt,"close",side_effect=capture):
+                    plotter.render(arrays,"2026111800",54,product,"hkor",None,accumulation=snow,
+                                   profile=PUBLIC_PROFILE,model_id="ukmo",precipitation_field="precipitation",
+                                   source_note="Data sourced from Met Office",diagnostic_label="Diagnostic",return_frame=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,30 +5,32 @@ import re
 from .dates import parse_cycle
 from .chart_style import ASIA_LAYOUT_CUTOVER
 
-RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 5, "icon": 9}
-CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 12, "icon": 6}
+RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 5, "icon": 9, "ukmo": 5}
+CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 12, "icon": 6, "ukmo": 12}
 SOURCE_CHECK_DELAY = timedelta(hours=3)
 MODEL_SOURCE_CHECK_DELAY = {"icon": timedelta(hours=2, minutes=30)}
 ZERO_ACRAIN_CUTOVER = "2026111612"
-MODEL_START_CYCLE = {"ecmwf": "2026111606", "icon": "2026111612"}
+MODEL_START_CYCLE = {"ecmwf": "2026111606", "icon": "2026111612", "ukmo": "2026111800"}
 TITLES = {"aifs": "ECMWF AIFS-Single (N320)", "gfs": "NCEP GFS (C768 L127)",
           "aigfs": "NCEP AIGFS (0.25\u00b0)", "cmc": "CMC GDPS (GEM 0.135\u02da L84)",
           "ecmwf": "ECMWF IFS (TCo1279 L137)"}
 TITLES["icon"] = "DWD ICON (R03B07 L120)"
+TITLES["ukmo"] = "UKMO (UM N1280 L70)"
 MAX_IMAGE_BYTES = 14_000_000_000
-PIPELINE_VERSION = 3
-KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
+PIPELINE_VERSION = 4
+WINTER_DIAGNOSTIC_CUTOVER = "2026111800"
+KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
 
 
 def render_version(cycle):
-    return PIPELINE_VERSION if cycle >= ASIA_LAYOUT_CUTOVER else 2
+    return PIPELINE_VERSION if cycle >= WINTER_DIAGNOSTIC_CUTOVER else 3 if cycle >= ASIA_LAYOUT_CUTOVER else 2
 
 
 def hours(model, cycle=None):
     step = 6 if model in {"aifs", "aigfs"} else 3
     if model not in RETENTION and model != "icon":
         raise ValueError("Unknown model")
-    maximum = 144 if model == "ecmwf" else 240
+    maximum = 144 if model in {"ecmwf","ukmo"} else 240
     if model == "icon":
         maximum = 120 if cycle and parse_cycle(cycle).hour in (6, 18) else 180
     return tuple(range(0, 85, step)) + (90, 96) + tuple(range(108, maximum + 1, 12))
@@ -36,6 +38,8 @@ def hours(model, cycle=None):
 
 def supports_cycle(model, cycle):
     hour = parse_cycle(cycle).hour
+    if model=="ukmo":
+        return hour in (0,12) and int(cycle[4:6]) in (10,11,12,1,2,3,4)
     if model == "icon":
         return hour in (0, 6, 12, 18)
     return hour in ((6, 18) if model == "ecmwf" else range(0, 24, CYCLE_STEP[model]))
@@ -43,6 +47,15 @@ def supports_cycle(model, cycle):
 
 def start_cycle(model, configured=None):
     return max(configured or "", MODEL_START_CYCLE.get(model, ""))
+
+
+def hourly_gfs_snow(cycle):
+    return cycle >= WINTER_DIAGNOSTIC_CUTOVER
+
+
+def retention_current(model,cycle,now=None):
+    now=now or datetime.now(timezone.utc)
+    return model!="ukmo" or timedelta(0)<=now-parse_cycle(cycle)<=timedelta(hours=48)
 
 
 def source_check_delay(model=None):
@@ -87,12 +100,17 @@ def key(model, cycle, hour, product, domain):
         raise ValueError("Invalid chart identity")
     if product not in set(products(cycle)) | {"surfce", "acptot", "acptot1", "acrain", "acrain1"}:
         raise ValueError("Product is outside the active nine-product catalog")
+    if model=="ukmo" and (domain!="hkor" or product not in {"acptot","acptot1","acrain","acrain1"}):
+        raise ValueError("UKMO only replaces Korea winter precipitation")
     if not supports_cycle(model, cycle):
         raise ValueError("Invalid model cycle")
     return value
 
 
 def expected_keys(model, cycle, hour):
+    if model=="ukmo":
+        names=("acptot","acptot1","acrain","acrain1") if supports_acrain(cycle,hour) else ("acptot","acptot1")
+        return {key(model,cycle,hour,product,"hkor") for product in names}
     keys = {key(model, cycle, hour, product, domain)
             for product in products(cycle) for domain in ("asia", "hkor")}
     keys.add(key(model, cycle, hour, "surfce", "asia"))
@@ -120,12 +138,12 @@ def unique_bytes(rows):
     return sum(files.values())
 
 
-def retain(rows, max_bytes=MAX_IMAGE_BYTES, *, account_budgets=None):
+def retain(rows, max_bytes=MAX_IMAGE_BYTES, *, account_budgets=None,now=None):
     """Evict whole old cycles, deduplicating aliases and preserving latest per model."""
     by_key = {row_key(row): dict(row) for row in rows}
     cycles = {model: sorted({row["cycle"] for row in by_key.values() if row["model"] == model}, reverse=True)
               for model in RETENTION}
-    selected = {(model, cycle) for model, values in cycles.items() for cycle in values[:RETENTION[model]]}
+    selected = {(model, cycle) for model, values in cycles.items() for cycle in values[:RETENTION[model]] if retention_current(model,cycle,now)}
 
     def selected_rows():
         return [row for row in by_key.values() if (row["model"], row["cycle"]) in selected]
@@ -154,12 +172,13 @@ def retain(rows, max_bytes=MAX_IMAGE_BYTES, *, account_budgets=None):
     return kept, delete_ids
 
 
-def public_manifest(rows):
-    rows = list(rows)
+def public_manifest(rows,*,now=None):
+    rows = [row for row in rows if row["model"]!="ukmo" or row.get("kma_confirmed_at") and retention_current("ukmo",row["cycle"],now)]
     public = [{k: row[k] for k in ("model", "cycle", "hour", "product", "domain", "url", "size", "sha256", "file_id")}
               for row in rows]
     for source, target in zip(rows, public):
         target["render_version"] = source.get("render_version", 0)
+        if source["model"]=="ukmo": target["kma_confirmed_at"]=source["kma_confirmed_at"]
     return {"schema_version": 1, "pipeline_version": PIPELINE_VERSION,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "models": {model: {"title": TITLES[model], "published": any(r["model"] == model for r in public),

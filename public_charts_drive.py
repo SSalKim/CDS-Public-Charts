@@ -38,7 +38,7 @@ IMAGE_TYPES = {".webp": "image/webp", ".png": "image/png",
                ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 MULTIPART_LIMIT = 5 * 1024 * 1024
 KEY_PATTERN = re.compile(
-    r"(?:aifs|gfs|aigfs|cmc|ecmwf|icon)/([0-9]{10})/([0-9]{3})/"
+    r"(?:aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/([0-9]{10})/([0-9]{3})/"
     r"[a-z][a-z0-9_]{0,39}/(?:asia|hkor)\Z"
 )
 

@@ -106,6 +106,9 @@ def prepare_diagnostic(model,cycle,hour,root,base,checkpoint_root,progress,*,cum
 def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, checkpoint_root=None,
                  progress=None):
     """publish(product, domain, path, alias_of=None) commits one verified image."""
+    if model=="ukmo":
+        from .ukmo import produce_ukmo
+        return produce_ukmo(cycle,hour,root,existing,publish,force=force,checkpoint_root=checkpoint_root,progress=progress)
     root = Path(root)
     completed = set(existing)
     interval = accumulation_hours(model, hour) or 0
@@ -137,6 +140,7 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
                       pressure_only=pressure_only, upper_level_override=200 if product == "gph200" else None,
                       physical_barb_spacing=True, profile=PUBLIC_PROFILE, model_id=model,
                       contour_filter=closed_contour_predicate(arrays), diagnostic_snowfall=model == "gfs",
+                      diagnostic_label="Diagnostic" if model=="gfs" else None,
                       return_frame=True)
         gc.collect()
         timings["plot_seconds"] += time.monotonic() - started

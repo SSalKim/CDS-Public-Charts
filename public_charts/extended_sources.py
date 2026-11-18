@@ -14,6 +14,7 @@ from metpy.units import units
 from .sources import Decoded,HttpCache,Provider,NotReady,MODELS,atomic_json,collect_rainfall,rainfall_interval
 from .diagnostics import interpolate,snow_ratio,wet_bulb_psychrometric
 from .chart_style import precipitation_threshold
+from . import policy
 
 
 class DiagnosticDeferred(NotReady):
@@ -240,6 +241,8 @@ def current_snowfall(extra,base,hour,interval):
     if extra.model=="aigfs":
         raise NotReady("AIGFS publishes no native snowfall or categorical snow")
     if extra.model=="gfs":
+        if policy.hourly_gfs_snow(extra.cycle):
+            return gfs_sampled_snow(extra,hour,interval,base["latitude"],base["longitude"])
         flag=interpolate(extra.get(hour,"categorical_snow"),base["latitude"],base["longitude"],nearest=True)>=.5
         rain_lat=base.get("precipitation_latitude",base["latitude"])
         rain_lon=base.get("precipitation_longitude",base["longitude"])
@@ -252,6 +255,50 @@ def current_snowfall(extra,base,hour,interval):
     previous=None if int(current.metadata["startStep"])==hour-interval else extra.get(hour-interval,"snowfall_water_equivalent")
     values=rainfall_interval(current,previous,hour,interval)
     return Decoded(values,current.latitude,current.longitude,{"source":"native snowfall water equivalent","units":"kg/m2"})
+
+
+def gfs_sampled_snow(extra,hour,interval,latitude,longitude):
+    """Hourly endpoint phase through f120, native 3h endpoints thereafter."""
+    start=hour-interval
+    if start<0 or (hour>120 and hour%3) or (start>120 and start%3):
+        raise ValueError("GFS snow interval is outside the native phase cadence")
+    total=np.zeros((len(latitude),len(longitude)),dtype=np.float64)
+    korea=(np.min(latitude)>=29 and np.max(latitude)<=45 and np.min(longitude)>=115 and np.max(longitude)<=138)
+    region="hkor" if korea else "asia"
+    steps=[]
+    end=start
+    while end<hour:
+        extra.check_budget()
+        duration=1 if end<120 else 3
+        end+=duration
+        if end>hour:
+            raise ValueError("GFS phase interval cannot exactly cover the requested window")
+        name=f"gfs-hourly-v1/phase-{region}/{end:03}.npz"
+        cached=extra.checkpoint(name)
+        if cached is None:
+            rain,reference,_=collect_rainfall(extra.provider,extra.cycle,end,duration)
+            # A phase checkpoint has one deterministic regional Gaussian grid.
+            native_rain=Decoded(rain,reference.latitude,reference.longitude,{})
+            regional_rain=regional(native_rain) if korea else native_rain
+            flag=interpolate(extra.get(end,"categorical_snow"),regional_rain.latitude,regional_rain.longitude,nearest=True)>=.5
+            cached={"latitude":regional_rain.latitude,"longitude":regional_rain.longitude,
+                    "swe":regional_rain.values.astype(np.float64)*flag,
+                    "duration":np.array(duration)}
+            with extra.checkpoint_lock(commit=True):
+                extra.save_checkpoint(name,cached)
+        if int(cached["duration"])!=duration:
+            raise ValueError("Cached GFS phase cadence differs")
+        field=Decoded(cached["swe"],cached["latitude"],cached["longitude"],{})
+        total+=interpolate(field,np.clip(latitude,field.latitude.min(),field.latitude.max()),
+                           np.clip(longitude,field.longitude.min(),field.longitude.max()))
+        steps.append(duration)
+    return Decoded(total.astype(np.float32),latitude,longitude,
+                   {"source":"GFS interval rain x native endpoint CSNOW; hourly through f120, 3h thereafter",
+                    "startStep":start,"endStep":hour,"phase_intervals_hours":sorted(set(steps)),"units":"kg/m2"})
+
+
+def snow_checkpoint_name(extra,name):
+    return "gfs-hourly-v1/"+name if extra.model=="gfs" and policy.hourly_gfs_snow(extra.cycle) else name
 
 
 def near_surface_fields(extra,end):
@@ -287,8 +334,12 @@ def snow_step(extra,end,cadence):
     t850=interpolate(extra.get(end,"temperature_850"),lat,lon)-273.15
     ratio,depth,_=snow_ratio(rain,t-273.15,rh,t850,interval_hours=cadence)
     if extra.model=="gfs":
-        snow_flag=interpolate(extra.get(end,"categorical_snow"),lat,lon,nearest=True)>=.5
-        snow=rain*snow_flag
+        if policy.hourly_gfs_snow(extra.cycle):
+            snow=gfs_sampled_snow(extra,end,cadence,lat,lon).values
+            snow_flag=snow>.01
+        else:
+            snow_flag=interpolate(extra.get(end,"categorical_snow"),lat,lon,nearest=True)>=.5
+            snow=rain*snow_flag
     else:
         current=extra.get(end,"snowfall_water_equivalent")
         previous=None if int(current.metadata["startStep"])==end-cadence else extra.get(end-cadence,"snowfall_water_equivalent")
@@ -301,10 +352,11 @@ def snow_step(extra,end,cadence):
 
 
 def cached_snow_step(extra,end,cadence):
-    current=extra.checkpoint(f"steps/{end:03}.npz")
+    name=snow_checkpoint_name(extra,f"steps/{end:03}.npz")
+    current=extra.checkpoint(name)
     if current is None:
         current=snow_step(extra,end,cadence)
-        extra.save_checkpoint(f"steps/{end:03}.npz",current)
+        extra.save_checkpoint(name,current)
         if extra.progress:
             extra.progress("diagnostic_step_ready",{"kind":"snow","step_hour":end})
     return current
@@ -313,7 +365,8 @@ def cached_snow_step(extra,end,cadence):
 def winter_fields(extra,base,hour,interval,*,cumulative=True):
     if extra.model=="aigfs":
         raise NotReady("AIGFS has no near-surface humidity or native snowfall in its open product")
-    target=extra.root/f"{hour:03}"/("winter-v2.npz" if cumulative else "winter-window-v2.npz")
+    version="v3-hourly" if extra.model=="gfs" and policy.hourly_gfs_snow(extra.cycle) else "v2"
+    target=extra.root/f"{hour:03}"/(f"winter-{version}.npz" if cumulative else f"winter-window-{version}.npz")
     metadata_path=target.with_suffix(".json")
     if target.exists() and metadata_path.exists():
         metadata=json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -325,7 +378,7 @@ def winter_fields(extra,base,hour,interval,*,cumulative=True):
     start=0 if cumulative else max(0,hour-interval)
     for previous_end in (range(hour-interval,0,-cadence) if cumulative else ()):
         extra.check_budget()
-        previous=extra.checkpoint(f"snow/{previous_end:03}.npz")
+        previous=extra.checkpoint(snow_checkpoint_name(extra,f"snow/{previous_end:03}.npz"))
         if previous is not None:
             total_snow=previous["total_snowfall_water_equivalent"].copy()
             total_depth=previous["total_snowfall_depth_diagnostic"].copy()
@@ -340,7 +393,7 @@ def winter_fields(extra,base,hour,interval,*,cumulative=True):
                     "total_snowfall_water_equivalent","total_snowfall_depth_diagnostic")})
     for end in range(start+cadence,hour+1,cadence):
         extra.check_budget()
-        current=extra.checkpoint(f"snow/{end:03}.npz") if cumulative else None
+        current=extra.checkpoint(snow_checkpoint_name(extra,f"snow/{end:03}.npz")) if cumulative else None
         if current is None:
             current=dict(cached_snow_step(extra,end,cadence))
             snow=current["snowfall_water_equivalent"]
@@ -354,7 +407,7 @@ def winter_fields(extra,base,hour,interval,*,cumulative=True):
                            total_snowfall_depth_diagnostic=total_depth)
             if cumulative:
                 with extra.checkpoint_lock(commit=True):
-                    extra.save_checkpoint(f"snow/{end:03}.npz",current)
+                    extra.save_checkpoint(snow_checkpoint_name(extra,f"snow/{end:03}.npz"),current)
         total_snow=current["total_snowfall_water_equivalent"]
         total_depth=current["total_snowfall_depth_diagnostic"]
         snow=current["snowfall_water_equivalent"]
@@ -382,7 +435,8 @@ def winter_fields(extra,base,hour,interval,*,cumulative=True):
     last["wet_bulb_2m"]=wet_bulb_psychrometric(last["temperature_2m"],dew,last["surface_pressure"])
     metadata={"model":extra.model,"cycle":extra.cycle,"hour":hour,"interval":interval,"native_interval":cadence,
               "snowfall_source":("zero-length display window; no accumulation queried" if hour==0 else
-                                 "endpoint GFS CSNOW categorical diagnostic, not native snowfall mass" if extra.model=="gfs" else
+                                 ("native endpoint GFS CSNOW: hourly through f120, 3h thereafter; not native snowfall mass"
+                                  if policy.hourly_gfs_snow(extra.cycle) else "endpoint GFS CSNOW categorical diagnostic, not native snowfall mass") if extra.model=="gfs" else
                                  "native accumulated snowfall water equivalent"),
               "ratio_convention":"KMA 2024 manual p88; natural logarithm; rain normalized to 3h-equivalent intensity; cm=mm*ratio/10",
               "depth_caveat":"fresh-snow diagnostic; no melting, compaction, blowing snow or existing snowpack",

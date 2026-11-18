@@ -35,7 +35,7 @@ def child_path(root, *parts):
 
 def cleanup_raw(work):
     root = child_path(work, "raw-cache")
-    for name in ("grib-cache", "fields", "extended-fields", "images"):
+    for name in ("grib-cache", "fields", "extended-fields", "ukmo-native", "images"):
         target = child_path(root, name)
         if target.exists():
             shutil.rmtree(target)

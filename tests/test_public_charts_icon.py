@@ -15,7 +15,7 @@ from public_charts.sources import Decoded, HttpCache, NotReady, Provider
 class IconPolicyTests(unittest.TestCase):
     def test_icon_uses_the_shared_catalog_with_nine_retained_cycles(self):
         self.assertEqual(policy.RETENTION["icon"], 9)
-        self.assertEqual(len(policy.RETENTION), 6)
+        self.assertIn("icon",policy.RETENTION)
         self.assertEqual(policy.TITLES["icon"], "DWD ICON (R03B07 L120)")
 
     def test_native_run_horizons_and_kim_display_schedule(self):
