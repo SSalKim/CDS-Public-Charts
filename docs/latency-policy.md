@@ -50,3 +50,12 @@ panels retain their scientific values and styling. From 2026111812, only the
 `acrain`/`acrain1` winter composite revision advances to 12. At deployment the
 only published charts of that cycle are ICON, so this selectively repairs those
 two layouts without rebuilding ICON's other products or earlier cycles.
+
+## Selective Marker Density
+
+GFS and ICON use stronger local prominence and wider search radii for pressure,
+height, temperature, vorticity, precipitation and wind markers in both domains.
+Nearby similar H/L and W/C markers are consolidated before annotation. Other
+models retain their existing criteria. This changes annotations only, not the
+source fields, contours, shading or snow thresholds; published images are not
+invalidated or force-rebuilt.

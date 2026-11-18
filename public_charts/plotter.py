@@ -553,9 +553,13 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             merged=None
             def candidates_for(high):
                 if strict:
-                    return extrema_candidates(value,arrays["latitude"],arrays["longitude"],180 if korea else 500,
-                                              1 if korea else 1.5,high,valid_mask)
-                if public and model_id in ("gfs","aigfs") and kind=="temperature":
+                    radius,prominence=180 if korea else 500,1 if korea else 1.5
+                    if public and model_id in {"gfs","icon"}:
+                        selected_prominence,selected_radius=center_parameters(domain,kind,model_id)
+                        radius,prominence=max(radius,selected_radius),max(prominence,selected_prominence)
+                    return extrema_candidates(value,arrays["latitude"],arrays["longitude"],radius,
+                                              prominence,high,valid_mask)
+                if public and model_id=="aigfs" and kind=="temperature":
                     radius=220 if korea else 500
                     prominence=.45 if korea else .65
                     return extrema_candidates(value,arrays["latitude"],arrays["longitude"],radius,prominence,high,valid_mask)
@@ -563,7 +567,8 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     return extrema_candidates(value,arrays["latitude"],arrays["longitude"],180,8 if kind=="height" else .7,high,valid_mask)
                 return center_candidates(value,arrays["latitude"],arrays["longitude"],domain,kind,high,valid_mask,
                                          model_id=model_id if public else None)
-            if strict or public and (model_id=="ukmo" or (kind=="temperature" and model_id in ("gfs","aigfs")) or (model_id=="aigfs" and korea and kind in ("height","pressure"))):
+            if strict or public and (model_id in {"ukmo","gfs","icon"} or (kind=="temperature" and model_id=="aigfs")
+                    or (model_id=="aigfs" and korea and kind in ("height","pressure"))):
                 all_candidates=[]
                 for mark,high,color in modes:
                     all_candidates.extend((*item,mark,color) for item in candidates_for(high)

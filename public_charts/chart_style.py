@@ -127,10 +127,13 @@ def barb_stride(domain):
 
 
 def center_parameters(domain, kind, model_id=None):
+    if model_id in {"gfs","icon"}:
+        return ({"pressure":(.7,180),"height":(4,180),"temperature":(.6,250)} if domain=="hkor" else
+                {"pressure":(1,650),"height":(8,550),"temperature":(1,650)})[kind]
     if model_id=="ukmo":
         return ({"pressure":(.25,180),"height":(5,180),"temperature":(.4,180)} if domain=="hkor" else
                 {"pressure":(1,650),"height":(8,550),"temperature":(1,600)})[kind]
-    if model_id in {"cmc", "icon"} and kind == "temperature":
+    if model_id=="cmc" and kind == "temperature":
         return (.2, 100) if domain == "hkor" else (.55, 450)
     if domain == "hkor":
         return 0, 60 if kind in ("temperature", "height") else 75
@@ -139,6 +142,12 @@ def center_parameters(domain, kind, model_id=None):
 
 def numeric_extrema_parameters(domain, kind, model_id=None):
     korea = domain == "hkor"
+    if model_id in {"gfs","icon"}:
+        return {
+            "precipitation":{"radius":130 if korea else 260,"prominence":.2 if korea else .4,"minimum":1},
+            "wind":{"radius":200 if korea else 450,"prominence":2.5 if korea else 4,"minimum":0},
+            "vorticity":{"radius":220 if korea else 500,"prominence":1.2 if korea else 2,"minimum":4 if korea else 5},
+        }[kind]
     if model_id=="ukmo":
         return {
             "precipitation":{"radius":140 if korea else 260,"prominence":.35 if korea else .6,"minimum":1},
@@ -149,7 +158,7 @@ def numeric_extrema_parameters(domain, kind, model_id=None):
         return {"radius": 90 if korea else 180, "prominence": .075 if korea else .2, "minimum": 1}
     if kind == "wind":
         return {"radius": 150 if korea else 350, "prominence": 1.5 if korea else 2.5, "minimum": 0}
-    if model_id in {"cmc", "icon"} and kind == "vorticity":
+    if model_id=="cmc" and kind == "vorticity":
         return {"radius": 150 if korea else 300, "prominence": .8 if korea else 1.5,
                 "minimum": 3 if korea else 4}
     return {"radius": 125 if korea else 250, "prominence": .5 if korea else 1, "minimum": 2}

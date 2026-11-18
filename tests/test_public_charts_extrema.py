@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 from scipy.ndimage import binary_erosion, find_objects, label, maximum_filter, minimum_filter
 
-from public_charts.plotter import extrema_candidates, smooth_valid,center_candidates
+from public_charts.plotter import extrema_candidates, smooth_valid,center_candidates,merge_similar_centers
 from public_charts.chart_style import center_parameters, numeric_extrema_parameters
 
 
@@ -92,7 +92,7 @@ class ExtremaTests(unittest.TestCase):
         self.assertIn("size", filtered.call_args.kwargs)
         self.assertNotIn("footprint", filtered.call_args.kwargs)
 
-    def test_high_resolution_markers_are_more_selective_without_changing_hl(self):
+    def test_selected_dense_models_are_more_selective_and_other_models_keep_their_settings(self):
         for domain in ("asia", "hkor"):
             for model in ("cmc", "icon"):
                 with self.subTest(domain=domain, model=model):
@@ -101,14 +101,24 @@ class ExtremaTests(unittest.TestCase):
                     self.assertGreater(new[0], old[0])
                     self.assertGreater(new[1], old[1])
                     for kind in ("height", "pressure"):
-                        self.assertEqual(center_parameters(domain, kind, model), center_parameters(domain, kind))
+                        selected=center_parameters(domain, kind, model)
+                        if model=="cmc":
+                            self.assertEqual(selected,center_parameters(domain,kind))
+                        else:
+                            self.assertGreater(selected[0],center_parameters(domain,kind)[0])
+                            self.assertGreater(selected[1],center_parameters(domain,kind)[1])
                     old = numeric_extrema_parameters(domain, "vorticity")
                     new = numeric_extrema_parameters(domain, "vorticity", model)
                     for key in ("radius", "prominence", "minimum"):
                         self.assertGreater(new[key], old[key])
                     for kind in ("precipitation", "wind"):
-                        self.assertEqual(numeric_extrema_parameters(domain, kind, model), numeric_extrema_parameters(domain, kind))
-            for model in ("aifs", "ecmwf", "gfs", "aigfs"):
+                        selected=numeric_extrema_parameters(domain,kind,model)
+                        if model=="cmc":
+                            self.assertEqual(selected,numeric_extrema_parameters(domain,kind))
+                        else:
+                            self.assertGreater(selected["radius"],numeric_extrema_parameters(domain,kind)["radius"])
+                            self.assertGreater(selected["prominence"],numeric_extrema_parameters(domain,kind)["prominence"])
+            for model in ("aifs", "ecmwf", "aigfs"):
                 self.assertEqual(center_parameters(domain, "temperature", model), center_parameters(domain, "temperature"))
                 self.assertEqual(numeric_extrema_parameters(domain, "vorticity", model), numeric_extrema_parameters(domain, "vorticity"))
 
@@ -119,7 +129,8 @@ class ExtremaTests(unittest.TestCase):
                 new=center_parameters(domain,kind,"ukmo")
                 self.assertGreater(new[0],old[0]);self.assertGreater(new[1],old[1])
                 for model in ("aifs","gfs","ecmwf","aigfs"):
-                    self.assertEqual(center_parameters(domain,kind,model),old)
+                    if model!="gfs":
+                        self.assertEqual(center_parameters(domain,kind,model),old)
             for kind in ("precipitation","vorticity","wind"):
                 old=numeric_extrema_parameters(domain,kind)
                 new=numeric_extrema_parameters(domain,kind,"ukmo")
@@ -135,6 +146,45 @@ class ExtremaTests(unittest.TestCase):
         self.assertGreater(len(old),len(new))
         self.assertEqual(len(new),1)
         self.assertGreater(new[0][3],2.5)
+
+    def test_gfs_korean_pressure_drops_weak_ripples_but_keeps_distinct_high_and_low(self):
+        latitude=np.linspace(29,45,161);longitude=np.linspace(115,138,231)
+        x,y=np.meshgrid(longitude,latitude)
+        field=1020+.15*np.sin(x*5)*np.cos(y*5)
+        field+=5*np.exp(-((x-121)**2+(y-40)**2)/.8)
+        field-=5*np.exp(-((x-132)**2+(y-34)**2)/.8)
+        old=[];new=[]
+        for high in (True,False):
+            old.extend(center_candidates(field,latitude,longitude,"hkor","pressure",high))
+            new.extend(center_candidates(field,latitude,longitude,"hkor","pressure",high,model_id="gfs"))
+        self.assertGreater(len(old),len(new)*5)
+        self.assertEqual(len(new),2)
+        self.assertGreater(max(item[3] for item in new),1024)
+        self.assertLess(min(item[3] for item in new),1016)
+        self.assertEqual(center_parameters("hkor","pressure","gfs"),(.7,180))
+        self.assertGreater(center_parameters("asia","pressure","gfs")[0],center_parameters("asia","pressure")[0])
+
+    def test_gfs_and_icon_raise_all_marker_criteria_in_both_domains(self):
+        for domain in ("asia","hkor"):
+            for model in ("gfs","icon"):
+                for kind in ("pressure","height","temperature"):
+                    old=center_parameters(domain,kind)
+                    new=center_parameters(domain,kind,model)
+                    self.assertGreater(new[0],old[0])
+                    self.assertGreater(new[1],old[1])
+                for kind in ("precipitation","wind","vorticity"):
+                    old=numeric_extrema_parameters(domain,kind)
+                    new=numeric_extrema_parameters(domain,kind,model)
+                    self.assertGreater(new["radius"],old["radius"])
+                    self.assertGreater(new["prominence"],old["prominence"])
+                    self.assertGreaterEqual(new["minimum"],old["minimum"])
+
+    def test_nearby_similar_pressure_centers_merge_but_a_deep_low_is_preserved(self):
+        latitude=np.array([35.,35.5,36.]);longitude=np.array([125.,125.5,126.])
+        candidates=[(2.,1,1,1023.,"H","blue"),(1.9,2,2,1022.,"L","red"),
+                    (1.8,0,0,1015.,"L","red")]
+        kept=merge_similar_centers(candidates,latitude,longitude,250,2)
+        self.assertEqual([item[3] for item in kept],[1023.,1015.])
 
 
 if __name__ == "__main__":
