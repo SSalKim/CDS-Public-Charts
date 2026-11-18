@@ -27,14 +27,19 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   and strict `>0.25 kg/m2` cutoff as the corresponding snowfall panel, for both
   interval `acptot` and total `acrain`. Exactly 0.25 is excluded; a separately
   interpolated categorical boundary or the last subinterval's flag is not used.
+  Hatching and snowfall shading/edges share the exact same precipitation clip
+  path, so both remain inside the matching interval or cumulative rain footprint.
+  Rain uses strict `>0.5 mm` in May-October and `>0.25 mm` in November-April;
+  winter triptychs are October-April. Source snowfall amounts are not filtered
+  or smoothed to implement this display constraint.
   Native SWE (AIFS/ECMWF/CMC/ICON) and native GFS phase sampling are unchanged.
 - UKMO integrates native large-scale and convective snowfall rates, retaining the
   existing same-interval precipitation cap without an additional surface T/RH
   filter on SWE. The strict `>0.25 kg/m2` display cutoff is shared by all models.
   Surface occurrence conditions remain part of SR depth conversion, not SWE.
   `ukmo-winter-v3-native-swe` isolates step and cumulative checkpoints from the
-  superseded exp3 caches. Render revision 9 refreshes UKMO winter Korea composites
-  and aliases; other snow-capable models retain revision 8. Previously
+  superseded exp3 caches. Render revision 10 refreshes snow-capable winter Korea
+  composites and aliases for the shared precipitation boundary. Previously
   published older images remain visible until replacement, behind new operational work.
 - `PUBLIC_CHARTS_ENABLED=true` enables production; `false` blocks production
   dispatches while still allowing a non-mutating dry run.

@@ -134,6 +134,7 @@ class LayoutTests(unittest.TestCase):
         x, y = np.meshgrid(longitude, latitude)
         arrays = {"latitude": latitude, "longitude": longitude,
                   "snowfall_water_equivalent": 4 * np.exp(-((x-127)**2+(y-38)**2)),
+                  "precipitation":4 * np.exp(-((x-127)**2+(y-38)**2)),
                   "geopotential_925": (810+5*(y-38))*9.80665,
                   "geopotential_850": (1500+5*(y-38))*9.80665,
                   "geopotential_1000": (210+0*y)*9.80665,
@@ -212,7 +213,7 @@ class LayoutTests(unittest.TestCase):
              patch.object(plotter.plt,"close",side_effect=capture):
             for hour in (0,3,24,84,120,240):
                 plotter.render(arrays,"2026113000",hour,"acrain_snow","hkor",None,
-                               profile=PUBLIC_PROFILE,model_id="gfs",diagnostic_label="Diagnostic",return_frame=True)
+                               accumulation=snow,profile=PUBLIC_PROFILE,model_id="gfs",diagnostic_label="Diagnostic",return_frame=True)
         self.assertEqual(len(positions),6)
         self.assertEqual(len(set(positions)),1)
 

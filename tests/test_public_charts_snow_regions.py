@@ -31,11 +31,11 @@ class SnowRegionTests(unittest.TestCase):
             for cycle in ("2026111712","2026111800"):
                 for product in ("surfce","acptot","acptot1","acrain","acrain1"):
                     with self.subTest(model=model,cycle=cycle,product=product):
-                        self.assertEqual(policy.render_version(cycle,model,product,"hkor"),9 if model=="ukmo" else 8)
-            self.assertNotEqual(policy.render_version("2026071800",model,"acptot","hkor"),8)
-            self.assertNotEqual(policy.render_version("2026111800",model,"gph500","hkor"),8)
-            self.assertNotEqual(policy.render_version("2026111800",model,"surfce","asia"),8)
-        self.assertNotEqual(policy.render_version("2026111800","aigfs","acptot","hkor"),8)
+                        self.assertEqual(policy.render_version(cycle,model,product,"hkor"),10)
+            self.assertNotEqual(policy.render_version("2026071800",model,"acptot","hkor"),10)
+            self.assertNotEqual(policy.render_version("2026111800",model,"gph500","hkor"),10)
+            self.assertNotEqual(policy.render_version("2026111800",model,"surfce","asia"),10)
+        self.assertNotEqual(policy.render_version("2026111800","aigfs","acptot","hkor"),10)
 
     def test_all_native_and_gfs_steps_use_strict_cutoff_and_fix_legacy_flags(self):
         latitude,longitude=np.array([35.,36.]),np.array([127.,128.])
@@ -111,11 +111,70 @@ class SnowRegionTests(unittest.TestCase):
                                    profile=PUBLIC_PROFILE,field_masks=masks,return_frame=True)
                     hatch=paths["snow-area-hatch"][0]
                     plotter.render(arrays,"2026111800",24,family+"_snow","hkor",None,
-                                   profile=PUBLIC_PROFILE,field_masks=masks,return_frame=True)
+                                   accumulation=arrays["precipitation"] if family=="acrain" else None,
+                                   precipitation_field="precipitation",profile=PUBLIC_PROFILE,field_masks=masks,return_frame=True)
                     shaded=paths["shaded-field"][0]
                 self.assertGreater(len(hatch.vertices),0)
                 np.testing.assert_array_equal(hatch.vertices,shaded.vertices)
                 np.testing.assert_array_equal(hatch.codes,shaded.codes)
+
+    def test_hatch_and_snow_shading_share_rain_clip_including_holes_and_october(self):
+        try:
+            from cartopy.mpl.path import path_to_shapely
+            geometry=path_to_shapely
+        except ImportError:
+            from cartopy.mpl.patch import path_to_geos
+            from shapely.ops import unary_union
+            geometry=lambda path:unary_union([part for part in path_to_geos(path)
+                                             if part.geom_type in ("Polygon","MultiPolygon")])
+        from shapely.ops import unary_union
+        latitude,longitude=np.linspace(29,45,35),np.linspace(115,138,45)
+        x,y=np.meshgrid(longitude,latitude)
+        snow=8*np.exp(-((x-126)**2+(y-38)**2)/25)
+        rain=np.maximum(.25+.07*(x-125),0)
+        rain[17:21,26:30]=.1
+        total_rain=np.maximum(1.25-rain,0)
+        arrays={"latitude":latitude,"longitude":longitude,"pressure_msl":101000+10*y,
+                "precipitation":rain,"snowfall_water_equivalent":snow,
+                "total_snowfall_water_equivalent":snow,"geopotential_925":(810+5*(y-38))*9.80665,
+                "geopotential_850":(1500+5*(y-38))*9.80665,"geopotential_1000":(210+0*y)*9.80665,
+                "temperature_925":273.15+y-38,"wet_bulb_2m":1.2+.5*(y-38),"wind_u_925":5+0*x,"wind_v_925":5+0*y}
+        original=snow.copy()
+        close=plt.close
+        captured={}
+        def capture(figure):
+            if hasattr(figure,"axes"):
+                for artist in figure.axes[0].collections:
+                    if artist.get_gid() in {"snow-area-hatch","shaded-field"}:
+                        region=unary_union([geometry(path) for path in artist.get_paths() if len(path.vertices)])
+                        clip=artist.get_clip_path()
+                        clipped=clip.get_transformed_path_and_affine()[0] if clip is not None else None
+                        captured[artist.get_gid()]=(region,geometry(clipped) if clipped is not None else None)
+            close(figure)
+        for cycle in ("2026111800","2026101800"):
+            for family in ("acptot","acrain"):
+                with self.subTest(cycle=cycle,family=family), \
+                     patch("cartopy.mpl.geoaxes.GeoAxes.add_feature"), \
+                     patch.object(plotter,"korean_admin_boundaries",return_value=[]), \
+                     patch.object(plotter.plt,"close",side_effect=capture):
+                    amount=total_rain if family=="acrain" else None
+                    plotter.render(arrays,cycle,120,family,"hkor",None,accumulation=amount,
+                                   precipitation_field="precipitation",profile=PUBLIC_PROFILE,return_frame=True)
+                    rain_area=captured["shaded-field"][0]
+                    hatch,hatch_clip=captured["snow-area-hatch"]
+                    self.assertIsNotNone(hatch_clip)
+                    hatch=hatch.intersection(hatch_clip)
+                    plotter.render(arrays,cycle,120,family+"_snow","hkor",None,accumulation=amount,
+                                   precipitation_field="precipitation",profile=PUBLIC_PROFILE,return_frame=True)
+                    shading,shading_clip=captured["shaded-field"]
+                    self.assertIsNotNone(shading_clip)
+                    shading=shading.intersection(shading_clip)
+                    self.assertGreater(hatch.area,0)
+                    self.assertLess(hatch.symmetric_difference(shading).area/hatch.area,1e-10)
+                    self.assertLess(hatch.difference(rain_area).area/hatch.area,1e-10)
+                    self.assertLess(shading.difference(rain_area).area/shading.area,1e-10)
+                    self.assertLess(hatch_clip.symmetric_difference(shading_clip).area/max(hatch_clip.area,1),1e-10)
+        np.testing.assert_array_equal(snow,original)
 
     def test_window_mask_is_not_the_last_steps_flag_and_cache_is_corrected(self):
         ones=np.ones((2,2))

@@ -50,10 +50,14 @@ RAIN_COLORS = ["#c5c0ff", "#aaaaff", "#8ca7ef", "#75b5d9", "#79cfb3", "#8bdf94",
 VORT_COLORS = ["#ffffc1", "#fff59b", "#ffeb78", "#ffda58", "#ffc64a", "#ffac3b", "#ff902e", "#ff6e24", "#ff481c", "#f92314"]
 
 
-def snow_display_values(value):
-    """Exclude exact cutoff plateaus without changing interpolated SWE boundaries."""
+def strict_display_values(value,cutoff):
+    """Exclude exact cutoff plateaus without changing the continuous source field."""
     values=np.asarray(value,dtype=float)
-    return np.where(values==SNOW_THRESHOLD,np.nextafter(SNOW_THRESHOLD,-np.inf),values)
+    return np.where(values==cutoff,np.nextafter(float(cutoff),-np.inf),values)
+
+
+def snow_display_values(value):
+    return strict_display_values(value,SNOW_THRESHOLD)
 
 
 def draw_time_footer(figure,pos,init,hour,size,*,public,korea):
@@ -358,6 +362,34 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
         projected,visible=base_grid["projected"],base_grid["visible"]
         rain_grid=(map_grid(arrays["precipitation_latitude"],arrays["precipitation_longitude"])
                    if product in {"surfce","acrain","acptot"} and "precipitation_latitude" in arrays else None)
+        rain_path=None
+        def precipitation_region():
+            nonlocal rain_path
+            if rain_path is not None:
+                return rain_path
+            cumulative=product.startswith("acrain")
+            rain=accumulation if cumulative else arrays.get(precipitation_field,arrays.get("precipitation"))
+            if rain is None:
+                raise ValueError("Snow panels require matching interval or cumulative precipitation")
+            grid=(map_grid(arrays["precipitation_latitude"],arrays["precipitation_longitude"])
+                  if "precipitation_latitude" in arrays else base_grid)
+            if np.shape(rain)!=grid["visible"].shape:
+                raise ValueError("Snow precipitation boundary grid differs")
+            valid=field_masks.get("total_precipitation" if cumulative else precipitation_field)
+            allowed=grid["visible"] if valid is None else grid["visible"]&valid
+            cutoff=precipitation_threshold(cycle)
+            value=np.ma.masked_where(~allowed,strict_display_values(rain,cutoff))
+            points=grid["projected"]
+            region=ax.contourf(points[:,:,0],points[:,:,1],value,
+                               levels=[cutoff,max(float(np.max(rain))+1,1)],colors="none",
+                               transform=projection,corner_mask=True)
+            rain_path=MplPath.make_compound_path(*region.get_paths())
+            region.remove()
+            return rain_path
+
+        def clip_snow_to_rain(artist):
+            artist.set_clip_path(precipitation_region(),ax.transData)
+            artist.set_clip_box(ax.bbox)
         if not korea:
             ax.text(120, 70, "70N", transform=plate, fontsize=fs(5.4), color="#555555", ha="center", va="bottom",
                     bbox={"facecolor":"white", "edgecolor":"none", "alpha":.65, "pad":.3}, zorder=7)
@@ -474,7 +506,8 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             artist.set_linewidth(.2)
             artist.set_gid(gid)
             if clip_to is not None:
-                artist.set_clip_path(MplPath.make_compound_path(*clip_to.get_paths()),ax.transData)
+                path=clip_to if isinstance(clip_to,MplPath) else MplPath.make_compound_path(*clip_to.get_paths())
+                artist.set_clip_path(path,ax.transData)
                 artist.set_clip_box(ax.bbox)
             return artist
 
@@ -595,6 +628,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                 precip_valid=field_masks.get(key)
             else:
                 precip = accumulation if product == "acrain" else (None if pressure_only else arrays[precipitation_field])
+                precip_valid=field_masks.get("total_precipitation" if product=="acrain" else precipitation_field)
             if precip is None and not pressure_only:
                 raise ValueError("Missing accumulated precipitation")
             levels = RAIN_LEVELS if product == "surfce" else [.25, 1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000]
@@ -607,7 +641,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     rain_levels=(threshold,*legend_levels[1:])
                     palette=PUBLIC_SNOW_COLORS if snow_panel else PUBLIC_RAIN_COLORS
                     # contourf closes its top interval on the right; 100 belongs to the green overflow here.
-                    shade=snow_display_values(precip) if snow_panel else precip
+                    shade=snow_display_values(precip) if snow_panel else strict_display_values(precip,threshold)
                     shade=np.where(shade==100,np.nextafter(100.,np.inf),shade) if snow_panel else shade
                     rain_fill=filled(shade,rain_levels,palette,PUBLIC_SNOW_OVER if snow_panel else palette[-1],
                                      grid=rain_grid,valid_mask=precip_valid,colorbar_levels=legend_levels,colorbar_extendfrac=.045 if snow_panel else 0)
@@ -618,10 +652,17 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                                     levels=precipitation_edge_levels(float(np.max(precip)),threshold),colors="#282828",
                                     linewidths=.35,transform=projection,zorder=3,corner_mask=True)
                     edge.set_gid("precipitation-edge")
+                    if snow_panel:
+                        clip_snow_to_rain(rain_fill)
+                        clip_snow_to_rain(edge)
                 else:
                     filled(np.maximum(precip, 0), levels, RAIN_COLORS, "#c00000",grid=rain_grid)
             else:
                 cax.set_axis_off()
+            numeric_valid=precip_valid
+            if public and product in snow_products:
+                rain_valid=precipitation_region().contains_points(projected[:,:,:2].reshape(-1,2)).reshape(visible.shape)
+                numeric_valid=rain_valid if numeric_valid is None else numeric_valid&rain_valid
             if product in {"surfce","acptot","acptot_snowdepth"} or (public and product in {"acrain","acrain_snow","acrain_snowdepth"}):
                 pressure = arrays["pressure_msl"] / 100
                 steps = surface_steps(domain,profile)
@@ -630,7 +671,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                               label_levels=levels[levels % steps["label"] == 0],valid_mask=field_masks.get("pressure_msl"),quality_kind="pressure")
                 obj.set_gid("pressure-contours")
                 if not pressure_only:
-                    numeric_extrema(np.maximum(precip, 0), "precipitation", threshold,grid=rain_grid,valid_mask=precip_valid)
+                    numeric_extrema(np.maximum(precip, 0), "precipitation", threshold,grid=rain_grid,valid_mask=numeric_valid)
                 pressure_centers()
                 title = "MSLP(hPa)" if pressure_only else f"MSLP(hPa) and Accum. Precip(mm)[{hour-precipitation_hours:03}-{hour:03}]"
                 if product=="acrain":
@@ -642,17 +683,19 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                 elif product=="acptot_snowdepth":
                     title=f"MSLP, Accum.Snow Amount(cm) by SR Ratio and Precip.Area[{hour-precipitation_hours:03}-{hour:03}]"
                     rain=arrays["precipitation"]
-                    hatch(rain,precipitation_threshold(cycle),max(float(np.max(rain))+1,1),WINTER_HATCH_COLOR,gid="rain-area-hatch")
+                    cutoff=precipitation_threshold(cycle)
+                    hatch(strict_display_values(rain,cutoff),cutoff,max(float(np.max(rain))+1,1),
+                          WINTER_HATCH_COLOR,gid="rain-area-hatch")
                 if public and not pressure_only and product in {"acptot","acrain"}:
                     snow_key=("total_" if product=="acrain" else "")+"snowfall_water_equivalent"
                     if snow_key in arrays:
                         snow=snow_display_values(arrays[snow_key])
                         hatch(snow,SNOW_THRESHOLD,max(float(np.max(snow))+1,1),"#ff00ff",
-                              gid="snow-area-hatch",valid_mask=field_masks.get(snow_key))
+                              gid="snow-area-hatch",valid_mask=field_masks.get(snow_key),clip_to=precipitation_region())
                 elif not public and product=="acptot" and "snow_expected" in arrays:
                     hatch(arrays["snow_expected"],.5,1.5,"#ff00ff",gid="snow-area-hatch")
             elif product=="acptot_snow":
-                numeric_extrema(np.maximum(precip, 0), "precipitation", threshold, grid=rain_grid,valid_mask=precip_valid)
+                numeric_extrema(np.maximum(precip, 0), "precipitation", threshold, grid=rain_grid,valid_mask=numeric_valid)
                 heights=np.arange(0,4501,30)
                 obj=contour(arrays["geopotential_925"]/9.80665,heights,"black",np.where((heights-810)%60==0,.9,.42),quality_kind=925)
                 obj.set_gid("snow-height-contours")

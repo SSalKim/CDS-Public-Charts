@@ -353,6 +353,7 @@ class ProductionTests(unittest.TestCase):
             calls = [call for call in render.call_args_list if call.args[3].startswith("acrain")]
             self.assertEqual([call.args[3] for call in calls], ["acrain", "acrain_snow", "acrain_snowdepth"])
             self.assertFalse(np.any(calls[0].args[6]))
+            self.assertTrue(all(call.args[6] is not None for call in calls))
             self.assertFalse(np.any(calls[1].args[0]["total_snowfall_water_equivalent"]))
             self.assertFalse(np.any(calls[2].args[0]["total_snowfall_depth_diagnostic"]))
             self.assertTrue(all(call.kwargs["precipitation_hours"] == 0 for call in calls))

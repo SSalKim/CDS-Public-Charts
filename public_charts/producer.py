@@ -209,7 +209,7 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
                 if name == "acrain":
                     amount=(interpolate(total,selected["latitude"],selected["longitude"]) if hour else
                             np.zeros_like(selected["pressure_msl"],dtype=np.float64))
-                panels = [draw(selected, product, "hkor", accumulation=amount if product == "acrain" else None)
+                panels = [draw(selected, product, "hkor", accumulation=amount if name == "acrain" else None)
                           for product in components]
                 for suffix, vertical in (("", False), ("1", True)):
                     if not done(name + suffix, "hkor"):
