@@ -47,6 +47,9 @@ def main():
         with open(output, "a", encoding="utf-8") as stream:
             stream.write('labels="ubuntu-24.04"\n')
             stream.write("helper="+str(helper).lower()+"\n")
+    if os.environ.get("GITHUB_ENV") and "DUAL_COMPUTE_ENABLED" in os.environ:
+        with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as stream:
+            stream.write("HELPER_AVAILABLE="+str(helper and os.environ["DUAL_COMPUTE_ENABLED"]=="true").lower()+"\n")
 
 
 if __name__ == "__main__":

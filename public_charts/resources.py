@@ -79,6 +79,23 @@ def process_rss(pid):
         return None
 
 
+class BatchWindow:
+    """Allow one bounded rollover deferral for already-ready operational work."""
+
+    def __init__(self,minutes,*,adaptive=False,clock=None):
+        self.clock=clock or time.monotonic
+        self.minutes,self.adaptive,self.extra_seconds=minutes,adaptive,0
+        self.deadline=self.clock()+minutes*60 if minutes else None
+
+    def extend(self,ready):
+        if (not ready or not self.adaptive or self.extra_seconds or not 10<=self.minutes<30
+                or not self.deadline-90<=self.clock()<self.deadline):
+            return 0
+        self.extra_seconds=min(600,(30-self.minutes)*60)
+        self.deadline+=self.extra_seconds
+        return self.extra_seconds
+
+
 class WorkerMemoryBudget:
     """Reserve growth headroom across tasks, without model-specific limits."""
 

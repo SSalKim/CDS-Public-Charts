@@ -64,18 +64,18 @@ class SourceBudgetTests(unittest.TestCase):
         health={}
         client=Mock()
         def fetch(url,**kwargs):
-            if "/v1/" in url:
+            if "/v1/" not in url:
                 raise requests.ReadTimeout()
             return b"complete"
         client.get.side_effect=fetch
-        with patch("public_charts.icon._FEED_FAILURES",health), patch("public_charts.icon.time.monotonic",return_value=0) as clock, \
+        with patch("public_charts.icon._FEED_FAILURES",health), patch("public_charts.icon.time.time",return_value=0) as clock, \
                 patch("public_charts.icon.read_native",return_value=(np.ones(1),{})):
             for hour in (0,3,6):
                 native(client,"2026111706",hour,"PMSL")
-            self.assertEqual(sum("/v1/" in call.args[0] for call in client.get.call_args_list),2)
+            self.assertEqual(sum("/v1/" not in call.args[0] for call in client.get.call_args_list),1)
             clock.return_value=301
             native(client,"2026111706",9,"PMSL")
-            self.assertIn("/v1/",client.get.call_args_list[-2].args[0])
+            self.assertNotIn("/v1/",client.get.call_args_list[-2].args[0])
 
 
 class PreparedCacheTests(unittest.TestCase):

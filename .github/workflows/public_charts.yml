@@ -45,27 +45,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  route:
-    if: vars.PUBLIC_CHARTS_ENABLED == 'true' || inputs.dry_run
-    runs-on: ubuntu-24.04
-    timeout-minutes: 3
-    outputs:
-      helper: ${{ steps.runner.outputs.helper }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          sparse-checkout: public_charts_runner.py
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-      - id: runner
-        env:
-          GH_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN || github.token }}
-          RUNNER_MODE: ${{ inputs.runner_mode || 'auto' }}
-        run: python public_charts_runner.py --mode "$RUNNER_MODE"
-
   produce:
-    needs: route
+    if: vars.PUBLIC_CHARTS_ENABLED == 'true' || inputs.dry_run
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -97,7 +78,7 @@ jobs:
       TIME_BUDGET_INPUT: ${{ vars.PUBLIC_CHARTS_TIME_BUDGET_MINUTES || 20 }}
       MINUTES_INPUT: ${{ inputs.run_minutes || 0 }}
       FORCE_INPUT: ${{ inputs.force }}
-      HELPER_AVAILABLE: ${{ vars.PUBLIC_CHARTS_DUAL_COMPUTE_ENABLED == 'true' && needs.route.outputs.helper == 'true' && 'true' || 'false' }}
+      HELPER_AVAILABLE: 'false'
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -117,6 +98,13 @@ jobs:
             /requirements-public-charts.txt
             /requirements-icon-charts.txt
             /data/public_charts_manifest.json
+      - name: Select optional helper on the coordinator
+        id: runner
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN || github.token }}
+          RUNNER_MODE: ${{ inputs.runner_mode || 'auto' }}
+          DUAL_COMPUTE_ENABLED: ${{ vars.PUBLIC_CHARTS_DUAL_COMPUTE_ENABLED }}
+        run: python public_charts_runner.py --mode "$RUNNER_MODE"
       - name: Configure isolated runtime paths
         shell: bash
         run: |
@@ -134,14 +122,7 @@ jobs:
             requirements-icon-charts.txt
       - name: Install isolated rendering runtime
         if: env.DRY_RUN != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          hash="$(sha256sum requirements-public-charts.txt requirements-icon-charts.txt | sha256sum | cut -d ' ' -f 1)"
-          venv="$RUNNER_TOOL_CACHE/cds-public-charts/python-$hash"
-          if [ ! -x "$venv/bin/python" ]; then python -m venv "$venv"; fi
-          "$venv/bin/python" -m pip install -r requirements-icon-charts.txt
-          echo "$venv/bin" >> "$GITHUB_PATH"
+        run: python public_charts_runtime.py --install-runtime "$RUNNER_TOOL_CACHE/cds-public-charts"
       - name: Verify separate Drive account before downloads
         if: env.DRY_RUN != 'true'
         run: python public_charts_run.py --check-drive
@@ -153,8 +134,7 @@ jobs:
           cache-dependency-path: public_charts/transport/package-lock.json
       - name: Install verified helper transport
         if: env.HELPER_AVAILABLE == 'true' && env.DRY_RUN != 'true'
-        working-directory: public_charts/transport
-        run: npm ci --ignore-scripts
+        run: python public_charts_runtime.py --install-transport "$RUNNER_TOOL_CACHE/cds-public-charts"
       - uses: actions/cache/restore@v4
         id: map-cache
         timeout-minutes: 2

@@ -1,5 +1,6 @@
 """Model routing across two verified Drives, with one publication coordinator."""
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import os
 
 from public_charts_drive import ChartDriveError, ChartDriveStore
@@ -40,11 +41,15 @@ class ChartDrivePool:
                     "secondary": ChartDriveStore.from_environment("PUBLIC_CHARTS_DRIVE2_")})
 
     def verify_account_and_folder(self):
-        for store in self.stores.values():
-            store.verify_account_and_folder()
+        self._parallel("verify_account_and_folder")
+
+    def _parallel(self,method):
+        with ThreadPoolExecutor(max_workers=2,thread_name_prefix="chart-drive-read") as executor:
+            pending={name:executor.submit(getattr(store,method)) for name,store in self.stores.items()}
+            return {name:future.result() for name,future in pending.items()}
 
     def quota_summary(self):
-        return {account: store.storage_quota() for account, store in self.stores.items()}
+        return self._parallel("storage_quota")
 
     @staticmethod
     def account_for_key(key):
@@ -59,8 +64,8 @@ class ChartDrivePool:
 
     def inventory(self):
         result, owners = [], {}
-        for account, store in self.stores.items():
-            for item in store.inventory():
+        for account, items in self._parallel("inventory").items():
+            for item in items:
                 if item["id"] in owners:
                     raise ChartDriveError("A managed file occurs in both chart Drives.")
                 owners[item["id"]] = account

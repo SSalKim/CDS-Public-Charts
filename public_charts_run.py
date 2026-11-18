@@ -20,7 +20,7 @@ from public_charts.parallel import LeadQueue, child_path, cleanup_raw, cleanup_s
 from public_charts_publish import publish_manifest
 from public_charts.uploads import UploadPool, UploadBudgetExceeded, StreamingUploads
 from public_charts.resources import (LaptopLease, ResourceSampler, available_memory, windows_available_memory,
-                                     cpu_capacity, worker_count, WorkerMemoryBudget)
+                                     cpu_capacity, worker_count, WorkerMemoryBudget, BatchWindow)
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "data/public_charts_manifest.json"
@@ -483,7 +483,8 @@ def run(args, store=None):
     lease, sampler = LaptopLease(), ResourceSampler()
     memory_budget = WorkerMemoryBudget(args.workers)
     acquired = lease.acquire()
-    deadline = time.monotonic() + minutes*60 if minutes else None
+    batch_window=BatchWindow(minutes,adaptive=getattr(args,"adaptive_rollover",False) and not local
+                            and not args.cycle and not args.hours and not args.force)
     stop_reason = None
     if minutes and not local and getattr(args,"source_monitor",False):
         from public_charts.monitor import SourceMonitor
@@ -497,7 +498,13 @@ def run(args, store=None):
         if not acquired:
             stop_reason = "shared_laptop_lock"
             return False
-        if deadline is not None and time.monotonic() >= deadline+90:
+        extra=batch_window.extend(queue.operational_waiting())
+        if extra:
+            if remote and not remote.disabled:
+                remote.deadline+=extra
+            print(json.dumps({"event":"batch_extended","reason":"ready_operational_backlog",
+                              "extra_seconds":extra,"maximum_budget_minutes":30}),flush=True)
+        if batch_window.deadline is not None and time.monotonic() >= batch_window.deadline+90:
             stop_reason = "time_budget"
             return False
         return True
@@ -517,7 +524,7 @@ def run(args, store=None):
                                                cwd=ROOT,text=True).strip()
             remote = RemoteCoordinator(GitHubArtifacts(),session,code_sha,queue,work,consume,minutes=minutes,
                                        can_assign=lambda:not budget_blocked and acquired and
-                                       (deadline is None or time.monotonic()<deadline))
+                                       (batch_window.deadline is None or time.monotonic()<batch_window.deadline))
             remote.start()
         except (ArtifactError,KeyError,ValueError,OSError,subprocess.SubprocessError) as error:
             print(json.dumps({"event":"helper_unavailable","error":type(error).__name__}),flush=True)
@@ -538,12 +545,13 @@ def run(args, store=None):
                       "cycle_check_delay_hours_by_model": {model: policy.source_check_delay(model).total_seconds()/3600
                                                             for model in args.models},
                       "publication_interval_seconds": publication_interval, "streaming_images": not local,
-                      "latency_policy":"20261118-pipeline-v2","seasonal_upper_download":True,
+                      "latency_policy":"20261118-rollover-v3","seasonal_upper_download":True,
                       "scheduling_policy":"operational-first-newest-ready-cycle",
                       "partial_field_cache":True,"unstarted_lease_rebalance":True,
                       "cleanup_workers":12,"cleanup_submission_budget_seconds":90,
                       "current_precipitation_first":True,"prepared_cache_max_mib":512,
-                      "prepared_cache_ttl_hours":24,"batch_drain_seconds":90}), flush=True)
+                      "prepared_cache_ttl_hours":24,"batch_drain_seconds":90,
+                      "adaptive_batch_max_minutes":30 if batch_window.adaptive else minutes}), flush=True)
     sampler.start()
     failure = None
     try:
@@ -554,7 +562,7 @@ def run(args, store=None):
                       idle_seconds=max(120, minutes * 60), streaming=not local, prefetch=not local,
                       progress=lambda event: print(json.dumps(event), flush=True), on_idle=tick,
                       cleanup_staged=False,keep_alive=remote.keep_alive if remote else None,
-                      can_prepare=lambda:deadline is None or time.monotonic()<deadline-90,
+                      can_prepare=lambda:batch_window.deadline is None or time.monotonic()<batch_window.deadline-90,
                       memory_budget=memory_budget)
     except BudgetReached:
         pass
@@ -607,7 +615,8 @@ def run(args, store=None):
                       "retained_bytes_by_account": {account: policy.unique_bytes(row for row in kept
                           if row.get("storage_account", "primary") == account) for account in accounts},
                       "pending_delete_files": len(delete_ids), "budget_wait": budget_blocked,
-                      "stop_reason": stop_reason, **resource_usage, "errors": errors[-40:]}))
+                      "stop_reason": stop_reason,"batch_extra_seconds":batch_window.extra_seconds,
+                      **resource_usage, "errors": errors[-40:]}))
     return int(any(row["status"] == "error" for row in errors))
 
 
@@ -625,6 +634,8 @@ def main():
     parser.add_argument("--upload-workers", type=int, choices=(1, 2, 3, 4), default=3)
     parser.add_argument("--time-budget-minutes", type=float, default=0,
                         help="Continuously refresh ready work until the dispatch budget expires")
+    parser.add_argument("--adaptive-rollover",action="store_true",
+                        help="Extend one automatic batch for ready operational work, at most 30 minutes")
     parser.add_argument("--publish-incremental", action="store_true", help="Push each completed lead's verified manifest")
     parser.add_argument("--publish-interval-seconds", type=float, default=15,
                         help="Coalesce completed-image URL publication without waiting for an entire lead")

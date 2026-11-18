@@ -66,27 +66,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12.15'
-          cache: pip
-          cache-dependency-path: |
-            requirements-public-charts.txt
-            requirements-icon-charts.txt
       - name: Install isolated calculation runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          hash="$(sha256sum requirements-public-charts.txt requirements-icon-charts.txt | sha256sum | cut -d ' ' -f 1)"
-          venv="$RUNNER_TOOL_CACHE/cds-public-charts/python-$hash"
-          if [ ! -x "$venv/bin/python" ]; then python -m venv "$venv"; fi
-          "$venv/bin/python" -m pip install -r requirements-icon-charts.txt
-          echo "$venv/bin" >> "$GITHUB_PATH"
+        run: python public_charts_runtime.py --install-runtime "$RUNNER_TOOL_CACHE/cds-public-charts"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
-          cache-dependency-path: public_charts/transport/package-lock.json
       - name: Install artifact transport
-        working-directory: public_charts/transport
-        run: npm ci --ignore-scripts
+        run: python public_charts_runtime.py --install-transport "$RUNNER_TOOL_CACHE/cds-public-charts"
       - uses: actions/cache/restore@v4
         id: map-cache
         timeout-minutes: 2

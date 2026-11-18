@@ -46,11 +46,12 @@ class IconProviderTests(unittest.TestCase):
     def test_slow_socket_switches_exact_cycle_feed_after_one_short_attempt(self):
         client = Mock()
         client.get.side_effect = [requests.ReadTimeout("slow source"),b"second feed"]
-        with patch("public_charts.icon.read_native",return_value=(np.ones(2),{"grid":"native"})) as decode:
+        with patch("public_charts.icon.read_native",return_value=(np.ones(2),{"grid":"native"})) as decode, \
+                patch("public_charts.icon._FEED_FAILURES",{}):
             values, _ = native(client,"2026111700",39,"FI",300)
-        self.assertEqual([call.args[0] for call in client.get.call_args_list],list(source_urls("2026111700",39,"FI",300)))
+        self.assertEqual([call.args[0] for call in client.get.call_args_list],list(reversed(source_urls("2026111700",39,"FI",300))))
         for call in client.get.call_args_list:
-            self.assertEqual(call.kwargs,{"attempts":1,"timeout":(10,15),"total_timeout":30})
+            self.assertEqual(call.kwargs,{"attempts":1,"timeout":(5,8),"total_timeout":15})
         decode.assert_called_once_with(b"second feed","2026111700",39,"FI",300,constant=False)
         np.testing.assert_array_equal(values,np.ones(2))
 

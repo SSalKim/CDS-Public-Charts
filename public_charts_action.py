@@ -31,6 +31,9 @@ def action_args(role, env):
         minutes = float(env.get("TIME_BUDGET_INPUT","20"))
     if minutes:
         result.extend(("--time-budget-minutes",str(minutes)))
+        if (not dry and not force and not env.get("CYCLE_INPUT") and not env.get("HOURS_INPUT")
+                and not float(env.get("MINUTES_INPUT","0") or 0)):
+            result.append("--adaptive-rollover")
     if force:
         result.append("--force")
     if not dry and not force and minutes and env.get("HELPER_AVAILABLE") == "true":

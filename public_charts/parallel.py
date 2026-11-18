@@ -281,6 +281,7 @@ class LeadQueue:
         self.source_ready_at = {}
         self.attempts = 0
         self.retry_after = {}
+        self.local_retry_until = {}
         self.model_parallel_limit = 1
         self.retry_seconds = 600
         self.readiness_gate = False
@@ -296,7 +297,7 @@ class LeadQueue:
     def priority(self, target):
         return (int(self.expected(target) <= self.published),-int(target["cycle"]))
 
-    def _candidates(self, active, preparing):
+    def _candidates(self, active, preparing,remote=False):
         if self.attempts >= self.max_leads * len(self.queues) * 4:
             return
         now = time.monotonic()
@@ -311,6 +312,8 @@ class LeadQueue:
             for target in self.queues[model]:
                 cycle, hour = target["cycle"], target["hour"]
                 identity = model, cycle, hour
+                if remote and self.local_retry_until.get(identity,0)>now:
+                    continue
                 if identity in self.issued:
                     continue
                 if self.source_monitor and identity not in self.source_ready:
@@ -328,8 +331,8 @@ class LeadQueue:
                 yield self.priority(target),index,model,target
 
     @_queue_locked
-    def next(self, active, *, preparing=False):
-        chosen = min(self._candidates(active,preparing),key=lambda item:(item[0],item[1]),default=None)
+    def next(self, active, *, preparing=False,remote=False):
+        chosen = min(self._candidates(active,preparing,remote),key=lambda item:(item[0],item[1]),default=None)
         if chosen is None:
             return None
         _,index,model,target = chosen
@@ -374,6 +377,11 @@ class LeadQueue:
             self.failed_leads.setdefault(cycle_key,set()).add(target["hour"])
             if len(self.failed_leads[cycle_key]) >= 3:
                 self.blocked.add(cycle_key)
+
+    @_queue_locked
+    def prefer_local_retry(self,target):
+        if target["model"]=="icon":
+            self.local_retry_until[target["model"],target["cycle"],target["hour"]]=time.monotonic()+180
 
     @_queue_locked
     def monitor_targets(self, lookahead=4):
@@ -660,6 +668,8 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                     continue
                                 active.remove(identity(target))
                                 if kind == "prepare":
+                                    if result["error"].get("reason")=="source_transfer_budget":
+                                        queue.prefer_local_retry(target)
                                     result = {"artifacts": [], "result": {}, "error": result["error"],
                                               "render_seconds": 0, "pid": None}
                                 queue.rendered(target, result)

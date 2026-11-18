@@ -266,8 +266,20 @@ class RemoteCoordinator:
                             self.emit({"event":"helper_bundle_received",**lease["target"],"lease":lease["id"],
                                        "images":len(staged["artifacts"]),"partial":staged["partial"]})
                             if not staged["partial"]:
-                                self.queue.finished(lease["target"],staged["error"])
-                                self.leases.pop(lease["id"])
+                                error=staged["error"] or {}
+                                retry=(lease["target"]["model"]=="icon" and error.get("pending")
+                                       and error.get("reason")=="source_transfer_budget"
+                                       and not lease.get("source_retry") and now+180<lease["hard_expires_at"]
+                                       and self.can_assign() and now<self.deadline)
+                                if retry:
+                                    lease["source_retry"]=True
+                                    lease["existing"]=self.queue.known(lease["target"])
+                                    lease["expires_at"]=min(max(lease["expires_at"],now+360),lease["hard_expires_at"])
+                                    changed=True
+                                    self.emit({"event":"helper_source_retry",**lease["target"],"lease":lease["id"]})
+                                else:
+                                    self.queue.finished(lease["target"],staged["error"])
+                                    self.leases.pop(lease["id"])
                     else:
                         raise ValueError("Invalid helper message kind")
                     self.seen.add(item["id"])
@@ -304,7 +316,7 @@ class RemoteCoordinator:
             while (self.last_heartbeat is not None and self.can_assign() and now < self.deadline
                    and len(self.leases)+orphaned < self.capacity):
                 active = {identity(lease["target"]) for lease in self.leases.values()}
-                target = self.queue.next(active,preparing=True)
+                target = self.queue.next(active,preparing=True,remote=True)
                 if target is None:
                     break
                 token = uuid.uuid4().hex

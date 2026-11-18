@@ -55,6 +55,22 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   Post-publication cleanup uses up to 12 bounded I/O threads, prioritizing larger
   expired images within the same 90-second submission and 900-file limits.
   Ownership, folder, ETag, exact-manifest and cached-link grace checks are unchanged.
+- Automatic production may defer rollover once when already-ready operational
+  work remains near the normal deadline: the total dispatch budget is capped at
+  30 minutes. Explicit manual budgets, dry runs, forced runs and selected-cycle
+  jobs do not opt in. In-flight transfers and renderer drain limits remain bounded.
+- Helper selection runs on the GitHub coordinator without a separate route job.
+  Both Drive inventories are still freshly verified but their independent reads
+  overlap. Python environments and artifact transport modules are version-checked
+  and reused outside the checkout on persistent runners; GitHub ephemeral runners
+  retain their normal package-download caches.
+- ICON prefers the exact-cycle static compressed feed, with the v1 endpoint as
+  fallback. Each request uses one 15-second elapsed budget and a failed feed's
+  five-minute cooldown is shared among processes on the same runner. A transfer
+  deferral gets one bounded same-helper retry; local preparation keeps a short
+  local retry preference. Loss of the helper still reclaims its leases normally.
+  This changes transport/scheduling only, not forecast calculations or render
+  versions; already-published ICON 12Z files are not rebuilt.
 - `PUBLIC_CHARTS_ENABLED=true` enables production; `false` blocks production
   dispatches while still allowing a non-mutating dry run.
 - `PUBLIC_CHARTS_START_CYCLE=2026111512` preserves the production start boundary.

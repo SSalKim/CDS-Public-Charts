@@ -14,7 +14,7 @@ import numpy as np
 import requests
 
 from .dates import parse_cycle
-from .sources import BOUNDS, Decoded, GRAVITY, Provider
+from .sources import BOUNDS, Decoded, GRAVITY, Provider, atomic_json
 
 
 BASE = "https://opendata.dwd.de/weather/nwp"
@@ -90,30 +90,62 @@ def read_native(payload, cycle, hour, parameter, level=None, *, constant=False):
         ec.codes_release(handle)
 
 
+def feed_health_path(feed):
+    root=os.environ.get("PUBLIC_CHARTS_FIELD_CACHE_DIR")
+    if not root:
+        return None
+    directory=Path(root)/".feed-health"
+    if Path(root).is_symlink() or directory.is_symlink():
+        raise ValueError("Unsafe ICON feed health path")
+    return directory/f"{feed}.json"
+
+
+def feed_unhealthy(feed,now):
+    with _FEED_LOCK:
+        until=_FEED_FAILURES.get(feed,(0,0))[1]
+    path=feed_health_path(feed)
+    if path is not None:
+        try:
+            if path.is_symlink():
+                raise ValueError("Unsafe ICON feed health file")
+            value=json.loads(path.read_text(encoding="utf-8"))
+            shared=value.get("until",0)
+            if type(shared) in (int,float) and now<shared<=now+FEED_COOLDOWN_SECONDS:
+                until=max(until,shared)
+        except (OSError,ValueError,TypeError):
+            pass
+    return now<until<=now+FEED_COOLDOWN_SECONDS
+
+
 def native(client, cycle, hour, parameter, level=None, *, constant=False):
     client.context={"model":"icon","cycle":cycle,"hour":hour,"parameter":parameter,"level":level}
     def retrieve(url):
         # Switch exact-cycle feeds promptly instead of retrying a stalled socket for minutes.
         started = time.monotonic()
         try:
-            payload = client.get(url,attempts=1,timeout=(10,15),total_timeout=30)
+            payload = client.get(url,attempts=1,timeout=(5,8),total_timeout=15)
         except requests.RequestException as error:
             feed = "v1" if "/v1/" in url else "legacy"
             with _FEED_LOCK:
                 count, _ = _FEED_FAILURES.get(feed, (0, 0))
-                _FEED_FAILURES[feed] = (count+1, time.monotonic()+FEED_COOLDOWN_SECONDS if count+1 >= 2 else 0)
+                until=time.time()+FEED_COOLDOWN_SECONDS
+                _FEED_FAILURES[feed] = (count+1,until)
+            path=feed_health_path(feed)
+            if path is not None:
+                try:
+                    atomic_json(path,{"until":until})
+                except OSError:
+                    pass
             print(json.dumps({"event":"icon_feed_retry","model":"icon","cycle":cycle,"hour":hour,
                               "parameter":parameter,"level":level,"feed":"v1" if "/v1/" in url else "legacy",
                               "error":type(error).__name__,"seconds":round(time.monotonic()-started,3)}),flush=True)
             raise
         result = read_native(payload, cycle, hour, parameter, level, constant=constant)
-        with _FEED_LOCK:
-            _FEED_FAILURES.pop("v1" if "/v1/" in url else "legacy", None)
         return result
     urls = source_urls(cycle, hour, parameter, level, constant=constant)
-    with _FEED_LOCK:
-        urls = sorted(urls, key=lambda url: _FEED_FAILURES.get(
-            "v1" if "/v1/" in url else "legacy", (0, 0))[1] > time.monotonic())
+    now=time.time()
+    health={feed:feed_unhealthy(feed,now) for feed in ("v1","legacy")}
+    urls = sorted(urls,key=lambda url:(health["v1" if "/v1/" in url else "legacy"],"/v1/" in url))
     return Provider._mirrors(urls, retrieve)
 
 

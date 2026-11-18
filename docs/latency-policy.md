@@ -14,3 +14,30 @@ The `20261117-v1` policy keeps the chart catalog, styling and scientific calcula
 - Helper transport errors include a sanitized operation and HTTP status when available; credentials, signed URLs and response bodies are not logged.
 
 Deployment does not invalidate already published charts. Ongoing jobs finish on their checked-out revision; subsequent jobs use the new revision.
+
+## Ready-Work Rollover And Transport Update
+
+The `20261118-rollover-v3` update removes the separate runner-routing job and
+overlaps verified reads of the two independent Drive accounts. Pinned Python
+environments and Node artifact modules can be reused on a persistent runner;
+their signatures include the interpreter/runtime identity and dependency pins.
+GitHub-hosted machines remain ephemeral and still install their isolated runtime.
+
+Normal automatic production opts into one ready-operational-backlog extension
+near its preparation cutoff. A normal 20-minute dispatch can continue to at most
+30 minutes; explicit manual budgets and chosen-cycle jobs are not extended.
+The helper admission deadline is updated with the coordinator; existing lease
+hard limits, the helper's 28-minute process limit and workflow timeouts still apply.
+
+ICON uses its exact-cycle static compressed feed first, retaining v1 fallback.
+The per-request limit is 15 seconds, including transfers, with 5/8-second socket
+limits and no repeat on the same URL in that call. A five-minute failure marker
+is shared among processes on that runner; success on another variable does not
+erase it. Already verified fields remain cached. One failed helper preparation
+can retry on the same lease; another failure or lost heartbeat releases it through
+the existing recovery path. Local failed preparations have a bounded three-minute
+local preference. This is not a cross-runner field-cache sharing mechanism.
+
+The 90-second cleanup submission window remains in place while its backlog is
+large; this update does not pretend that deletion or hosted-runner startup is free.
+Fewer unnecessary rollovers reduce how often those costs interrupt new inputs.
