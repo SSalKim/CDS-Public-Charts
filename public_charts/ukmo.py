@@ -124,7 +124,12 @@ class NativeReader:
                 reader.check()
                 remaining=max(.1,reader.deadline-time.monotonic()) if reader.deadline is not None else 15
                 kwargs["timeout"]=(min(3,remaining),min(15,remaining))
-                response=super().request(*args,**kwargs)
+                try:
+                    response=super().request(*args,**kwargs)
+                except (requests.ConnectionError,requests.Timeout) as error:
+                    print(json.dumps({"event":"ukmo_source_retry","model":"ukmo","cycle":reader.cycle,
+                                      "hour":hour,"parameter":token,"error":type(error).__name__}),flush=True)
+                    raise SourceDeferred("ukmo_source_transient") from None
                 reader.requests+=1
                 if response.status_code in (404,410):
                     response.close()

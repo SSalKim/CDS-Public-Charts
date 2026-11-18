@@ -263,7 +263,7 @@ def _queue_locked(method):
 class LeadQueue:
     """Fair model rotation and disjoint lead claims for both compute nodes."""
 
-    def __init__(self, targets, existing, max_leads, force=False):
+    def __init__(self, targets, existing, max_leads, force=False, *, published=None):
         self.lock, self.issued = RLock(), set()
         self.queues = {}
         for target in targets:
@@ -271,6 +271,8 @@ class LeadQueue:
         self.order = deque(self.queues)
         self.counts = dict.fromkeys(self.queues, 0)
         self.existing, self.max_leads, self.force = existing, max_leads, force
+        self.published = set(existing if published is None else published)
+        self.expected_cache = {}
         self.blocked, self.misses = set(), {}
         self.failures, self.model_attempts = {}, dict.fromkeys(self.queues, 0)
         self.failed_leads = {}
@@ -284,13 +286,21 @@ class LeadQueue:
         self.readiness_gate = False
         self.ready_cycles = {(key.split("/")[0], key.split("/")[1]) for key in existing}
 
+    def expected(self, target):
+        identity = target["model"],target["cycle"],target["hour"]
+        if identity not in self.expected_cache:
+            self.expected_cache[identity] = frozenset(policy.expected_keys(*identity))
+        return self.expected_cache[identity]
+
     @_queue_locked
-    def next(self, active, *, preparing=False):
+    def priority(self, target):
+        return (int(self.expected(target) <= self.published),-int(target["cycle"]))
+
+    def _candidates(self, active, preparing):
         if self.attempts >= self.max_leads * len(self.queues) * 4:
-            return None
-        for _ in range(len(self.order)):
-            model = self.order[0]
-            self.order.rotate(-1)
+            return
+        now = time.monotonic()
+        for index,model in enumerate(self.order):
             active_count = sum(item == model if isinstance(item,str) else item[0] == model for item in active)
             limit = self.model_parallel_limit
             if preparing:
@@ -298,33 +308,45 @@ class LeadQueue:
             if (active_count >= limit or self.counts[model] + active_count >= self.max_leads
                     or self.model_attempts[model] >= self.max_leads * 4):
                 continue
-            for _ in range(len(self.queues[model])):
-                target = self.queues[model].popleft()
+            for target in self.queues[model]:
                 cycle, hour = target["cycle"], target["hour"]
                 identity = model, cycle, hour
                 if identity in self.issued:
-                    self.queues[model].append(target)
                     continue
                 if self.source_monitor and identity not in self.source_ready:
-                    self.queues[model].append(target)
                     continue
                 if (self.readiness_gate and (model, cycle) not in self.ready_cycles
                         and any(item[:2] == (model, cycle) for item in self.issued)):
-                    self.queues[model].append(target)
                     continue
                 if (model, cycle) in self.blocked or identity in self.blocked or identity in active:
                     continue
                 if max(self.retry_after.get((model,cycle),0),
-                       self.retry_after.get((model,cycle,hour),0)) > time.monotonic():
-                    self.queues[model].append(target)
+                       self.retry_after.get((model,cycle,hour),0)) > now:
                     continue
-                if not self.force and policy.expected_keys(model, cycle, hour) <= self.existing:
+                if not self.force and self.expected(target) <= self.existing:
                     continue
-                self.attempts += 1
-                self.model_attempts[model] += 1
-                self.issued.add(identity)
-                return target
-        return None
+                yield self.priority(target),index,model,target
+
+    @_queue_locked
+    def next(self, active, *, preparing=False):
+        chosen = min(self._candidates(active,preparing),key=lambda item:(item[0],item[1]),default=None)
+        if chosen is None:
+            return None
+        _,index,model,target = chosen
+        self.order.rotate(-index-1)
+        self.queues[model].remove(target)
+        self.attempts += 1
+        self.model_attempts[model] += 1
+        self.issued.add((model,target["cycle"],target["hour"]))
+        return target
+
+    @_queue_locked
+    def operational_waiting(self, active=()):
+        return any(priority[0] == 0 for priority,_,_,_ in self._candidates(active,True))
+
+    @_queue_locked
+    def mark_published(self, keys):
+        self.published.update(keys)
 
     @_queue_locked
     def finished(self, target, error):
@@ -362,13 +384,15 @@ class LeadQueue:
                 key = model,cycle,hour
                 if (key in self.issued or key in self.source_ready or key in self.blocked
                         or (model,cycle) in self.blocked
-                        or policy.expected_keys(model,cycle,hour) <= self.existing):
+                        or self.expected(target) <= self.existing):
                     continue
-                group=groups.setdefault((model,cycle),[])
+                group=groups.setdefault((model,cycle,self.priority(target)[0]),[])
                 if len(group) < lookahead:
                     group.append(dict(target))
         # Each cycle gets a chance before probing the next lead of a busy model.
-        return [group[index] for index in range(lookahead) for group in groups.values() if index < len(group)]
+        candidates = [(index,target) for index in range(lookahead) for group in groups.values()
+                      if index < len(group) for target in [group[index]]]
+        return [target for _,target in sorted(candidates,key=lambda item:(self.priority(item[1]),item[0]))]
 
     @_queue_locked
     def source_observed(self, target):
@@ -406,12 +430,12 @@ class LeadQueue:
             self.attempts = max(0,self.attempts-1)
             self.model_attempts[target["model"]] = max(0,self.model_attempts.get(target["model"],0)-1)
         self.issued.discard((target["model"], target["cycle"], target["hour"]))
-        if not policy.expected_keys(target["model"],target["cycle"],target["hour"]) <= self.existing:
+        if not self.expected(target) <= self.existing:
             self.queues.setdefault(target["model"],deque()).appendleft(target)
 
     @_queue_locked
     def known(self, target):
-        return sorted(policy.expected_keys(target["model"],target["cycle"],target["hour"]) & self.existing)
+        return sorted(self.expected(target) & self.existing)
 
 
 def execute_leads(queue, work, workers, consume, *, force=False, raw_override=None,
@@ -542,6 +566,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 queue.refresh(refresh())
                                 cleanup_models.update(queue.queues)
                                 next_refresh = time.monotonic() + refresh_seconds
+                            prepared = deque(sorted(prepared,key=lambda item:queue.priority(item[0])))
                             for _ in range(len(prepared)):
                                 target, preparation = prepared.popleft()
                                 if target_valid and not target_valid(target):
@@ -550,7 +575,12 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                     queue.finished(target,error)
                                     deliver(("lead",target,{"artifacts":[],"result":{},"error":error,"partial":False,"pid":None,"render_seconds":0}))
                                     continue
-                                if (scheduling and (can_schedule is None or can_schedule())
+                                # Do not let a prefetched refresh jump ahead of new operational inputs.
+                                refresh_waits = queue.priority(target)[0] and (
+                                    any(kind == "prepare" and queue.priority(item)[0] == 0 for kind,item in pending.values())
+                                    or any(queue.priority(item)[0] == 0 for item,_ in prepared)
+                                    or queue.operational_waiting(active))
+                                if (not refresh_waits and scheduling and (can_schedule is None or can_schedule())
                                         and sum(kind == "render" for kind,_ in pending.values()) < workers
                                         and memory_budget.can_start("render",target)):
                                     submit_render(target, preparation)
@@ -560,7 +590,8 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                             phase_limit = prepare_workers if prefetch else workers
                             while (preparation_allowed and (can_schedule is None or can_schedule())
                                    and sum(kind == phase for kind,_ in pending.values()) < phase_limit
-                                   and (not prefetch or len(prepared) < workers)
+                                   and (not prefetch or len(prepared) < workers
+                                        or queue.operational_waiting(active) and len(prepared) < workers+prepare_workers)
                                    and (target := queue.next(active, preparing=prefetch)) is not None):
                                 if not memory_budget.can_start(phase,target):
                                     queue.reclaim(target,unstarted=True)
@@ -580,6 +611,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                         raise
                                     pending[future] = ("prepare", target)
                                     deliver(("progress", target, {"event": "prefetch_started", **target,
+                                                                  "work_class":"refresh" if queue.priority(target)[0] else "operational",
                                                                   "prepare_workers":prepare_workers,
                                                                   "active_render_workers":sum(kind == "render" for kind,_ in pending.values()),
                                                                   **queue.discovery_status(target)}))

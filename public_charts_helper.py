@@ -132,6 +132,8 @@ class ComputeHelper:
             if (not isinstance(lease.get("id"),str) or not re.fullmatch(r"[a-f0-9]{32}",lease["id"])
                     or lease["id"] in tokens or identity(lease["target"]) in targets
                     or not isinstance(lease.get("existing"),list) or not set(lease["existing"]) <= allowed
+                    or not isinstance(lease.get("published",lease["existing"]),list)
+                    or not set(lease.get("published",lease["existing"])) <= allowed
                     or type(lease.get("expires_at")) not in (int,float) or not math.isfinite(lease["expires_at"])
                     or lease["expires_at"] > message["deadline"]):
                 raise ValueError("Invalid coordinator lease")
@@ -144,6 +146,7 @@ class ComputeHelper:
             with self.queue.lock:
                 for lease in message["leases"]:
                     self.queue.existing.update(lease["existing"])
+                    self.queue.mark_published(lease.get("published",lease["existing"]))
 
     def flush(self, key):
         target, staged, at = self.waiting[key]

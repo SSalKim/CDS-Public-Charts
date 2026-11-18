@@ -9,7 +9,14 @@ No grid resolution, scientific formula, product or image dimensions change.
 - Each node has at most four render processes and two preparation processes.
   Both pools share one physical-memory budget; these are caps, not guaranteed
   concurrent allocations. Completed preparations wait on disk, with at most
-  one renderer-pool-sized queue of prepared leads.
+  one renderer-pool-sized queue of prepared leads, with up to two extra disk
+  slots reserved for newly available operational work behind prepared refreshes.
+- First-publication and incomplete operational sets precede already-public
+  image refreshes. Within each class, newest ready cycles precede older ones;
+  equal-priority models retain fair rotation. Missing inputs never block a
+  ready candidate. The discovery monitor, both compute nodes and the prepared
+  render queue use the same publication-aware ordering. In-flight calculations
+  are not interrupted just because higher-priority inputs arrive.
 - Per-phase, per-workload measured peaks reserve 125% headroom, with a 1 GiB
   minimum per new task. Linux retains 1 GiB and Windows retains 1.5 GiB.
   There are no fixed CMC/ICON concurrency caps. Running tasks are not killed

@@ -309,10 +309,12 @@ class RemoteCoordinator:
                     break
                 token = uuid.uuid4().hex
                 self.leases[token] = {"id":token,"target":target,"existing":self.queue.known(target),
+                                      "published":sorted(target_keys(target) & self.queue.published),
                                       "assigned_at":now,
                                       "expires_at":min(now+LEASE_SECONDS,self.deadline+480),
                                       "hard_expires_at":min(now+MAX_LEASE_SECONDS,self.deadline+480)}
                 self.emit({"event":"helper_lead_assigned",**target,"lease":token,
+                           "work_class":"refresh" if self.queue.priority(target)[0] else "operational",
                            **self.queue.discovery_status(target)})
                 changed = True
             if changed or now-self.last_control >= HEARTBEAT_SECONDS:

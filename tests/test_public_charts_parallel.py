@@ -176,6 +176,11 @@ def saturated_renderer(model, cycle, hour, root, existing, emit, **kwargs):
     return every_product_renderer(model,cycle,hour,root,existing,emit,**kwargs)
 
 
+def priority_prepare(item, work):
+    (Path(work)/("render-allowed" if item["model"]=="gfs" else "refresh-prepared")).touch()
+    return {"error":None,"inputs":{"seconds":.1}}
+
+
 def lookahead_renderer(model, cycle, hour, root, existing, emit, **kwargs):
     work = Path(kwargs["checkpoint_root"]).parents[1]
     if hour == 0:
@@ -189,6 +194,51 @@ def lookahead_renderer(model, cycle, hour, root, existing, emit, **kwargs):
 
 
 class QueueTests(unittest.TestCase):
+    def test_new_operational_output_beats_a_refresh_in_another_model(self):
+        published=policy.expected_keys("aifs",CYCLE,0)
+        queue=LeadQueue([target(),target("gfs")],set(),10,published=published)
+        self.assertEqual(queue.next(set()),target("gfs"))
+        self.assertEqual(queue.next(set()),target())
+
+    def test_incomplete_public_set_is_operational_not_an_experimental_refresh(self):
+        old=policy.expected_keys("aifs",CYCLE,0)
+        partial=policy.expected_keys("gfs",CYCLE,0)-{policy.key("gfs",CYCLE,0,"acptot","hkor")}
+        queue=LeadQueue([target(),target("gfs")],set(),10,published=old|partial)
+        self.assertEqual(queue.priority(target("gfs"))[0],0)
+        self.assertEqual(queue.next(set()),target("gfs"))
+
+    def test_latest_ready_cycle_wins_but_unavailable_data_does_not_block_ready_work(self):
+        old=target("gfs",cycle="2026111506")
+        newest=target()
+        refresh=target("cmc")
+        queue=LeadQueue([old,newest,refresh],set(),10,published=policy.expected_keys("cmc",CYCLE,0))
+        queue.source_monitor=True
+        queue.source_observed(old)
+        queue.source_observed(refresh)
+        self.assertEqual(queue.next(set()),old)
+        queue.source_observed(newest)
+        self.assertEqual(queue.next(set()),newest)
+        self.assertEqual(queue.next(set()),refresh)
+        queue=LeadQueue([old,newest],set(),10)
+        self.assertEqual(queue.next(set()),newest)
+
+    def test_first_publication_history_survives_refresh_and_does_not_mark_uploads_public(self):
+        queue=LeadQueue([target(),target("gfs")],set(),10)
+        artifacts=[{"product":key.split("/")[-2],"domain":key.split("/")[-1]}
+                   for key in policy.expected_keys("aifs",CYCLE,0)]
+        queue.rendered(target(),{"artifacts":artifacts})
+        self.assertFalse(queue.published)
+        queue.mark_published(policy.expected_keys("aifs",CYCLE,0))
+        queue.existing.clear()
+        queue.refresh([target(),target("gfs")])
+        self.assertEqual(queue.next(set()),target("gfs"))
+
+    def test_discovery_lookahead_does_not_hide_new_leads_behind_refreshes(self):
+        targets=[target(hour=h) for h in (0,6,12,18,24,30)]
+        published=set().union(*(policy.expected_keys("aifs",CYCLE,h) for h in (0,6,12,18)))
+        queue=LeadQueue(targets,set(),10,published=published)
+        self.assertEqual(queue.monitor_targets(4)[:2],targets[4:])
+
     def test_memory_deferral_does_not_consume_attempt_quota(self):
         queue=LeadQueue([target()],set(),1)
         for _ in range(100):
@@ -328,6 +378,22 @@ class QueueTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    def test_full_refresh_buffer_leaves_room_for_new_operational_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work,starts=Path(directory),[]
+            class Budget(WorkerMemoryBudget):
+                def can_start(self,phase="render",target=None):
+                    return (phase!="render" or (work/"render-allowed").exists()) and super().can_start(phase,target)
+            def refresh():
+                return [target(),target("gfs")] if (work/"refresh-prepared").exists() else [target()]
+            queue=LeadQueue([target()],set(),10,published=policy.expected_keys("aifs",CYCLE,0))
+            budget=Budget(1,memory_reader=lambda:12*1024**3,host_reader=lambda:None)
+            execute_leads(queue,work,1,lambda *_:None,renderer=every_product_renderer,
+                          prefetch=True,prefetcher=priority_prepare,prepare_workers=1,
+                          refresh=refresh,refresh_seconds=.05,idle_seconds=.2,memory_budget=budget,
+                          started=lambda item,active:starts.append(item["model"]))
+            self.assertEqual(starts,["gfs","aifs"])
+
     def test_all_render_slots_overlap_with_an_independent_prepare_slot(self):
         with tempfile.TemporaryDirectory() as directory:
             received=[]

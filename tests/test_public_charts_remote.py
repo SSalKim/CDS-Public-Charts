@@ -126,6 +126,14 @@ class RemoteCoordinatorTests(unittest.TestCase):
         self.assertFalse(self.queue.issued)
         self.assertIsNotNone(self.queue.next(set()))
 
+    def test_helper_receives_operational_work_before_existing_image_refresh(self):
+        self.queue.mark_published(policy.expected_keys("gfs","2026111612",0))
+        self.heartbeat()
+        leases=list(self.broker.leases.values())
+        self.assertEqual(leases[0]["target"],target("aifs"))
+        self.assertEqual(leases[0]["published"],[])
+        self.assertEqual(set(leases[1]["published"]),policy.expected_keys("gfs","2026111612",0))
+
     def test_memory_capacity_drop_keeps_inflight_leases_and_recovers(self):
         self.heartbeat()
         leased=set(self.broker.leases)
@@ -357,6 +365,20 @@ class ArtifactTests(unittest.TestCase):
 
 
 class ActionRoleTests(unittest.TestCase):
+    def test_helper_retains_coordinator_publication_history_for_priority(self):
+        from public_charts_helper import ComputeHelper
+        transport=FakeArtifacts()
+        helper=ComputeHelper(transport,SESSION,SHA,"unused",4)
+        leases=[{"id":char*32,"target":item,"existing":[],"expires_at":300.,"published":published}
+                for char,item,published in [("b",target(),sorted(policy.expected_keys("gfs","2026111612",0))),
+                                             ("c",target("aifs"),[])]]
+        transport.push(message("control",generated_at=100.,valid_until=220.,deadline=1300.,stop=False,leases=leases))
+        with patch("public_charts_helper.time.time",return_value=100.):
+            helper.poll_control()
+            helper.queue.refresh(helper.targets())
+            self.assertEqual(helper.queue.next(set()),target("aifs"))
+            self.assertEqual(helper.queue.priority(target())[0],1)
+
     def test_helper_acknowledges_only_revoked_work_that_never_started(self):
         from public_charts_helper import ComputeHelper
         transport=FakeArtifacts()

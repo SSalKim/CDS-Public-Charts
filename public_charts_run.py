@@ -274,7 +274,9 @@ def run(args, store=None):
     pending_by_account, reserve_by_account = dict.fromkeys(accounts, 0), dict.fromkeys(accounts, 0)
     minutes = getattr(args, "time_budget_minutes", 0)
     cap = max(len(policy.hours(model))*policy.RETENTION[model] for model in args.models) if minutes else args.max_leads
-    queue = LeadQueue(plan, fresh, cap, args.force)
+    public_before = (state if local else store.read_json("manifest.json", {}))
+    published = {policy.row_key(row) for row in public_before.get("charts", [])}
+    queue = LeadQueue(plan, fresh, cap, args.force, published=published)
     counts = queue.counts
     for model in args.models:
         counts.setdefault(model, 0)
@@ -328,6 +330,7 @@ def run(args, store=None):
         publication_dirty = False
         now = datetime.now(timezone.utc)
         retained_keys = {policy.row_key(row) for row in manifest["charts"]}
+        queue.mark_published(retained_keys)
         for entry_key, item in list(publication_metrics.items()):
             if entry_key not in retained_keys:
                 continue
@@ -474,7 +477,8 @@ def run(args, store=None):
                               "renderer_pid": staged["pid"]}), flush=True)
 
     def started(target, active):
-        print(json.dumps({**target, "event": "render_started", "active_workers": active}), flush=True)
+        print(json.dumps({**target, "event": "render_started", "active_workers": active,
+                          "work_class":"refresh" if queue.priority(target)[0] else "operational"}), flush=True)
 
     lease, sampler = LaptopLease(), ResourceSampler()
     memory_budget = WorkerMemoryBudget(args.workers)
@@ -526,7 +530,7 @@ def run(args, store=None):
             remote = None
 
     print(json.dumps({"event": "runtime_profile", "workers": args.workers, "upload_workers": upload_workers,
-                      "prepare_workers":0 if local else 2,"prepared_queue_limit":args.workers,
+                      "prepare_workers":0 if local else 2,"prepared_queue_limit":args.workers+(0 if local else 2),
                       "heavy_workers":memory_budget.snapshot()["heavy_workers"],
                       "resource_policy":"measured_worker_memory",
                       "cpu_capacity": cpu_capacity(), "available_memory_mib": round(available_memory()/1024**2, 1) if available_memory() is not None else None,
@@ -541,6 +545,7 @@ def run(args, store=None):
                                                             for model in args.models},
                       "publication_interval_seconds": publication_interval, "streaming_images": not local,
                       "latency_policy":"20261118-pipeline-v2","seasonal_upper_download":True,
+                      "scheduling_policy":"operational-first-newest-ready-cycle",
                       "partial_field_cache":True,"unstarted_lease_rebalance":True,
                       "cleanup_workers":3,"cleanup_submission_budget_seconds":90,
                       "current_precipitation_first":True,"prepared_cache_max_mib":512,

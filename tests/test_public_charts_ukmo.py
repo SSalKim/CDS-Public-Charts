@@ -6,14 +6,15 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock,patch
 
 import numpy as np
+import requests
 
 from public_charts import policy
 from public_charts.kma_gate import KmaReleaseGate,image_header_valid
-from public_charts.ukmo import WinterDiagnostics,bounded_swe,estimate_surface_pressure,source_url,PROFILE_LEVELS
-from public_charts.sources import Decoded
+from public_charts.ukmo import NativeReader,WinterDiagnostics,bounded_swe,estimate_surface_pressure,source_url,PROFILE_LEVELS
+from public_charts.sources import Decoded,SourceDeferred
 from public_charts.extended_sources import ExtraFields,gfs_sampled_snow,snow_checkpoint_name
 from public_charts_run import resolve_plan,run
 
@@ -151,6 +152,17 @@ def base():
 
 
 class UkmoDiagnosticsTests(unittest.TestCase):
+    def test_raw_source_timeout_is_retryable_not_a_corrupt_forecast_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            fs=Mock()
+            fs.open.side_effect=lambda *args,**kwargs:fs.session.get("https://example.invalid/source.nc")
+            reader=NativeReader(root,"2026111800")
+            with patch("fsspec.implementations.http_sync.HTTPFileSystem",return_value=fs), \
+                 patch("requests.Session.request",side_effect=requests.ReadTimeout("source delay")), \
+                 self.assertRaises(SourceDeferred) as error:
+                reader.download(39,"snowfall_rate",())
+            self.assertEqual(error.exception.reason,"ukmo_source_transient")
+
     def test_one_unphysical_rh_cell_is_masked_without_losing_valid_snow(self):
         with tempfile.TemporaryDirectory() as root:
             diag=WinterDiagnostics(root,"2026111800",base(),15)
