@@ -343,7 +343,8 @@ class WinterDiagnostics(ExtraFields):
         t=source.value(end,"temperature_at_screen_level","K")
         rh=source.value(end,"relative_humidity_at_screen_level","1")*100
         t850=source.field(end,"temperature_on_pressure_levels",(850,),unit="K")[0]
-        if ((rh<-.2)|(rh>150)).any(): raise ValueError("Unphysical UKMO screen RH")
+        if not np.isfinite(rh).all(): raise ValueError("Nonfinite UKMO screen RH")
+        # Out-of-range cells are already excluded by sr_valid; do not discard the whole lead.
         valid=(rh>=-.2)&(rh<=100.2)&(t850["flag_850"]==0)
         ratio,depth,_=snow_ratio(rain,t-273.15,np.clip(rh,0,100),t850["value_850"]-273.15,interval_hours=max(3,native_interval(end)))
         result={"rain":rain,"swe":snow,"raw_swe":raw,"depth":depth,"sr_valid":valid}

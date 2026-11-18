@@ -151,6 +151,23 @@ def base():
 
 
 class UkmoDiagnosticsTests(unittest.TestCase):
+    def test_one_unphysical_rh_cell_is_masked_without_losing_valid_snow(self):
+        with tempfile.TemporaryDirectory() as root:
+            diag=WinterDiagnostics(root,"2026111800",base(),15)
+            source=FakeNative()
+            original=source.value
+            def value(hour,token,unit,**kwargs):
+                result=original(hour,token,unit,**kwargs)
+                if token=="relative_humidity_at_screen_level":
+                    result[0,0]=1.5341796875
+                return result
+            source.value=value
+            diag.native=source
+            step=diag.step(15)
+            self.assertFalse(step["sr_valid"][0,0])
+            self.assertTrue(step["sr_valid"][0,1])
+            np.testing.assert_allclose(step["swe"],3.)
+
     def test_each_native_interval_is_bounded_before_accumulating(self):
         with tempfile.TemporaryDirectory() as root:
             diag=WinterDiagnostics(root,"2026111800",base(),6)
