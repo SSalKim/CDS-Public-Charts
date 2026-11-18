@@ -219,14 +219,38 @@ class QueueTests(unittest.TestCase):
             queue.finished(item, {"type": "NotReady", "pending": True})
         self.assertIsNone(queue.next(set()))
 
-    def test_repeated_real_errors_stop_scanning_bad_cycle_but_remain_errors(self):
+    def test_distinct_real_errors_do_not_block_a_healthy_following_lead(self):
         queue = LeadQueue([target(hour=72), target(hour=78), target(hour=84),
                            target(cycle="2026111506")], set(), 2)
         error = {"type": "ValueError", "pending": False}
         for _ in range(2):
             queue.finished(queue.next(set()), error)
-        self.assertEqual(queue.next(set()), target(cycle="2026111506"))
+        self.assertEqual(queue.next(set()), target(hour=84))
         self.assertEqual(queue.counts["aifs"], 0)
+
+    def test_same_failed_lead_is_quarantined_without_blocking_its_cycle(self):
+        targets=[target(hour=0),target(hour=6)]
+        queue=LeadQueue(targets,set(),10)
+        error={"type":"IndexError","pending":False}
+        for _ in range(2):
+            queue.finished(targets[0],error)
+        queue.refresh(targets)
+        self.assertEqual(queue.next(set()),targets[1])
+
+    def test_three_distinct_broken_leads_still_protect_the_bad_cycle(self):
+        queue=LeadQueue([target(hour=h) for h in (0,6,12,18)]+[target("gfs")],set(),10)
+        for hour in (0,6,12):
+            queue.finished(target(hour=hour),{"type":"ValueError","pending":False})
+        self.assertEqual(queue.next(set()),target("gfs"))
+
+    def test_monitor_mode_defers_missing_lead_not_the_whole_cycle(self):
+        targets=[target(hour=h) for h in (0,6)]
+        queue=LeadQueue(targets,set(),10)
+        queue.source_monitor=True
+        for item in targets:
+            queue.source_observed(item)
+        queue.finished(targets[0],{"type":"NotReady","pending":True})
+        self.assertEqual(queue.next(set()),targets[1])
 
     def test_pending_cycle_backoff_survives_plan_refresh_and_expires(self):
         targets = [target(), target(hour=6), target(cycle="2026111506")]

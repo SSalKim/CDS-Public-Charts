@@ -87,16 +87,24 @@ jobs:
       - name: Install artifact transport
         working-directory: public_charts/transport
         run: npm ci --ignore-scripts
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: map-cache
+        timeout-minutes: 2
+        continue-on-error: true
         with:
           path: ${{ env.PUBLIC_CHARTS_MAP_DIR }}
           key: public-charts-maps-v1
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: grid-cache
+        timeout-minutes: 2
+        continue-on-error: true
         with:
           path: ${{ env.PUBLIC_CHARTS_ICON_GRID_DIR }}
           key: public-charts-icon-grid-v1
       - uses: actions/cache/restore@v4
         id: prefix-cache
+        timeout-minutes: 2
+        continue-on-error: true
         with:
           path: ${{ env.CHART_WORK }}/raw-cache/checkpoints
           key: public-charts-helper-prefix-v1-${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -107,6 +115,7 @@ jobs:
         run: python public_charts_runtime.py --prepare-maps
       - uses: actions/cache/restore@v4
         id: input-cache
+        timeout-minutes: 2
         continue-on-error: true
         with:
           path: ${{ env.CHART_WORK }}/raw-cache/prepared
@@ -130,6 +139,7 @@ jobs:
         if: always()
         run: python public_charts_runtime.py --prune-inputs "$CHART_WORK"
       - uses: actions/cache/save@v4
+        timeout-minutes: 2
         continue-on-error: true
         if: always() && steps.input-prune.outcome == 'success' && steps.input-cache.outputs.cache-primary-key != ''
         with:
@@ -140,7 +150,25 @@ jobs:
         if: always()
         run: python public_charts_runtime.py --prune-checkpoints "$CHART_WORK/raw-cache/checkpoints"
       - uses: actions/cache/save@v4
+        timeout-minutes: 2
+        continue-on-error: true
         if: always() && steps.prune.outcome == 'success' && steps.prefix-cache.outputs.cache-primary-key != ''
         with:
           path: ${{ env.CHART_WORK }}/raw-cache/checkpoints
           key: ${{ steps.prefix-cache.outputs.cache-primary-key }}
+      - name: Save initialized maps without holding the next batch
+        uses: actions/cache/save@v4
+        timeout-minutes: 1
+        continue-on-error: true
+        if: always() && steps.map-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ env.PUBLIC_CHARTS_MAP_DIR }}
+          key: public-charts-maps-v1
+      - name: Save initialized ICON grid without holding the next batch
+        uses: actions/cache/save@v4
+        timeout-minutes: 1
+        continue-on-error: true
+        if: always() && steps.grid-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ env.PUBLIC_CHARTS_ICON_GRID_DIR }}
+          key: public-charts-icon-grid-v1

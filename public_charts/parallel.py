@@ -269,6 +269,10 @@ class LeadQueue:
         self.existing, self.max_leads, self.force = existing, max_leads, force
         self.blocked, self.misses = set(), {}
         self.failures, self.model_attempts = {}, dict.fromkeys(self.queues, 0)
+        self.failed_leads = {}
+        self.source_monitor = False
+        self.source_ready = set()
+        self.source_ready_at = {}
         self.attempts = 0
         self.retry_after = {}
         self.model_parallel_limit = 1
@@ -297,11 +301,14 @@ class LeadQueue:
                 if identity in self.issued:
                     self.queues[model].append(target)
                     continue
+                if self.source_monitor and identity not in self.source_ready:
+                    self.queues[model].append(target)
+                    continue
                 if (self.readiness_gate and (model, cycle) not in self.ready_cycles
                         and any(item[:2] == (model, cycle) for item in self.issued)):
                     self.queues[model].append(target)
                     continue
-                if (model, cycle) in self.blocked or (model, cycle, hour) in active:
+                if (model, cycle) in self.blocked or identity in self.blocked or identity in active:
                     continue
                 if max(self.retry_after.get((model,cycle),0),
                        self.retry_after.get((model,cycle,hour),0)) > time.monotonic():
@@ -323,17 +330,52 @@ class LeadQueue:
             self.counts[model] += 1
         elif error["pending"]:
             key = model, cycle
-            if error.get("phase") == "surface":
+            if self.source_monitor or error.get("phase") == "surface":
                 self.retry_after[model,cycle,target["hour"]] = time.monotonic() + self.retry_seconds
+                if self.source_monitor and error.get("phase") != "surface":
+                    self.source_ready.discard((model,cycle,target["hour"]))
                 return
             self.misses[key] = self.misses.get(key, 0) + 1
             if target["hour"] == 0 or self.misses[key] >= 2:
                 self.retry_after[key] = time.monotonic() + self.retry_seconds
         else:
-            key = model, cycle
+            key = model, cycle, target["hour"]
             self.failures[key] = self.failures.get(key, 0) + 1
+            self.retry_after[key] = time.monotonic() + self.retry_seconds
             if self.failures[key] >= 2:
                 self.blocked.add(key)
+            cycle_key = model, cycle
+            self.failed_leads.setdefault(cycle_key,set()).add(target["hour"])
+            if len(self.failed_leads[cycle_key]) >= 3:
+                self.blocked.add(cycle_key)
+
+    @_queue_locked
+    def monitor_targets(self, lookahead=4):
+        groups = {}
+        for targets in self.queues.values():
+            for target in targets:
+                model,cycle,hour = target["model"],target["cycle"],target["hour"]
+                key = model,cycle,hour
+                if (key in self.issued or key in self.source_ready or key in self.blocked
+                        or (model,cycle) in self.blocked
+                        or policy.expected_keys(model,cycle,hour) <= self.existing):
+                    continue
+                group=groups.setdefault((model,cycle),[])
+                if len(group) < lookahead:
+                    group.append(dict(target))
+        # Each cycle gets a chance before probing the next lead of a busy model.
+        return [group[index] for index in range(lookahead) for group in groups.values() if index < len(group)]
+
+    @_queue_locked
+    def source_observed(self, target):
+        key=target["model"],target["cycle"],target["hour"]
+        self.source_ready.add(key)
+        self.source_ready_at.setdefault(key,time.monotonic())
+
+    @_queue_locked
+    def discovery_status(self,target):
+        seen=self.source_ready_at.get((target["model"],target["cycle"],target["hour"]))
+        return {"discovery_to_assignment_seconds":round(max(0,time.monotonic()-seen),3)} if seen is not None else {}
 
     @_queue_locked
     def refresh(self, targets):
@@ -515,7 +557,8 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                         memory_budget.finish("prepare",target)
                                         raise
                                     pending[future] = ("prepare", target)
-                                    deliver(("progress", target, {"event": "prefetch_started", **target}))
+                                    deliver(("progress", target, {"event": "prefetch_started", **target,
+                                                                  **queue.discovery_status(target)}))
                                 else:
                                     submit_render(target)
                             state = memory_budget.snapshot()

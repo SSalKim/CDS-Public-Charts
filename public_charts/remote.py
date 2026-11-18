@@ -285,7 +285,8 @@ class RemoteCoordinator:
                 self.leases[token] = {"id":token,"target":target,"existing":self.queue.known(target),
                                       "expires_at":min(now+LEASE_SECONDS,self.deadline+480),
                                       "hard_expires_at":min(now+MAX_LEASE_SECONDS,self.deadline+480)}
-                self.emit({"event":"helper_lead_assigned",**target,"lease":token})
+                self.emit({"event":"helper_lead_assigned",**target,"lease":token,
+                           **self.queue.discovery_status(target)})
                 changed = True
             if changed or now-self.last_control >= HEARTBEAT_SECONDS:
                 self.publish_control()

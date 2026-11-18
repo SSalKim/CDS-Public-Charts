@@ -102,6 +102,7 @@ class HttpCache:
         self.records = []
         self.deadline = deadline
         self.context = {}
+        self.observed_sources = set()
 
     def file_size(self, url):
         # A compressed NOMADS HEAD can report 20 bytes for a multi-MB GRIB.
@@ -179,6 +180,7 @@ class HttpCache:
                 if remaining <= 0:
                     raise SourceDeferred()
                 bounded_timeout = tuple(min(value, max(.1, remaining)) for value in timeout)
+                requested_at=datetime.now(timezone.utc).isoformat()
                 response = self.session.get(url, headers=headers, timeout=bounded_timeout, stream=True)
                 self.requests += 1
                 if response.status_code in (404, 410):
@@ -187,6 +189,14 @@ class HttpCache:
                     time.sleep(min(max(0,deadline-time.monotonic()),30,max(2,Retry().get_retry_after(response) or 3)))
                     continue
                 response.raise_for_status()
+                detected_at=datetime.now(timezone.utc).isoformat()
+                source_id=hashlib.sha256(url.encode()).hexdigest()
+                if source_id not in self.observed_sources:
+                    self.observed_sources.add(source_id)
+                    print(json.dumps({"event":"source_detected",**self.context,"scope":"response_headers",
+                                      "source_id":source_id,"source_host":urlsplit(url).hostname,
+                                      "request_started_at":requested_at,"detected_at":detected_at,
+                                      "last_modified":response.headers.get("Last-Modified")}),flush=True)
                 value = self._bounded_body(response,deadline) if response.raw is not None else response.content
                 break
             except (requests.ConnectionError, requests.Timeout):
@@ -214,10 +224,12 @@ class HttpCache:
         record = {"url": url, "range": byte_range, "bytes": len(value),
                   "last_modified": response.headers.get("Last-Modified"), "etag": response.headers.get("ETag"),
                   "observed_at": datetime.now(timezone.utc).isoformat(),
+                  "source_id":source_id,"request_started_at":requested_at,"detected_at":detected_at,
                   "sha256": hashlib.sha256(value).hexdigest()}
         self.records.append(record)
         print(json.dumps({"event":"source_received",**self.context,"source_host":urlsplit(url).hostname,
                           "observed_at":record["observed_at"],"last_modified":record["last_modified"],
+                          "source_id":source_id,"request_started_at":requested_at,"detected_at":detected_at,
                           "bytes":len(value),"seconds":round(time.monotonic()-started,3),
                           "kind":"inventory" if url.endswith((".idx",".index")) else "field"}),flush=True)
         if cache:

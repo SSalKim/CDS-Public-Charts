@@ -246,6 +246,7 @@ def run(args, store=None):
     last_publication = 0.
     publication_interval = getattr(args, "publish_interval_seconds", 15)
     remote = None
+    source_monitor = None
 
     def save_state():
         if local:
@@ -431,6 +432,10 @@ def run(args, store=None):
     deadline = time.monotonic() + minutes*60 if minutes else None
     stop_reason = None
     previous_cycles = {(row["model"], row["cycle"]) for row in rows.values()}
+    if minutes and not local and getattr(args,"source_monitor",False):
+        from public_charts.monitor import SourceMonitor
+        source_monitor=SourceMonitor(queue,work)
+        source_monitor.start()
 
     def can_schedule():
         nonlocal stop_reason
@@ -478,11 +483,13 @@ def run(args, store=None):
                       "time_budget_minutes": minutes, "laptop_guard": lease.root is not None,
                       "same_model_parallelism": True, "source_refresh_seconds": getattr(args,"refresh_seconds",60),
                       "coordinator": "github", "helper_enabled": bool(remote and not remote.disabled),
+                      "source_monitor_enabled":bool(source_monitor),"source_probe_interval_seconds":60,
+                      "source_probe_workers":2,"source_probe_lookahead":4,
                       "automatic_cycle_check_delay_hours": policy.SOURCE_CHECK_DELAY.total_seconds()/3600,
                       "cycle_check_delay_hours_by_model": {model: policy.source_check_delay(model).total_seconds()/3600
                                                             for model in args.models},
                       "publication_interval_seconds": publication_interval, "streaming_images": not local,
-                      "latency_policy":"20261117-v1","seasonal_upper_download":True,
+                      "latency_policy":"20261118-monitor-v1","seasonal_upper_download":True,
                       "current_precipitation_first":True,"prepared_cache_max_mib":512,
                       "prepared_cache_ttl_hours":24,"batch_drain_seconds":90}), flush=True)
     sampler.start()
@@ -502,6 +509,8 @@ def run(args, store=None):
     except BaseException as exception:
         failure = exception
     finally:
+        if source_monitor:
+            source_monitor.stop.set()
         if remote:
             remote.close()
         try:
@@ -513,6 +522,8 @@ def run(args, store=None):
             failure = failure or exception
         if uploader:
             uploader.close()
+        if source_monitor:
+            source_monitor.close()
         cleanup_staging(work, args.models)
         resolve_aliases()
         lease.close()
@@ -563,6 +574,8 @@ def main():
     parser.add_argument("--publish-interval-seconds", type=float, default=15,
                         help="Coalesce completed-image URL publication without waiting for an entire lead")
     parser.add_argument("--refresh-seconds", type=float, default=60)
+    parser.add_argument("--no-source-monitor",dest="source_monitor",action="store_false",default=True,
+                        help="Use validated preparation directly without background discovery")
     parser.add_argument("--max-bytes", type=int, default=policy.MAX_IMAGE_BYTES)
     parser.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
     parser.add_argument("--workdir", type=Path, default=ROOT / "outputs/public-charts-work")

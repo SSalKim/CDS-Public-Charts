@@ -49,6 +49,9 @@ class FileSizeTests(unittest.TestCase):
         self.assertEqual(result,message)
         self.assertEqual(self.client.get("https://example.invalid/source.grib2"),message)
         self.assertEqual(self.client.session.get.call_count,1)
+        self.assertEqual(len(self.client.records[0]["source_id"]),64)
+        self.assertLessEqual(self.client.records[0]["detected_at"],self.client.records[0]["observed_at"])
+        self.assertLessEqual(self.client.records[0]["request_started_at"],self.client.records[0]["detected_at"])
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
