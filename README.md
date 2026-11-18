@@ -5,6 +5,13 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
 [SSalKim/CDS](https://github.com/SSalKim/CDS).
 
 - Images: existing, separate chart Google Drive account and folder.
+- New images use owned model subfolders (`UKMO`, `ECMWF`, `AIFS`, `GFS`,
+  `AIGFS`, `CMC`, `ICON`) on the model's existing assigned Drive. Filenames are
+  `model_domain_product_sHHH_YYYYMMDDHH_digest.webp`, for example
+  `gfs_asia_gph500_s024_2026111812_<sha256-prefix>.webp`.
+  Existing root-level images keep their names, IDs and URLs; matching bytes are
+  reused without relocation. Inventory and conditional expiry cleanup include
+  both layouts. Private `state.json` and `manifest.json` remain at the root.
 - Public index: `data/public_charts_manifest.json`; refreshed without Pages builds.
 - Scheduling: Cloudflare checks `public_charts.yml` every minute and dispatches
   only if no active or queued production run exists (Worker deployment required).

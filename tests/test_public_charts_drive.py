@@ -106,6 +106,17 @@ class FakeDriveClient:
             self.generated_ids+=count
             return Response({"ids":ids})
         if url == charts.DRIVE_API + "/files":
+            if method == "POST":
+                metadata = kwargs["json"]
+                file_id = metadata["id"]
+                if file_id in self.files:
+                    return Response(status=409)
+                self.add(file_id, b"", mime=metadata["mimeType"], name=metadata["name"],
+                         parents=metadata["parents"], appProperties=metadata["appProperties"])
+                return Response({"id": file_id})
+            if "key='kind' and value='model-folder'" in params.get("q", ""):
+                return Response({"files": [item for item in self.files.values()
+                                           if item.get("appProperties", {}).get("kind") == "model-folder"]})
             if self.list_pages is not None:
                 return Response(self.list_pages.pop(0))
             # Deliberately include out-of-scope entries to test client-side guards.
@@ -197,7 +208,7 @@ class PublicChartDriveTests(unittest.TestCase):
                         result = store.upload_image(self.path, KEY)
                     self.assertEqual(len(attempts), 2)
                     self.assertEqual(attempts[0], attempts[1])
-                    self.assertEqual(len(client.files), 2)
+                    self.assertEqual(len(client.files), 3)
                     self.assertIn(result["file_id"], client.files)
                     event = json.loads(output.getvalue())
                     self.assertEqual(event["event"], "drive_upload_retry")
@@ -263,7 +274,7 @@ class PublicChartDriveTests(unittest.TestCase):
             self.store.upload_image(self.path,KEY)
         self.assertEqual(len(attempts),3)
         self.assertTrue(all(value==attempts[0] for value in attempts))
-        self.assertEqual(len(self.client.files),1)
+        self.assertEqual(len(self.client.files),2)
         self.assertNotIn("private-refresh-token",str(caught.exception))
 
     def test_multipart_timeout_before_commit_retries_the_same_preallocated_id(self):
@@ -280,7 +291,7 @@ class PublicChartDriveTests(unittest.TestCase):
             result=self.store.upload_image(self.path,KEY)
         self.assertEqual(len(attempts),2)
         self.assertEqual(attempts[0],attempts[1])
-        self.assertEqual(len(self.client.files),2)
+        self.assertEqual(len(self.client.files),3)
         self.assertIn(result["file_id"],self.client.files)
 
     def test_lost_success_response_retries_without_duplicate_files(self):
@@ -297,7 +308,7 @@ class PublicChartDriveTests(unittest.TestCase):
         with patch.object(charts.time,"sleep"):
             result=self.store.upload_image(self.path,KEY)
         self.assertEqual(attempts,[200,409])
-        self.assertEqual(len(self.client.files),2)
+        self.assertEqual(len(self.client.files),3)
         self.assertTrue(self.client.permissions[result["file_id"]])
 
     def test_multipart_server_error_is_retried_but_permission_error_is_not(self):
@@ -338,6 +349,7 @@ class PublicChartDriveTests(unittest.TestCase):
         self.assertEqual(len(self.client.permissions[result["file_id"]]),1)
 
     def test_preallocated_id_conflict_cannot_bypass_content_verification(self):
+        self.add_model_folder("aifs")
         self.client.add("uploaded_generated_0",b"foreign-content")
         with self.assertRaisesRegex(charts.ChartDriveError,"integrity"):
             self.store.upload_image(self.path,KEY)
@@ -374,6 +386,111 @@ class PublicChartDriveTests(unittest.TestCase):
 
     def methods(self, method):
         return [call for call in self.client.request.call_args_list if call.args[0] == method]
+
+    def add_model_folder(self, model, file_id=None, **overrides):
+        file_id = file_id or "model_"+model
+        return self.client.add(file_id, b"", mime=charts.FOLDER_MIME, name=model.upper(),
+                               appProperties={"namespace": charts.NAMESPACE, "kind": "model-folder", "model": model},
+                               **overrides)
+
+    def test_all_model_folders_and_readable_filenames_leave_private_state_at_root(self):
+        for model in charts.MODEL_FOLDERS:
+            cycle = "2026111806" if model == "ecmwf" else "2026111812"
+            key = f"{model}/{cycle}/024/gph500/asia"
+            result = self.store.upload_image(self.path, key)
+            item = self.client.files[result["file_id"]]
+            folder = self.client.files[item["parents"][0]]
+            self.assertEqual(folder["name"], model.upper())
+            self.assertEqual(folder["parents"], [FOLDER])
+            self.assertEqual(item["name"], f'{model}_asia_gph500_s024_{cycle}_{result["sha256"][:16]}.webp')
+            self.assertFalse(self.client.permissions[folder["id"]])
+        state = self.store.write_json("state.json", {})
+        self.assertEqual(self.client.files[state["file_id"]]["parents"], [FOLDER])
+
+    def test_legacy_root_images_are_reused_without_rename_move_or_folder_creation(self):
+        item = self.client.add("legacy", self.path.read_bytes(), name="legacy-name.webp")
+        before = copy.deepcopy(item)
+        self.store.prime_inventory(self.store.inventory())
+        result = self.store.upload_image(self.path, KEY)
+        self.assertEqual(result["file_id"], "legacy")
+        self.assertEqual(self.client.files["legacy"], before)
+        self.assertFalse(self.store._model_folders)
+        self.assertFalse(self.methods("PATCH"))
+
+    def test_inventory_counts_nested_images_and_conditional_cleanup_still_deletes_them(self):
+        result = self.store.upload_image(self.path, KEY)
+        fresh = charts.ChartDriveStore(self.client, FOLDER, EMAIL)
+        self.assertEqual([item["id"] for item in fresh.inventory()], [result["file_id"]])
+        fresh.delete_managed(result["file_id"])
+        self.assertNotIn(result["file_id"], self.client.files)
+        self.assertIn(self.store._model_folders["aifs"], self.client.files)
+        self.assertTrue(self.methods("DELETE")[-1].kwargs["headers"]["If-Match"])
+
+    def test_wrong_model_nested_files_and_private_json_cannot_become_managed(self):
+        folder = self.add_model_folder("icon")
+        self.client.add("wrong_model", parents=[folder["id"]])
+        self.client.add("nested_json", b"{}", mime="application/json", key="state.json", parents=[folder["id"]])
+        self.assertEqual(self.store.inventory(), [])
+        for file_id in ("wrong_model", "nested_json", folder["id"]):
+            with self.subTest(file_id=file_id), self.assertRaises(charts.ChartDriveError):
+                self.store.delete_managed(file_id)
+        self.assertFalse(self.methods("DELETE"))
+
+    def test_model_folder_move_after_inventory_blocks_upload_and_delete(self):
+        result = self.store.upload_image(self.path, KEY)
+        self.store.prime_inventory(self.store.inventory())
+        self.client.files[self.store._model_folders["aifs"]]["parents"] = ["outside"]
+        for operation in (lambda: self.store.upload_image(self.path, KEY),
+                          lambda: self.store.delete_managed(result["file_id"])):
+            with self.assertRaises(charts.ChartDriveError):
+                operation()
+        self.assertIn(result["file_id"], self.client.files)
+        self.assertFalse(self.methods("DELETE"))
+
+    def test_duplicate_or_foreign_model_folder_fails_closed(self):
+        self.add_model_folder("aifs")
+        self.add_model_folder("aifs", "duplicate")
+        with self.assertRaisesRegex(charts.ChartDriveError, "Duplicate"):
+            self.store.inventory()
+        del self.client.files["duplicate"]
+        self.client.files["model_aifs"]["owners"] = [{"emailAddress": "foreign@example.invalid"}]
+        with self.assertRaises(charts.ChartDriveError):
+            self.store.inventory()
+
+    def test_lost_folder_creation_response_reuses_the_preallocated_id(self):
+        from requests.exceptions import ReadTimeout
+        attempts = []
+        def request(method, url, **kwargs):
+            response = self.client.dispatch(method, url, **kwargs)
+            if method == "POST" and url == charts.DRIVE_API+"/files":
+                attempts.append(kwargs["json"]["id"])
+                if len(attempts) == 1:
+                    raise ReadTimeout("private-refresh-token")
+            return response
+        self.client.request.side_effect = request
+        with patch.object(charts.time, "sleep"):
+            self.store.upload_image(self.path, KEY)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0], attempts[1])
+        self.assertEqual(len(self.store._model_folders), 1)
+
+    def test_upload_workers_share_one_folder_creation_lock(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        self.store.prime_inventory(self.store.inventory())
+        stores = [charts.ChartDriveStore(self.client, FOLDER, EMAIL) for _ in range(3)]
+        with patch.object(charts.ChartDriveStore, "from_environment", side_effect=stores):
+            workers = [self.store.new_upload_worker() for _ in stores]
+        barrier = threading.Barrier(3)
+        def upload(index):
+            barrier.wait(timeout=5)
+            return workers[index].upload_image(self.path, KEY.replace("gph500", ("gph500", "gph700", "gph850")[index]))
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(executor.map(upload, range(3)))
+        folders = [call for call in self.methods("POST") if call.args[1] == charts.DRIVE_API+"/files"]
+        self.assertEqual(len(folders), 1)
+        parents = {tuple(self.client.files[row["file_id"]]["parents"]) for row in results}
+        self.assertEqual(len(parents), 1)
 
     def test_environment_uses_only_explicit_dedicated_oauth_configuration(self):
         with patch.dict(os.environ, {**ENV, "GOOGLE_DRIVE_REFRESH_TOKEN": "vtg-token"}, clear=True), \
@@ -508,7 +625,8 @@ class PublicChartDriveTests(unittest.TestCase):
         self.assertEqual(KEY, result["key"])
         self.assertIn(result["file_id"], result["url"])
         metadata = self.client.files[result["file_id"]]
-        self.assertEqual([FOLDER], metadata["parents"])
+        self.assertEqual([self.store._model_folders["aifs"]], metadata["parents"])
+        self.assertEqual("aifs_asia_gph500_s024_2026111500_"+result["sha256"][:16]+".webp", metadata["name"])
         self.assertEqual(charts.NAMESPACE, metadata["appProperties"]["namespace"])
         self.assertEqual(KEY, metadata["appProperties"]["key"])
         self.assertEqual("reader", self.client.permissions[result["file_id"]][0]["role"])

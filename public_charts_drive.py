@@ -15,6 +15,7 @@ import uuid
 import copy
 from collections import deque
 import time
+from threading import RLock
 from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -36,6 +37,7 @@ FILE_FIELDS = (
 )
 IMAGE_TYPES = {".webp": "image/webp", ".png": "image/png",
                ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+MODEL_FOLDERS = {model: model.upper() for model in ("ukmo", "ecmwf", "aifs", "gfs", "aigfs", "cmc", "icon")}
 MULTIPART_LIMIT = 5 * 1024 * 1024
 KEY_PATTERN = re.compile(
     r"(?:aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/([0-9]{10})/([0-9]{3})/"
@@ -84,6 +86,8 @@ class ChartDriveStore:
         self._client = client
         self._verified = False
         self._image_index = None
+        self._model_folders = {}
+        self._folder_lock = RLock()
         self._upload_ids = deque()
         self.env_prefix = ENV_PREFIX
 
@@ -99,6 +103,8 @@ class ChartDriveStore:
         if (worker.folder_id, worker.account_email) != (self.folder_id, self.account_email):
             raise ChartDriveError("Upload worker target differs from the verified coordinator.")
         worker._image_index = copy.deepcopy(self._image_index)
+        worker._model_folders = self._model_folders
+        worker._folder_lock = self._folder_lock
         return worker
 
     @classmethod
@@ -280,10 +286,20 @@ class ChartDriveStore:
     def _managed(self, metadata: dict) -> bool:
         properties = metadata.get("appProperties")
         mime_type = metadata.get("mimeType")
+        parent_ok = metadata.get("parents") == [self.folder_id]
+        if not parent_ok and isinstance(properties, dict) and properties.get("kind") == "image":
+            key = properties.get("key")
+            try:
+                self._validate_key(key)
+            except ChartDriveError:
+                pass
+            else:
+                parent = self._model_folders.get(key.split("/", 1)[0])
+                parent_ok = parent is not None and metadata.get("parents") == [parent]
         return (
             isinstance(metadata.get("id"), str)
             and metadata["id"] != self.folder_id
-            and metadata.get("parents") == [self.folder_id]
+            and parent_ok
             and metadata.get("trashed") is False
             and self._owned(metadata)
             and isinstance(mime_type, str) and bool(mime_type)
@@ -294,7 +310,70 @@ class ChartDriveStore:
 
     def _require_managed(self, metadata: dict) -> None:
         if not self._managed(metadata):
-            raise ChartDriveError("File is not managed directly inside the configured chart folder.")
+            raise ChartDriveError("File is not managed inside the configured chart folder.")
+        if metadata.get("parents") != [self.folder_id]:
+            model = metadata["appProperties"]["key"].split("/", 1)[0]
+            folder, _ = self._metadata(metadata["parents"][0])
+            self._require_model_folder(folder, model)
+
+    def _require_model_folder(self, metadata, model):
+        properties = metadata.get("appProperties", {})
+        if (not isinstance(model, str) or model not in MODEL_FOLDERS or metadata.get("id") == self.folder_id
+                or metadata.get("parents") != [self.folder_id]
+                or metadata.get("mimeType") != FOLDER_MIME or metadata.get("trashed") is not False
+                or not self._owned(metadata) or metadata.get("name") != MODEL_FOLDERS[model]
+                or properties != {"namespace": NAMESPACE, "kind": "model-folder", "model": model}):
+            raise ChartDriveError("Model folder is outside the owned chart storage boundary.")
+        _file_id(metadata.get("id"))
+
+    def _discover_model_folders(self):
+        query = self._base_query() + (
+            f" and mimeType = '{FOLDER_MIME}' and appProperties has {{ key='kind' and value='model-folder' }}"
+        )
+        folders = {}
+        for item in self._list(query):
+            properties = item.get("appProperties", {})
+            if not isinstance(properties, dict) or properties.get("namespace") != NAMESPACE or properties.get("kind") != "model-folder":
+                continue
+            model = properties.get("model")
+            self._require_model_folder(item, model)
+            if model in folders:
+                raise ChartDriveError("Duplicate managed model folders require reconciliation.")
+            folders[model] = item["id"]
+        with self._folder_lock:
+            self._model_folders.clear()
+            self._model_folders.update(folders)
+
+    def _image_parent(self, model):
+        # Worker sessions share only folder IDs and this lock, never OAuth sessions.
+        with self._folder_lock:
+            if model not in self._model_folders:
+                self._discover_model_folders()
+            if model not in self._model_folders:
+                file_id = self._allocate_upload_id()
+                metadata = {"id": file_id, "name": MODEL_FOLDERS[model], "mimeType": FOLDER_MIME,
+                            "parents": [self.folder_id],
+                            "appProperties": {"namespace": NAMESPACE, "kind": "model-folder", "model": model}}
+                for attempt in range(3):
+                    try:
+                        result = self._json(self._request("POST", f"{DRIVE_API}/files",
+                                            params={"fields": "id"}, json=metadata))
+                        if result.get("id") != file_id:
+                            raise ChartDriveError("Google Drive returned an unexpected model folder ID.")
+                        break
+                    except ChartDriveError as error:
+                        if error.http_status == 409:
+                            break
+                        if not error.transient or attempt == 2:
+                            raise
+                        time.sleep(2 ** attempt)
+                folder, _ = self._metadata(file_id)
+                self._require_model_folder(folder, model)
+                self._model_folders[model] = file_id
+            file_id = self._model_folders[model]
+        folder, _ = self._metadata(file_id)
+        self._require_model_folder(folder, model)
+        return file_id
 
     def _list(self, query: str) -> list[dict]:
         files = []
@@ -319,16 +398,20 @@ class ChartDriveStore:
                 raise ChartDriveError("Google Drive inventory pagination failed.")
             seen.add(token)
 
-    def _base_query(self) -> str:
+    def _base_query(self, *, images=False) -> str:
+        with self._folder_lock:
+            parents = [self.folder_id, *self._model_folders.values()] if images else [self.folder_id]
+        parent_query = " or ".join(f"'{_query_literal(parent)}' in parents" for parent in parents)
         return (
-            f"'{_query_literal(self.folder_id)}' in parents and trashed = false and "
+            f"({parent_query}) and trashed = false and "
             f"appProperties has {{ key='namespace' and value='{NAMESPACE}' }}"
         )
 
     def inventory(self) -> list[dict]:
-        """Return raw metadata for owned, tagged files directly under this folder."""
+        """Include legacy root blobs and images in verified, single-level model folders."""
         self._ensure_verified()
-        return [item for item in self._list(self._base_query()) if self._managed(item)]
+        self._discover_model_folders()
+        return [item for item in self._list(self._base_query(images=True)) if self._managed(item)]
 
     @staticmethod
     def _validate_key(key: str) -> None:
@@ -434,8 +517,9 @@ class ChartDriveStore:
 
     def _upload_image(self, handle: BinaryIO, key: str, suffix: str,
                       size: int, sha256: str) -> str:
-        metadata = {"name": key.replace("/", "_") + "_" + sha256[:16] + suffix,
-                    "parents": [self.folder_id], "mimeType": IMAGE_TYPES[suffix],
+        model, cycle, hour, product, domain = key.split("/")
+        metadata = {"name": f"{model}_{domain}_{product}_s{hour}_{cycle}_{sha256[:16]}{suffix}",
+                    "parents": [self._image_parent(model)], "mimeType": IMAGE_TYPES[suffix],
                     "appProperties": {"namespace": NAMESPACE, "kind": "image", "key": key, "sha256": sha256}}
         if size <= MULTIPART_LIMIT:
             file_id = self._allocate_upload_id()
@@ -511,7 +595,9 @@ class ChartDriveStore:
             if not size:
                 raise ChartDriveError("Chart image must not be empty.")
             self._ensure_verified()
-            query = self._base_query() + (
+            if self._image_index is None:
+                self._discover_model_folders()
+            query = self._base_query(images=True) + (
                 f" and appProperties has {{ key='key' and value='{_query_literal(key)}' }}"
             )
             candidates = self._list(query) if self._image_index is None else self._image_index.get(key, [])
