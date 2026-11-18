@@ -5,8 +5,8 @@ import re
 from .dates import parse_cycle
 from .chart_style import ASIA_LAYOUT_CUTOVER
 
-RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 5, "icon": 9, "ukmo": 5}
-CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 12, "icon": 6, "ukmo": 12}
+RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 5, "icon": 9, "ukmo": 9}
+CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 12, "icon": 6, "ukmo": 6}
 SOURCE_CHECK_DELAY = timedelta(hours=3)
 MODEL_SOURCE_CHECK_DELAY = {"icon": timedelta(hours=2, minutes=30)}
 ZERO_ACRAIN_CUTOVER = "2026111612"
@@ -17,13 +17,28 @@ TITLES = {"aifs": "ECMWF AIFS-Single (N320)", "gfs": "NCEP GFS (C768 L127)",
 TITLES["icon"] = "DWD ICON (R03B07 L120)"
 TITLES["ukmo"] = "UKMO (UM N1280 L70)"
 MAX_IMAGE_BYTES = 14_000_000_000
-PIPELINE_VERSION = 4
+PIPELINE_VERSION = 5
 WINTER_DIAGNOSTIC_CUTOVER = "2026111800"
 KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
 
 
-def render_version(cycle):
-    return PIPELINE_VERSION if cycle >= WINTER_DIAGNOSTIC_CUTOVER else 3 if cycle >= ASIA_LAYOUT_CUTOVER else 2
+def render_version(cycle,model=None):
+    if cycle >= WINTER_DIAGNOSTIC_CUTOVER:
+        return 5 if model=="ukmo" else 4
+    return 3 if cycle >= ASIA_LAYOUT_CUTOVER else 2
+
+
+def ukmo_full_catalog(cycle,hour):
+    return parse_cycle(cycle).hour in (6,18) or hour>144
+
+
+def ukmo_gate_hour(cycle,hour):
+    return None if parse_cycle(cycle).hour in (6,18) else min(hour,144)
+
+
+def ukmo_public(row):
+    reference=ukmo_gate_hour(row["cycle"],row["hour"])
+    return reference is None or bool(row.get("kma_confirmed_at")) and (row["hour"]<=144 or row.get("kma_reference_hour")==144)
 
 
 def hours(model, cycle=None):
@@ -31,6 +46,12 @@ def hours(model, cycle=None):
     if model not in RETENTION and model != "icon":
         raise ValueError("Unknown model")
     maximum = 144 if model in {"ecmwf","ukmo"} else 240
+    if model=="ukmo":
+        if cycle and parse_cycle(cycle).hour in (6,18):
+            return tuple(range(0,70,3))
+        if cycle and not winter(model,cycle):
+            return (156,168)
+        maximum=168
     if model == "icon":
         maximum = 120 if cycle and parse_cycle(cycle).hour in (6, 18) else 180
     return tuple(range(0, 85, step)) + (90, 96) + tuple(range(108, maximum + 1, 12))
@@ -39,7 +60,7 @@ def hours(model, cycle=None):
 def supports_cycle(model, cycle):
     hour = parse_cycle(cycle).hour
     if model=="ukmo":
-        return hour in (0,12) and int(cycle[4:6]) in (10,11,12,1,2,3,4)
+        return hour in (0,6,12,18)
     if model == "icon":
         return hour in (0, 6, 12, 18)
     return hour in ((6, 18) if model == "ecmwf" else range(0, 24, CYCLE_STEP[model]))
@@ -100,7 +121,7 @@ def key(model, cycle, hour, product, domain):
         raise ValueError("Invalid chart identity")
     if product not in set(products(cycle)) | {"surfce", "acptot", "acptot1", "acrain", "acrain1"}:
         raise ValueError("Product is outside the active nine-product catalog")
-    if model=="ukmo" and (domain!="hkor" or product not in {"acptot","acptot1","acrain","acrain1"}):
+    if model=="ukmo" and not ukmo_full_catalog(cycle,hour) and (domain!="hkor" or product not in {"acptot","acptot1","acrain","acrain1"}):
         raise ValueError("UKMO only replaces Korea winter precipitation")
     if not supports_cycle(model, cycle):
         raise ValueError("Invalid model cycle")
@@ -108,7 +129,7 @@ def key(model, cycle, hour, product, domain):
 
 
 def expected_keys(model, cycle, hour):
-    if model=="ukmo":
+    if model=="ukmo" and not ukmo_full_catalog(cycle,hour):
         names=("acptot","acptot1","acrain","acrain1") if supports_acrain(cycle,hour) else ("acptot","acptot1")
         return {key(model,cycle,hour,product,"hkor") for product in names}
     keys = {key(model, cycle, hour, product, domain)
@@ -173,12 +194,14 @@ def retain(rows, max_bytes=MAX_IMAGE_BYTES, *, account_budgets=None,now=None):
 
 
 def public_manifest(rows,*,now=None):
-    rows = [row for row in rows if row["model"]!="ukmo" or row.get("kma_confirmed_at") and retention_current("ukmo",row["cycle"],now)]
+    rows = [row for row in rows if row["model"]!="ukmo" or ukmo_public(row) and retention_current("ukmo",row["cycle"],now)]
     public = [{k: row[k] for k in ("model", "cycle", "hour", "product", "domain", "url", "size", "sha256", "file_id")}
               for row in rows]
     for source, target in zip(rows, public):
         target["render_version"] = source.get("render_version", 0)
-        if source["model"]=="ukmo": target["kma_confirmed_at"]=source["kma_confirmed_at"]
+        if source["model"]=="ukmo":
+            for name in ("kma_confirmed_at","kma_reference_hour"):
+                if name in source: target[name]=source[name]
     return {"schema_version": 1, "pipeline_version": PIPELINE_VERSION,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "models": {model: {"title": TITLES[model], "published": any(r["model"] == model for r in public),

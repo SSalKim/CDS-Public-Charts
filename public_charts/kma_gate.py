@@ -12,11 +12,15 @@ from . import policy
 
 def gate_key(row):
     if row.get("model")!="ukmo": return None
+    reference=policy.ukmo_gate_hour(row["cycle"],row["hour"])
+    if reference is None: return None
     product=row.get("product","").removesuffix("1")
-    if product not in {"acptot","acrain"} or row.get("domain")!="hkor":
-        raise ValueError("Unexpected UKMO replacement product")
-    policy.key("ukmo",row["cycle"],row["hour"],row["product"],"hkor")
-    return row["cycle"],row["hour"],product
+    domain=row["domain"]
+    policy.key("ukmo",row["cycle"],row["hour"],row["product"],domain)
+    if product=="gph300": product="gph200"
+    if product=="surfce" and domain=="hkor": product="acptot"
+    key=(row["cycle"],reference,product)
+    return key if domain=="hkor" else (*key,domain)
 
 
 def image_header_valid(header):
@@ -29,8 +33,9 @@ def image_header_valid(header):
 
 
 def probe_kma(key):
-    cycle,hour,product=key
-    filename=f"ukum_erly_hkor_{product}_s{hour:03}_{cycle}.png"
+    cycle,hour,product=key[:3]
+    domain=key[3] if len(key)>3 else "hkor"
+    filename=f"ukum_erly_{domain}_{product}_s{hour:03}_{cycle}.png"
     for base in ("https://data.kma.go.kr/CHT","https://dmdw.kma.go.kr/map/data/CHT"):
         url=f"{base}/GDPS/{cycle[:6]}/{cycle[6:8]}/{filename}"
         try:
@@ -63,10 +68,11 @@ class KmaReleaseGate:
         for row in rows.values():
             key=gate_key(row)
             if key is None: continue
-            if row.get("kma_confirmed_at"):
+            if row.get("kma_confirmed_at") and (row["hour"]<=144 or row.get("kma_reference_hour")==144):
                 self.confirmed[key]=row["kma_confirmed_at"]
             elif key in self.confirmed:
                 row["kma_confirmed_at"]=self.confirmed[key]
+                row["kma_reference_hour"]=key[1]
                 changed=True
                 print(json.dumps({"event":"ukmo_kma_release_confirmed","cycle":key[0],"hour":key[1],"product":key[2]}),flush=True)
             else: waiting[key]=True

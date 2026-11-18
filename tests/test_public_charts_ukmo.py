@@ -32,9 +32,9 @@ class UkmoPolicyTests(unittest.TestCase):
     def test_winter_only_original_cycles_and_korea_precipitation_only(self):
         self.assertEqual(len(policy.expected_keys("ukmo","2026111800",54)),4)
         self.assertEqual(policy.TITLES["ukmo"],"UKMO (UM N1280 L70)")
-        self.assertEqual(policy.hours("ukmo")[-1],144)
+        self.assertEqual(policy.hours("ukmo")[-1],168)
         for cycle in ("2026111806","2026111818","2027051800","2027091812"):
-            self.assertFalse(policy.supports_cycle("ukmo",cycle))
+            self.assertTrue(policy.supports_cycle("ukmo",cycle))
         for product,domain in (("surfce","asia"),("gph500","hkor"),("acptot","asia")):
             with self.assertRaises(ValueError): policy.key("ukmo","2026111800",54,product,domain)
 

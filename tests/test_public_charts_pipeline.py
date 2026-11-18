@@ -54,8 +54,8 @@ class PolicyTests(unittest.TestCase):
         for model in policy.RETENTION:
             timeline = policy.hours(model)
             self.assertEqual(timeline[0], 0)
-            self.assertEqual(timeline[-1], 144 if model in {"ecmwf","ukmo"} else 180 if model == "icon" else 240)
-            self.assertEqual(len(timeline), 35 if model in {"ecmwf","ukmo"} else 38 if model == "icon" else 29 if model in {"aifs", "aigfs"} else 43)
+            self.assertEqual(timeline[-1], 144 if model=="ecmwf" else 168 if model=="ukmo" else 180 if model == "icon" else 240)
+            self.assertEqual(len(timeline), 35 if model=="ecmwf" else 37 if model=="ukmo" else 38 if model == "icon" else 29 if model in {"aifs", "aigfs"} else 43)
             self.assertTrue({84, 90, 96, 108, 120} <= set(timeline))
             keys = policy.expected_keys(model, "2026111606" if model == "ecmwf" else "2026111500", 0)
             self.assertEqual(any("/surfce/" in key for key in keys),model!="ukmo")

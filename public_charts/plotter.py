@@ -521,7 +521,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     return extrema_candidates(value,arrays["latitude"],arrays["longitude"],180,8 if kind=="height" else .7,high,valid_mask)
                 return center_candidates(value,arrays["latitude"],arrays["longitude"],domain,kind,high,valid_mask,
                                          model_id=model_id if public else None)
-            if strict or public and ((kind=="temperature" and model_id in ("gfs","aigfs")) or (model_id=="aigfs" and korea and kind in ("height","pressure"))):
+            if strict or public and (model_id=="ukmo" or (kind=="temperature" and model_id in ("gfs","aigfs")) or (model_id=="aigfs" and korea and kind in ("height","pressure"))):
                 all_candidates=[]
                 for mark,high,color in modes:
                     all_candidates.extend((*item,mark,color) for item in candidates_for(high)

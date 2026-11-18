@@ -40,7 +40,7 @@ MODELS = {
     "icon": {"name": "DWD ICON (R03B07 L120)", "grid": .125, "interval": 3, "rain": 3,
              "max_hour": 180, "attribution": "Data sourced from DWD (CC BY 4.0)"},
     "ukmo": {"name":"UKMO (UM N1280 L70)","grid":.140625,"interval":3,"rain":3,
-             "max_hour":144,"attribution":"Data sourced from Met Office (trial diagnostics)"},
+             "max_hour":168,"attribution":"Data sourced from Met Office"},
 }
 FAMILIES = {"z": "geopotential", "gh": "geopotential", "HGT": "geopotential",
             "t": "temperature", "TMP": "temperature", "u": "wind_u", "UGRD": "wind_u",
@@ -642,7 +642,7 @@ def collect_rainfall(provider,cycle,hour,interval):
 def collect(model, cycle, hour, root, *, include_precipitation=True, upper_level=None, deadline=None):
     if model=="ukmo":
         from .ukmo import collect_ukmo
-        return collect_ukmo(cycle,hour,root,deadline=deadline)
+        return collect_ukmo(cycle,hour,root,deadline=deadline,upper_level=upper_level)
     directory = Path(root) / "fields" / cycle / model / f"{hour:03}"
     directory.mkdir(parents=True, exist_ok=True)
     path, meta_path = directory/"fields.npz", directory/"metadata.json"

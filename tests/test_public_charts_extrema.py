@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 from scipy.ndimage import binary_erosion, find_objects, label, maximum_filter, minimum_filter
 
-from public_charts.plotter import extrema_candidates, smooth_valid
+from public_charts.plotter import extrema_candidates, smooth_valid,center_candidates
 from public_charts.chart_style import center_parameters, numeric_extrema_parameters
 
 
@@ -111,6 +111,30 @@ class ExtremaTests(unittest.TestCase):
             for model in ("aifs", "ecmwf", "gfs", "aigfs"):
                 self.assertEqual(center_parameters(domain, "temperature", model), center_parameters(domain, "temperature"))
                 self.assertEqual(numeric_extrema_parameters(domain, "vorticity", model), numeric_extrema_parameters(domain, "vorticity"))
+
+    def test_ukmo_requires_stronger_and_wider_centers_without_affecting_other_models(self):
+        for domain in ("asia","hkor"):
+            for kind in ("pressure","height","temperature"):
+                old=center_parameters(domain,kind)
+                new=center_parameters(domain,kind,"ukmo")
+                self.assertGreater(new[0],old[0]);self.assertGreater(new[1],old[1])
+                for model in ("aifs","gfs","ecmwf","aigfs"):
+                    self.assertEqual(center_parameters(domain,kind,model),old)
+            for kind in ("precipitation","vorticity","wind"):
+                old=numeric_extrema_parameters(domain,kind)
+                new=numeric_extrema_parameters(domain,kind,"ukmo")
+                self.assertGreater(new["prominence"],old["prominence"])
+                self.assertGreater(new["radius"],old["radius"])
+
+    def test_ukmo_drops_weak_temperature_ripples_but_retains_a_distinct_core(self):
+        latitude=np.linspace(29,45,161);longitude=np.linspace(115,138,231)
+        x,y=np.meshgrid(longitude,latitude)
+        field=.2*np.exp(-((x-121)**2+(y-34)**2)/.4)+3*np.exp(-((x-131)**2+(y-40)**2)/.6)
+        old=center_candidates(field,latitude,longitude,"hkor","temperature",True)
+        new=center_candidates(field,latitude,longitude,"hkor","temperature",True,model_id="ukmo")
+        self.assertGreater(len(old),len(new))
+        self.assertEqual(len(new),1)
+        self.assertGreater(new[0][3],2.5)
 
 
 if __name__ == "__main__":
