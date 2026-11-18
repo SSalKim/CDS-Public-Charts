@@ -166,6 +166,32 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_plan(["gfs"], start_cycle="2026111513")
 
+    def test_retired_private_cycles_do_not_reenter_automatic_or_refreshed_plans(self):
+        now=datetime(2026,11,18,14,tzinfo=timezone.utc)
+        known={(model,cycle) for model in ("gfs","cmc")
+               for cycle in ("2026111512","2026111518","2026111600","2026111800")
+               if policy.supports_cycle(model,cycle)}
+        for tick in (now,now+timedelta(minutes=1)):
+            plan=resolve_plan(["gfs","cmc"],now=tick,start_cycle="2026111512",known_cycles=known)
+            for model in ("gfs","cmc"):
+                cycles={item["cycle"] for item in plan if item["model"]==model}
+                self.assertEqual(cycles,set(policy.cycle_candidates(model,tick-policy.source_check_delay(model),policy.RETENTION[model])))
+                self.assertNotIn("2026111512",cycles)
+
+    def test_recent_known_cycles_remain_repairable_without_expanding_retention(self):
+        now=datetime(2026,11,18,14,tzinfo=timezone.utc)
+        known={("gfs",cycle) for cycle in policy.cycle_candidates("gfs",now,15)}
+        plan=resolve_plan(["gfs"],requested_hours=[0,24],now=now,known_cycles=known)
+        self.assertEqual(len({item["cycle"] for item in plan}),policy.RETENTION["gfs"])
+        self.assertEqual({item["hour"] for item in plan},{0,24})
+        self.assertEqual(plan[0]["cycle"],"2026111806")
+        self.assertNotIn("2026111812",{item["cycle"] for item in plan})
+
+    def test_explicit_cycle_is_not_expanded_by_private_history(self):
+        plan=resolve_plan(["gfs"],cycle="2026111700",requested_hours=[24],
+                          known_cycles={("gfs","2026111806"),("gfs","2026111512")})
+        self.assertEqual(plan,[{"model":"gfs","cycle":"2026111700","hour":24}])
+
     def test_old_render_versions_are_refreshed_without_losing_published_rows(self):
         previous=row()
         rows={policy.row_key(previous):previous}
@@ -537,6 +563,34 @@ class CleanupTests(unittest.TestCase):
         self.store.delete_managed.side_effect=remove
         self.assertEqual(finalize_cleanup(self.store,self.manifest,self.plan,self.manifest,grace_seconds=0),3)
         self.assertCountEqual(self.deleted,ids)
+
+    def test_cleanup_recovers_largest_files_first_within_the_same_budget(self):
+        state={"pending_delete_after":{"small":20,"large":30,"medium":10}}
+        self.store.read_json.side_effect=lambda name,default:self.manifest if name=="manifest.json" else state
+        self.plan["delete_ids"]=["small","large","medium"]
+        self.store.inventory.return_value=[{"id":key,"size":size,"appProperties":{"kind":"image"}}
+                                           for key,size in [("small","100"),("large","900"),("medium","500")]]
+        self.assertEqual(finalize_cleanup(self.store,self.manifest,self.plan,self.manifest,
+                                         workers=1,max_files=1,now=1000),1)
+        self.assertEqual(self.deleted,["large"])
+        self.assertEqual(state["pending_delete_after"],{"small":20,"medium":10})
+
+    def test_twelve_cleanup_io_workers_remain_bounded_and_keep_unattempted_files(self):
+        gate=threading.Barrier(12)
+        ids=[f"old{i:02}" for i in range(13)]
+        self.plan["delete_ids"]=ids
+        self.store.inventory.return_value=[{"id":key,"appProperties":{"kind":"image"}} for key in ids]
+        def remove(key):
+            gate.wait(timeout=5)
+            self.deleted.append(key)
+        self.store.delete_managed.side_effect=remove
+        self.assertEqual(finalize_cleanup(self.store,self.manifest,self.plan,self.manifest,
+                                         grace_seconds=0,max_files=12),12)
+        self.assertEqual(len(self.deleted),12)
+        self.assertNotIn(ids[-1],self.deleted)
+        for count in (0,13):
+            with self.assertRaisesRegex(ValueError,"limits"):
+                finalize_cleanup(self.store,self.manifest,self.plan,self.manifest,workers=count)
 
 
 if __name__ == "__main__":

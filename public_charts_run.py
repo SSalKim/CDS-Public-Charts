@@ -48,7 +48,7 @@ def current_render_keys(rows):
     return {key for key,row in rows.items() if policy.render_is_current(row)}
 
 
-def resolve_plan(models, cycle=None, requested_hours=None, now=None, start_cycle=None):
+def resolve_plan(models, cycle=None, requested_hours=None, now=None, start_cycle=None, known_cycles=()):
     now = now or datetime.now(timezone.utc)
     if start_cycle:
         parsed = parse_cycle(start_cycle)
@@ -61,6 +61,10 @@ def resolve_plan(models, cycle=None, requested_hours=None, now=None, start_cycle
         depth = policy.RETENTION[model] if start_cycle else 2
         cycles = [cycle] if cycle else policy.cycle_candidates(model, now - policy.source_check_delay(model), depth)
         floor = policy.start_cycle(model, start_cycle)
+        if not cycle:
+            cycles = sorted(set(cycles) | {previous for owner,previous in known_cycles if owner==model
+                and policy.supports_cycle(model,previous) and policy.source_check_due(previous,now,model=model)},
+                reverse=True)[:policy.RETENTION[model]]
         cycles = [selected for selected in cycles if selected >= floor and policy.retention_current(model,selected,now)]
         for selected in cycles:
             if not policy.supports_cycle(model, selected) and len(models)>1:
@@ -109,8 +113,8 @@ def plan_cleanup(rows, inventory, budget, reserve_bytes=0, *, account_budgets=No
 
 
 def finalize_cleanup(store, manifest, plan, published_payload, *, grace_seconds=600, now=None,
-                     max_files=900, workers=3, max_seconds=90, clock=time.monotonic):
-    if workers not in (1, 2, 3) or max_files < 0 or max_seconds < 0:
+                     max_files=900, workers=12, max_seconds=90, clock=time.monotonic):
+    if not 1 <= workers <= 12 or max_files < 0 or max_seconds < 0:
         raise ValueError("Invalid bounded cleanup limits")
     started = clock()
     if plan.get("namespace") != "cds-public-charts-v1" or plan.get("folder_id") != store.folder_id:
@@ -140,6 +144,8 @@ def finalize_cleanup(store, manifest, plan, published_payload, *, grace_seconds=
         remaining[file_id] = deadline
         if timestamp >= deadline:
             eligible.append(file_id)
+    # Recover storage headroom first without relaxing ownership or publication checks.
+    eligible.sort(key=lambda file_id:(-int(inventory[file_id].get("size",0)),remaining[file_id],file_id))
     clients = local()
 
     def remove(file_id):
@@ -253,16 +259,10 @@ def run(args, store=None):
         # Uncommitted uploads are not public state. A retry reuses and verifies
         # them through upload_image rather than trusting their metadata alone.
     fresh = current_render_keys(rows)
+    previous_cycles = {(row["model"], row["cycle"]) for row in rows.values()}
     if not args.cycle:
-        planned={(item["model"],item["cycle"]) for item in plan}
-        for model in args.models:
-            previous=sorted({row["cycle"] for row in rows.values() if row["model"]==model},reverse=True)[:policy.RETENTION[model]]
-            for cycle in previous:
-                if ((model,cycle) not in planned and cycle >= policy.start_cycle(model,args.start_cycle)
-                        and policy.source_check_due(cycle, model=model) and policy.retention_current(model,cycle)):
-                    plan.extend({"model":model,"cycle":cycle,"hour":hour} for hour in policy.hours(model, cycle))
-        order = {model: index for index, model in enumerate(args.models)}
-        plan.sort(key=lambda target: (order[target["model"]], -int(target["cycle"]), target["hour"]))
+        plan = resolve_plan(args.models, args.cycle, args.hours, start_cycle=args.start_cycle,
+                            known_cycles=previous_cycles)
     image_bytes = policy.unique_bytes(rows.values())
     if not local:
         image_bytes = sum(int(item.get("size", 0)) for item in inventory
@@ -485,7 +485,6 @@ def run(args, store=None):
     acquired = lease.acquire()
     deadline = time.monotonic() + minutes*60 if minutes else None
     stop_reason = None
-    previous_cycles = {(row["model"], row["cycle"]) for row in rows.values()}
     if minutes and not local and getattr(args,"source_monitor",False):
         from public_charts.monitor import SourceMonitor
         source_monitor=SourceMonitor(queue,work)
@@ -504,13 +503,8 @@ def run(args, store=None):
         return True
 
     def refresh_plan():
-        planned = resolve_plan(args.models, args.cycle, args.hours, start_cycle=args.start_cycle)
-        cycles = {(item["model"], item["cycle"]) for item in planned}
-        for model, cycle in previous_cycles - cycles:
-            if cycle >= policy.start_cycle(model,args.start_cycle) and policy.source_check_due(cycle, model=model) and policy.retention_current(model,cycle):
-                planned.extend({"model": model, "cycle": cycle, "hour": hour} for hour in policy.hours(model, cycle))
-        order = {model: index for index, model in enumerate(args.models)}
-        planned.sort(key=lambda target: (order[target["model"]], -int(target["cycle"]), target["hour"]))
+        planned = resolve_plan(args.models, args.cycle, args.hours, start_cycle=args.start_cycle,
+                               known_cycles=previous_cycles)
         print(json.dumps({"event": "plan_refreshed", "candidates": len(planned)}), flush=True)
         return planned
 
@@ -547,7 +541,7 @@ def run(args, store=None):
                       "latency_policy":"20261118-pipeline-v2","seasonal_upper_download":True,
                       "scheduling_policy":"operational-first-newest-ready-cycle",
                       "partial_field_cache":True,"unstarted_lease_rebalance":True,
-                      "cleanup_workers":3,"cleanup_submission_budget_seconds":90,
+                      "cleanup_workers":12,"cleanup_submission_budget_seconds":90,
                       "current_precipitation_first":True,"prepared_cache_max_mib":512,
                       "prepared_cache_ttl_hours":24,"batch_drain_seconds":90}), flush=True)
     sampler.start()

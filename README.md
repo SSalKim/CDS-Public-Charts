@@ -49,6 +49,12 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   native, collected-field and Asia precipitation caches are versioned to exclude
   earlier truncated grids. Render revision 11 applies only to new UKMO Asia
   charts; earlier Asia images, Korea and other models are unchanged.
+- Automatic initial and refreshed plans keep private historical cycles inside
+  each model's existing retention window. Deleted, retired cycles are never
+  revived as missing operational work; explicit manual cycle requests still work.
+  Post-publication cleanup uses up to 12 bounded I/O threads, prioritizing larger
+  expired images within the same 90-second submission and 900-file limits.
+  Ownership, folder, ETag, exact-manifest and cached-link grace checks are unchanged.
 - `PUBLIC_CHARTS_ENABLED=true` enables production; `false` blocks production
   dispatches while still allowing a non-mutating dry run.
 - `PUBLIC_CHARTS_START_CYCLE=2026111512` preserves the production start boundary.
