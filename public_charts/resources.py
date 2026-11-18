@@ -151,7 +151,8 @@ class WorkerMemoryBudget:
             growth = self.growth()
             rooms = [value-reserve for value,reserve in ((free,self.LINUX_RESERVE),(host,self.WINDOWS_RESERVE))
                      if value is not None]
-            spare = max(0,int((min(rooms)-growth)//estimate)) if rooms else self.workers
+            # Lease capacity advertises minimum-sized jobs; can_start enforces each actual profile.
+            spare = max(0,int((min(rooms)-growth)//self.GIB)) if rooms else self.workers
             active = len(self.tasks)
             heavy = sum(item["rss"] >= self.HEAVY_RSS for item in self.tasks.values())
             self.values = {"capacity":min(self.workers,active+spare),
@@ -159,6 +160,7 @@ class WorkerMemoryBudget:
                            "active_render_workers":sum(key[0] == "render" for key in self.tasks),
                            "active_prepare_workers":sum(key[0] == "prepare" for key in self.tasks),
                            "heavy_active_workers":heavy,"worker_reserve_mib":round(estimate/1024**2,1),
+                           "lease_reserve_mib":1024.,
                            "available_memory_mib":round(free/1024**2,1) if free is not None else None,
                            "windows_available_memory_mib":round(host/1024**2,1) if host is not None else None}
             self.checked = now

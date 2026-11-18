@@ -144,6 +144,7 @@ class MemoryBudgetTests(unittest.TestCase):
         self.assertEqual(self.budget.estimate("prepare",item),int(3.75*1024**3))
         self.assertEqual(self.budget.estimate("render",self.target("gfs")),1024**3)
         self.host=3*1024**3
+        self.assertGreaterEqual(self.budget.snapshot(force=True)["capacity"],1)
         self.assertTrue(self.budget.can_start("render",self.target("gfs")))
         self.assertFalse(self.budget.can_start("prepare",item))
 

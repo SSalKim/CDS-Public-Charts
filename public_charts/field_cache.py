@@ -23,7 +23,7 @@ def paths(root, signature):
         raise ValueError("Invalid partial field identity")
     tag = hashlib.sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest()
     directory = root/cycle/f"{hour:03}"
-    if any(path.is_symlink() for path in (directory,directory.parent)):
+    if not directory.resolve().is_relative_to(root) or any(path.is_symlink() for path in (directory,directory.parent)):
         raise ValueError("Unsafe partial field cache path")
     return directory/f"{tag}.npz", directory/f"{tag}.json"
 
@@ -86,7 +86,8 @@ def prune(work, *, now=None, max_bytes=MAX_BYTES):
     now = time.time() if now is None else now
     candidates, completeness = [], {}
     for path in root.glob("*/*/*"):
-        if path.is_symlink() or any(p.is_symlink() for p in (path.parent,path.parent.parent)):
+        if (not path.resolve().is_relative_to(root) or path.is_symlink()
+                or any(p.is_symlink() for p in (path.parent,path.parent.parent))):
             raise ValueError("Unsafe partial field cache entry")
         orphan = re.fullmatch(r"[a-f0-9]{64}\.npz",path.name) and not path.with_suffix(".json").exists()
         temporary = re.fullmatch(r"[a-f0-9]{64}\.(?:npz|json)[0-9]+-[a-f0-9]{32}\.tmp",path.name)
