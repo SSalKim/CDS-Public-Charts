@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 import hashlib
 import html
@@ -11,6 +12,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+from threading import local
 
 from public_charts import policy
 from public_charts.dates import parse_cycle
@@ -106,7 +108,11 @@ def plan_cleanup(rows, inventory, budget, reserve_bytes=0, *, account_budgets=No
     return kept, sorted(candidates - retained)
 
 
-def finalize_cleanup(store, manifest, plan, published_payload, *, grace_seconds=600, now=None, max_files=300):
+def finalize_cleanup(store, manifest, plan, published_payload, *, grace_seconds=600, now=None,
+                     max_files=900, workers=3, max_seconds=90, clock=time.monotonic):
+    if workers not in (1, 2, 3) or max_files < 0 or max_seconds < 0:
+        raise ValueError("Invalid bounded cleanup limits")
+    started = clock()
     if plan.get("namespace") != "cds-public-charts-v1" or plan.get("folder_id") != store.folder_id:
         raise ValueError("Cleanup target does not match the isolated chart folder")
     if vars(store).get("storage_folders") != plan.get("storage_folders"):
@@ -126,20 +132,59 @@ def finalize_cleanup(store, manifest, plan, published_payload, *, grace_seconds=
     state = store.read_json("state.json", {})
     deadlines = state.get("pending_delete_after", {})
     timestamp = now if now is not None else datetime.now(timezone.utc).timestamp()
-    remaining = {}
-    removed = 0
+    remaining, eligible = {}, []
     for file_id in pending:
         if file_id not in inventory:
             continue
         deadline = deadlines.get(file_id, timestamp + grace_seconds)
-        if timestamp >= deadline and removed < max_files:
-            store.delete_managed(file_id)
-            removed += 1
+        remaining[file_id] = deadline
+        if timestamp >= deadline:
+            eligible.append(file_id)
+    clients = local()
+
+    def remove(file_id):
+        if workers == 1:
+            client = store
         else:
-            remaining[file_id] = deadline
-    state["pending_delete_after"] = remaining
-    state["pending_delete_ids"] = []
-    store.write_json("state.json", state)
+            if not hasattr(clients, "store"):
+                clients.store = store.new_upload_worker()
+            client = clients.store
+        client.delete_managed(file_id)
+
+    removed, submitted, failure = 0, 0, None
+    candidates = iter(eligible)
+    # The publication/ownership/ETag checks remain mandatory; only independent IO overlaps.
+    try:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chart-cleanup") as executor:
+            pending_deletes = {}
+            while True:
+                while (len(pending_deletes) < workers and submitted < max_files and failure is None
+                       and clock()-started < max_seconds):
+                    file_id = next(candidates, None)
+                    if file_id is None:
+                        break
+                    pending_deletes[executor.submit(remove, file_id)] = file_id
+                    submitted += 1
+                if not pending_deletes:
+                    break
+                completed, _ = wait(pending_deletes, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    file_id = pending_deletes.pop(future)
+                    try:
+                        future.result()
+                        remaining.pop(file_id)
+                        removed += 1
+                    except Exception as error:
+                        failure = failure or error
+    finally:
+        state["pending_delete_after"] = remaining
+        state["pending_delete_ids"] = []
+        store.write_json("state.json", state)
+        print(json.dumps({"event":"cleanup_finished", "removed":removed, "remaining":len(remaining),
+                          "eligible":len(eligible), "workers":workers,
+                          "seconds":round(clock()-started,3), "failed":failure is not None}), flush=True)
+    if failure:
+        raise failure
     return removed
 
 
@@ -481,6 +526,7 @@ def run(args, store=None):
             remote = None
 
     print(json.dumps({"event": "runtime_profile", "workers": args.workers, "upload_workers": upload_workers,
+                      "prepare_workers":0 if local else 2,"prepared_queue_limit":args.workers,
                       "heavy_workers":memory_budget.snapshot()["heavy_workers"],
                       "resource_policy":"measured_worker_memory",
                       "cpu_capacity": cpu_capacity(), "available_memory_mib": round(available_memory()/1024**2, 1) if available_memory() is not None else None,
@@ -494,7 +540,9 @@ def run(args, store=None):
                       "cycle_check_delay_hours_by_model": {model: policy.source_check_delay(model).total_seconds()/3600
                                                             for model in args.models},
                       "publication_interval_seconds": publication_interval, "streaming_images": not local,
-                      "latency_policy":"20261118-monitor-v1","seasonal_upper_download":True,
+                      "latency_policy":"20261118-pipeline-v2","seasonal_upper_download":True,
+                      "partial_field_cache":True,"unstarted_lease_rebalance":True,
+                      "cleanup_workers":3,"cleanup_submission_budget_seconds":90,
                       "current_precipitation_first":True,"prepared_cache_max_mib":512,
                       "prepared_cache_ttl_hours":24,"batch_drain_seconds":90}), flush=True)
     sampler.start()

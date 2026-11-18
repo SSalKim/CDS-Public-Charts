@@ -143,6 +143,40 @@ class RemoteCoordinatorTests(unittest.TestCase):
         self.assertEqual(len(self.broker.leases),4)
         self.assertTrue(leased <= set(self.broker.leases))
 
+    def test_waiting_lease_returns_only_after_explicit_unstarted_acknowledgement(self):
+        self.heartbeat()
+        tokens=list(self.broker.leases)
+        waiting,active=tokens[0],tokens[1]
+        self.clock+=46
+        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=1,heavy_capacity=1,
+                                    active=[active],waiting=[waiting],released=[]))
+        self.broker.tick()
+        self.assertTrue(self.broker.leases[waiting]["revoke_requested"])
+        self.assertIn(identity(self.broker.leases[waiting]["target"]),self.queue.issued)
+        self.assertEqual(len(self.broker.leases),2)
+        item=self.broker.leases[waiting]["target"]
+        self.clock+=6
+        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=1,heavy_capacity=1,
+                                    active=[active],waiting=[],released=[waiting]))
+        self.broker.tick()
+        self.assertNotIn(waiting,self.broker.leases)
+        self.assertEqual(self.queue.next(set()),item)
+        self.assertIn(active,self.broker.leases)
+
+    def test_started_during_revocation_is_not_reclaimed(self):
+        self.heartbeat()
+        tokens=list(self.broker.leases)
+        self.clock+=46
+        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=1,heavy_capacity=1,
+                                    active=[tokens[0]],waiting=[tokens[1]]))
+        self.broker.tick()
+        self.clock+=6
+        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=0,heavy_capacity=0,
+                                    active=tokens,waiting=[],released=[]))
+        self.broker.tick()
+        self.assertEqual(set(self.broker.leases),set(tokens))
+        self.assertFalse(any(event["event"]=="helper_unstarted_reclaimed" for event in self.events))
+
     def test_stale_session_is_rejected_without_consuming_output(self):
         self.transport.push({**message("heartbeat",capacity=2),"session":"999-1"})
         for _ in range(3):
@@ -323,6 +357,23 @@ class ArtifactTests(unittest.TestCase):
 
 
 class ActionRoleTests(unittest.TestCase):
+    def test_helper_acknowledges_only_revoked_work_that_never_started(self):
+        from public_charts_helper import ComputeHelper
+        transport=FakeArtifacts()
+        helper=ComputeHelper(transport,SESSION,SHA,"unused",4)
+        running,waiting="b"*32,"c"*32
+        leases=[{"id":running,"target":target(),"existing":[],"expires_at":300.,"revoke_requested":True},
+                {"id":waiting,"target":target(hour=3),"existing":[],"expires_at":300.,"revoke_requested":True}]
+        helper.tokens[identity(target())]=running
+        transport.push(message("control",generated_at=100.,valid_until=220.,deadline=1300.,stop=False,leases=leases))
+        with patch("public_charts_helper.time.time",return_value=100.):
+            helper.poll_control()
+            helper.heartbeat()
+            self.assertTrue(helper.target_valid(target()))
+            self.assertEqual(helper.targets(),[])
+            self.assertEqual(transport.controls[-1]["released"],[waiting])
+            self.assertEqual(transport.controls[-1]["active"],[running])
+
     def test_helper_waits_beyond_three_minutes_while_coordinator_is_healthy(self):
         from public_charts_helper import ComputeHelper
         with patch("public_charts_helper.time.time",return_value=100.) as clock:

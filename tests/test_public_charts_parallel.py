@@ -151,6 +151,31 @@ def prepare_then_stop(item, work):
     return {"error": None, "inputs": {"seconds": .1}}
 
 
+def saturated_prepare(item, work):
+    if item["hour"] == 12:
+        work=Path(work)
+        if not all((work/f"rendering-{hour}").exists() for hour in (0,6)):
+            deadline=time.monotonic()+30
+            while not all((work/f"rendering-{hour}").exists() for hour in (0,6)):
+                if time.monotonic()>deadline:
+                    raise TimeoutError("Renderer slots were occupied by preparation")
+                time.sleep(.02)
+        (work/"third-input-ready").touch()
+    return {"error":None,"inputs":{"seconds":.1}}
+
+
+def saturated_renderer(model, cycle, hour, root, existing, emit, **kwargs):
+    work=Path(kwargs["checkpoint_root"]).parents[1]
+    if hour in (0,6):
+        (work/f"rendering-{hour}").touch()
+        deadline=time.monotonic()+30
+        while not (work/"third-input-ready").exists():
+            if time.monotonic()>deadline:
+                raise TimeoutError("No independent preparation slot")
+            time.sleep(.02)
+    return every_product_renderer(model,cycle,hour,root,existing,emit,**kwargs)
+
+
 def lookahead_renderer(model, cycle, hour, root, existing, emit, **kwargs):
     work = Path(kwargs["checkpoint_root"]).parents[1]
     if hour == 0:
@@ -164,6 +189,15 @@ def lookahead_renderer(model, cycle, hour, root, existing, emit, **kwargs):
 
 
 class QueueTests(unittest.TestCase):
+    def test_memory_deferral_does_not_consume_attempt_quota(self):
+        queue=LeadQueue([target()],set(),1)
+        for _ in range(100):
+            item=queue.next(set())
+            self.assertIsNotNone(item)
+            queue.reclaim(item,unstarted=True)
+        self.assertEqual(queue.attempts,0)
+        self.assertEqual(queue.model_attempts["aifs"],0)
+
     def test_unseen_cycle_has_one_readiness_probe_instead_of_filling_every_slot(self):
         queue = LeadQueue([target("gfs", h) for h in (0, 3, 6)] + [target("cmc")], set(), 10)
         queue.model_parallel_limit = 4
@@ -294,6 +328,16 @@ class QueueTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    def test_all_render_slots_overlap_with_an_independent_prepare_slot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            received=[]
+            budget=WorkerMemoryBudget(2,memory_reader=lambda:12*1024**3,host_reader=lambda:None)
+            execute_leads(LeadQueue([target(hour=h) for h in (0,6,12)],set(),3),directory,2,
+                          lambda item,staged:received.append((item["hour"],staged["error"])),
+                          renderer=saturated_renderer,prefetch=True,prefetcher=saturated_prepare,memory_budget=budget)
+            self.assertEqual(sorted(received),[(0,None),(6,None),(12,None)])
+            self.assertFalse(budget.tasks)
+
     def test_live_prefetch_rechecks_pending_inputs_after_one_minute(self):
         queue = LeadQueue([target()],set(),2)
         with tempfile.TemporaryDirectory() as directory:

@@ -472,6 +472,7 @@ class CleanupTests(unittest.TestCase):
         self.deleted = []
         from unittest.mock import Mock
         self.store = Mock(folder_id="folder")
+        self.store.new_upload_worker.return_value = self.store
         self.store.read_json.side_effect = lambda name, default: self.manifest if name == "manifest.json" else {}
         self.store.inventory.return_value = [{"id": "expired", "appProperties": {"kind": "image"}}]
         self.store.delete_managed.side_effect = self.deleted.append
@@ -506,6 +507,35 @@ class CleanupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             finalize_cleanup(self.store, self.manifest, self.plan, self.manifest)
         self.assertEqual(self.deleted, [])
+
+    def test_cleanup_budget_keeps_unattempted_ids_and_original_deadlines(self):
+        state={"pending_delete_after":{"expired":10}}
+        self.store.read_json.side_effect=lambda name,default:self.manifest if name=="manifest.json" else state
+        self.assertEqual(finalize_cleanup(self.store,self.manifest,self.plan,self.manifest,
+                                         now=1000,max_seconds=0),0)
+        self.assertEqual(state["pending_delete_after"],{"expired":10})
+        self.assertFalse(self.deleted)
+
+    def test_failed_delete_is_preserved_for_retry_before_error_is_raised(self):
+        state={"pending_delete_after":{"expired":10}}
+        self.store.read_json.side_effect=lambda name,default:self.manifest if name=="manifest.json" else state
+        self.store.delete_managed.side_effect=RuntimeError("retry")
+        with self.assertRaisesRegex(RuntimeError,"retry"):
+            finalize_cleanup(self.store,self.manifest,self.plan,self.manifest,now=1000)
+        self.assertEqual(state["pending_delete_after"],{"expired":10})
+
+    def test_independent_deletes_overlap_with_bounded_threads(self):
+        import threading
+        gate=threading.Barrier(3)
+        ids=["old1","old2","old3"]
+        self.plan["delete_ids"]=ids
+        self.store.inventory.return_value=[{"id":value,"appProperties":{"kind":"image"}} for value in ids]
+        def remove(value):
+            gate.wait(timeout=5)
+            self.deleted.append(value)
+        self.store.delete_managed.side_effect=remove
+        self.assertEqual(finalize_cleanup(self.store,self.manifest,self.plan,self.manifest,grace_seconds=0),3)
+        self.assertCountEqual(self.deleted,ids)
 
 
 if __name__ == "__main__":

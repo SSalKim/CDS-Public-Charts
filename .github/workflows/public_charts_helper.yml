@@ -118,9 +118,11 @@ jobs:
         timeout-minutes: 2
         continue-on-error: true
         with:
-          path: ${{ env.CHART_WORK }}/raw-cache/prepared
-          key: public-charts-input-v1-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: public-charts-input-v1-
+          path: |
+            ${{ env.CHART_WORK }}/raw-cache/prepared
+            ${{ env.CHART_WORK }}/raw-cache/partial-fields
+          key: public-charts-input-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: public-charts-input-v2-
       - name: Limit restored input cache
         run: python public_charts_runtime.py --prune-inputs "$CHART_WORK"
       - name: Compute leased forecast leads
@@ -143,7 +145,9 @@ jobs:
         continue-on-error: true
         if: always() && steps.input-prune.outcome == 'success' && steps.input-cache.outputs.cache-primary-key != ''
         with:
-          path: ${{ env.CHART_WORK }}/raw-cache/prepared
+          path: |
+            ${{ env.CHART_WORK }}/raw-cache/prepared
+            ${{ env.CHART_WORK }}/raw-cache/partial-fields
           key: ${{ steps.input-cache.outputs.cache-primary-key }}
       - name: Prune verified calculation checkpoints
         id: prune

@@ -94,6 +94,8 @@ class WorkerMemoryBudget:
         self.rss_reader = rss_reader or process_rss
         self.clock = clock or time.monotonic
         self.lock, self.tasks, self.recent_peaks = RLock(), {}, deque(maxlen=8)
+        self.profiles = {}
+        self.phase_limits = {"render":workers, "prepare":workers}
         self.checked, self.values = float("-inf"), {}
         self.pause_started, self.pause_count, self.pause_seconds = None, 0, 0.
 
@@ -103,8 +105,29 @@ class WorkerMemoryBudget:
 
     def start(self, phase, target):
         with self.lock:
-            self.tasks[self.key(phase,target)] = {"pid":None,"rss":0,"peak":0}
+            self.tasks[self.key(phase,target)] = {"pid":None,"rss":0,"peak":0,
+                                                  "profile":(phase,target["model"])}
             self.checked = float("-inf")
+
+    def configure_pipeline(self, render_workers, prepare_workers):
+        with self.lock:
+            self.workers = render_workers+prepare_workers
+            self.phase_limits = {"render":render_workers, "prepare":prepare_workers}
+            self.checked = float("-inf")
+
+    def estimate(self, phase="render", target=None):
+        """Learn measured workload peaks, never impose a model-specific worker cap."""
+        if target is None:
+            peaks = [*self.recent_peaks, *(item["peak"] for item in self.tasks.values())]
+        else:
+            profile = phase,target["model"]
+            peaks = [*self.profiles.get(profile,()),
+                     *(item["peak"] for item in self.tasks.values() if item["profile"] == profile)]
+        return max(self.GIB, int(max(peaks,default=0)*1.25))
+
+    def growth(self):
+        return sum(max(0,self.estimate(item["profile"][0],{"model":item["profile"][1]})-item["rss"])
+                   for item in self.tasks.values())
 
     def observe(self, phase, target, pid):
         with self.lock:
@@ -124,9 +147,8 @@ class WorkerMemoryBudget:
                 if rss is not None:
                     item["rss"] = max(0,rss)
                     item["peak"] = max(item["peak"],item["rss"])
-            observed_peak = max([*self.recent_peaks,*(item["peak"] for item in self.tasks.values())],default=0)
-            estimate = max(self.GIB,int(observed_peak*1.25))
-            growth = sum(max(0,estimate-item["rss"]) for item in self.tasks.values())
+            estimate = self.estimate()
+            growth = self.growth()
             rooms = [value-reserve for value,reserve in ((free,self.LINUX_RESERVE),(host,self.WINDOWS_RESERVE))
                      if value is not None]
             spare = max(0,int((min(rooms)-growth)//estimate)) if rooms else self.workers
@@ -134,16 +156,23 @@ class WorkerMemoryBudget:
             heavy = sum(item["rss"] >= self.HEAVY_RSS for item in self.tasks.values())
             self.values = {"capacity":min(self.workers,active+spare),
                            "active_workers":active,"heavy_workers":min(self.workers,heavy+spare),
+                           "active_render_workers":sum(key[0] == "render" for key in self.tasks),
+                           "active_prepare_workers":sum(key[0] == "prepare" for key in self.tasks),
                            "heavy_active_workers":heavy,"worker_reserve_mib":round(estimate/1024**2,1),
                            "available_memory_mib":round(free/1024**2,1) if free is not None else None,
                            "windows_available_memory_mib":round(host/1024**2,1) if host is not None else None}
             self.checked = now
             return dict(self.values)
 
-    def can_start(self):
+    def can_start(self, phase="render", target=None):
         with self.lock:
             state = self.snapshot()
-            allowed = state["active_workers"] < state["capacity"]
+            rooms = [value*1024**2-reserve for value,reserve in (
+                (state["available_memory_mib"],self.LINUX_RESERVE),
+                (state["windows_available_memory_mib"],self.WINDOWS_RESERVE)) if value is not None]
+            allowed = (len(self.tasks) < self.workers
+                       and sum(key[0] == phase for key in self.tasks) < self.phase_limits.get(phase,0)
+                       and (not rooms or min(rooms)-self.growth() >= self.estimate(phase,target)))
             pressured = not allowed and state["active_workers"] < self.workers
             now = self.clock()
             if pressured and self.pause_started is None:
@@ -160,15 +189,19 @@ class WorkerMemoryBudget:
             item = self.tasks.pop(self.key(phase,target),None)
             if item and item["peak"]:
                 self.recent_peaks.append(item["peak"])
+                self.profiles.setdefault(item["profile"],deque(maxlen=8)).append(item["peak"])
             self.checked = float("-inf")
             return {"worker_pid":item["pid"] if item else pid,
                     "worker_peak_rss_mib":round(item["peak"]/1024**2,1) if item else 0,
+                    "worker_estimated_mib":round(self.estimate(phase,target)/1024**2,1),
                     "heavy_worker":bool(item and item["peak"] >= self.HEAVY_RSS)}
 
     def summary(self):
         with self.lock:
             seconds = self.pause_seconds + (self.clock()-self.pause_started if self.pause_started is not None else 0)
-            return {"memory_pause_count":self.pause_count,"memory_pause_seconds":round(seconds,1)}
+            return {"memory_pause_count":self.pause_count,"memory_pause_seconds":round(seconds,1),
+                    "memory_profiles_mib":{f"{phase}:{model}":round(max(values)*1.25/1024**2,1)
+                                           for (phase,model),values in self.profiles.items()}}
 
 
 class LaptopLease:

@@ -135,6 +135,28 @@ class MemoryBudgetTests(unittest.TestCase):
         self.free=None
         self.assertEqual(self.budget.snapshot()["capacity"],4)
 
+    def test_large_preparation_does_not_inflate_a_known_light_render_profile(self):
+        item=self.target("icon")
+        self.budget.start("prepare",item)
+        self.budget.observe("prepare",item,10)
+        self.rss[10]=3*1024**3
+        self.budget.finish("prepare",item)
+        self.assertEqual(self.budget.estimate("prepare",item),int(3.75*1024**3))
+        self.assertEqual(self.budget.estimate("render",self.target("gfs")),1024**3)
+        self.host=3*1024**3
+        self.assertTrue(self.budget.can_start("render",self.target("gfs")))
+        self.assertFalse(self.budget.can_start("prepare",item))
+
+    def test_dedicated_prepare_slot_still_shares_the_physical_memory_budget(self):
+        self.budget.configure_pipeline(2,1)
+        for hour in (0,3):
+            self.budget.start("render",self.target(hour=hour))
+        self.assertFalse(self.budget.can_start("render",self.target(hour=6)))
+        self.assertTrue(self.budget.can_start("prepare",self.target(hour=6)))
+        self.host=2*1024**3
+        self.now+=2
+        self.assertFalse(self.budget.can_start("prepare",self.target(hour=6)))
+
 
 if __name__ == "__main__":
     unittest.main()

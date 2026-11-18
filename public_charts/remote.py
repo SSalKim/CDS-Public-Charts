@@ -146,6 +146,7 @@ class RemoteCoordinator:
         self.progress_sequences = {}
         self.helper_id, self.last_heartbeat = None, None
         self.capacity, self.heavy_capacity, self.reported_active = 0, 0, set()
+        self.reported_waiting = set()
         self.next_poll, self.last_control, self.sequence, self.errors = 0, 0, 0, 0
         self.disabled, self.polling, self.smoke = False, False, smoke
         self.smoke_runner = smoke_runner
@@ -200,19 +201,33 @@ class RemoteCoordinator:
                     message, files = self.transport.read(item)
                     validate_message(message,self.session,self.code_sha)
                     if message.get("kind") == "heartbeat":
-                        if files or type(message.get("capacity")) is not int or not 0 <= message["capacity"] <= 4:
+                        if files or type(message.get("capacity")) is not int or not 0 <= message["capacity"] <= 6:
                             raise ValueError("Invalid helper capacity")
                         at = float(message.get("generated_at",0))
                         active, heavy_capacity = message.get("active",[]), message.get("heavy_capacity",message["capacity"])
                         if (not math.isfinite(at) or at > now+30 or at < self.started-30
                                 or type(heavy_capacity) is not int or not 0 <= heavy_capacity <= message["capacity"]
-                                or not isinstance(active,list) or len(active) > 4
+                                or not isinstance(active,list) or len(active) > 6
                                 or any(not isinstance(token,str) or not re.fullmatch(r"[a-f0-9]{32}",token) for token in active)):
                             raise ValueError("Invalid helper heartbeat time")
                         self.last_heartbeat = max(self.last_heartbeat or 0,min(now,at))
                         self.capacity = message["capacity"]
                         self.heavy_capacity = heavy_capacity
                         self.reported_active = set(active)
+                        waiting, released = message.get("waiting",[]), message.get("released",[])
+                        for tokens in (waiting,released):
+                            if (not isinstance(tokens,list) or len(tokens) > 6 or len(tokens) != len(set(tokens))
+                                    or any(not isinstance(token,str) or not re.fullmatch(r"[a-f0-9]{32}",token) for token in tokens)
+                                    or set(tokens) & self.reported_active):
+                                raise ValueError("Invalid helper waiting acknowledgement")
+                        self.reported_waiting = set(waiting)
+                        for token in released:
+                            lease = self.leases.get(token)
+                            if lease is not None and lease.get("revoke_requested"):
+                                self.queue.reclaim(lease["target"],unstarted=True)
+                                self.leases.pop(token)
+                                self.emit({"event":"helper_unstarted_reclaimed",**lease["target"],"lease":token})
+                                changed = True
                         progress = message.get("progress",{})
                         if not isinstance(progress,dict) or not set(progress) <= set(active):
                             raise ValueError("Invalid helper progress")
@@ -274,15 +289,27 @@ class RemoteCoordinator:
                     self.leases.pop(token)
                     self.emit({"event":"helper_lease_expired",**lease["target"]})
                     changed = True
+            # Reassign only after the helper has atomically acknowledged that work never started.
+            releasing = sum(bool(lease.get("revoke_requested")) and token not in self.reported_active
+                            for token,lease in self.leases.items())
+            excess = max(0,len(self.leases)-max(self.capacity,len(self.reported_active))-releasing)
+            for token,lease in self.leases.items():
+                if (excess and token in self.reported_waiting and token not in self.reported_active
+                        and not lease.get("revoke_requested") and now-lease.get("assigned_at",now) >= 45):
+                    lease["revoke_requested"] = True
+                    self.emit({"event":"helper_unstarted_release_requested",**lease["target"],"lease":token})
+                    changed = True
+                    excess -= 1
             orphaned = len(self.reported_active-set(self.leases))
             while (self.last_heartbeat is not None and self.can_assign() and now < self.deadline
                    and len(self.leases)+orphaned < self.capacity):
                 active = {identity(lease["target"]) for lease in self.leases.values()}
-                target = self.queue.next(active)
+                target = self.queue.next(active,preparing=True)
                 if target is None:
                     break
                 token = uuid.uuid4().hex
                 self.leases[token] = {"id":token,"target":target,"existing":self.queue.known(target),
+                                      "assigned_at":now,
                                       "expires_at":min(now+LEASE_SECONDS,self.deadline+480),
                                       "hard_expires_at":min(now+MAX_LEASE_SECONDS,self.deadline+480)}
                 self.emit({"event":"helper_lead_assigned",**target,"lease":token,

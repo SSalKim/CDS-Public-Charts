@@ -64,6 +64,9 @@ def save(work, target, raw):
 
 
 def prune(work, *, now=None, max_bytes=MAX_BYTES):
+    from . import field_cache
+    partial_bytes = field_cache.prune(work,now=now,max_bytes=min(max_bytes,field_cache.MAX_BYTES))
+    max_bytes = max(0,max_bytes-partial_bytes)
     workspace=Path(work).resolve()
     root=workspace/"raw-cache"/"prepared"
     if root.is_symlink() or not root.resolve().is_relative_to(workspace):

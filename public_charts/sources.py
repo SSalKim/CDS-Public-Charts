@@ -101,6 +101,7 @@ class HttpCache:
         self.requests = 0
         self.bytes = 0
         self.hits = 0
+        self.field_cache_hits = 0
         self.records = []
         self.deadline = deadline
         self.context = {}
@@ -704,7 +705,8 @@ def collect(model, cycle, hour, root, *, include_precipitation=True, upper_level
                           "uses_reference_terrain":model=="aigfs","has_forecast_surface_pressure":model!="aigfs"},
             "fields": {**previous_fields,**{key: value.metadata for key, value in fields.items()},**rain_metadata},
             "sources": previous_sources+client.records, "statistics": {"requests": client.requests, "bytes": client.bytes,
-                                                      "cache_hits": client.hits, "seconds": round(time.perf_counter()-started, 2)}}
+                                                      "cache_hits": client.hits,"field_cache_hits":client.field_cache_hits,
+                                                      "seconds": round(time.perf_counter()-started, 2)}}
     temporary = path.with_suffix(".tmp")
     with temporary.open("wb") as handle:
         np.savez_compressed(handle, **arrays)

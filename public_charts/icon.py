@@ -198,8 +198,20 @@ class IconProvider:
     def __init__(self, client, grid_root=None):
         self.client = client
         self.grid_root = Path(grid_root or os.environ.get("PUBLIC_CHARTS_ICON_GRID_DIR", client.root.parent / "icon-grid"))
+        self.field_cache_root = os.environ.get("PUBLIC_CHARTS_FIELD_CACHE_DIR")
 
     def field(self, cycle, hour, parameter, level=None):
+        from . import field_cache
+        signature = {"version":1,"grid_version":GRID_VERSION,"cycle":cycle,"hour":hour,
+                     "parameter":parameter,"level":level,"bounds":list(BOUNDS),"spacing":.125}
+        if self.field_cache_root:
+            cached = field_cache.read(self.field_cache_root,signature)
+            if cached is not None:
+                data,lat,lon,meta,sources = cached
+                self.client.records.extend(sources)
+                self.client.field_cache_hits = getattr(self.client,"field_cache_hits",0)+1
+                return Decoded(data,lat,lon,meta)
+        record_start = len(self.client.records)
         constant = parameter == "HSURF"
         values, meta = native(self.client, cycle, hour, parameter, level, constant=constant)
         identity = (str(self.grid_root.resolve()), meta["uuidOfHGrid"], len(values))
@@ -227,10 +239,13 @@ class IconProvider:
         elif parameter in {"TOT_PREC", "SNOW_GSP", "SNOW_CON"}:
             if unit not in {"kg m**-2", "kg m-2", "mm"} or meta["stepType"] != "accum":
                 raise ValueError("Expected ICON accumulated precipitation mass")
-        return Decoded(data, remap.latitude, remap.longitude,
+        result = Decoded(data, remap.latitude, remap.longitude,
                        {**meta, "native_grid_type": meta["gridType"], "native_grid_uuid": meta["uuidOfHGrid"],
                         "gridType": "regular_ll", "grid_degrees": .125, "packing_error": float(meta["packingError"] or 0),
                         "remapping": "pyresample four-neighbour inverse-distance; not area-conservative"})
+        if self.field_cache_root:
+            field_cache.save(self.field_cache_root,signature,result,self.client.records[record_start:])
+        return result
 
     def fetch(self, cycle, hour, wanted):
         fields = {}

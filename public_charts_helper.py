@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import time
+from threading import RLock
 
 from public_charts.artifacts import ArtifactError, GitHubArtifacts, validate_session
 from public_charts.parallel import LeadQueue, execute_leads
@@ -38,15 +39,21 @@ class HelperQueue(LeadQueue):
         self.runtime = runtime
 
     def next(self, active, **kwargs):
-        target = super().next(active,**kwargs)
-        if target is not None:
-            lease = next((lease for lease in self.runtime.control.get("leases",[])
-                          if lease["target"] == target),None)
-            if lease is None or not self.runtime.valid_lease(lease):
-                self.reclaim(target)
-                return None
-            self.runtime.tokens[identity(target)] = lease["id"]
-        return target
+        with self.runtime.assignment_lock:
+            target = super().next(active,**kwargs)
+            if target is not None:
+                lease = next((lease for lease in self.runtime.control.get("leases",[])
+                              if lease["target"] == target),None)
+                if lease is None or lease.get("revoke_requested") or not self.runtime.valid_lease(lease):
+                    self.reclaim(target,unstarted=True)
+                    return None
+                self.runtime.tokens[identity(target)] = lease["id"]
+            return target
+
+    def reclaim(self, target, **kwargs):
+        with self.runtime.assignment_lock:
+            super().reclaim(target,**kwargs)
+            self.runtime.tokens.pop(identity(target),None)
 
 
 class ComputeHelper:
@@ -55,6 +62,7 @@ class ComputeHelper:
         self.work, self.workers, self.smoke = Path(work), workers, smoke
         self.parent_id = int(session.split("-")[0])
         self.control, self.tokens, self.waiting = {}, {}, {}
+        self.assignment_lock, self.released = RLock(), set()
         self.progress_records = {}
         self.queue = HelperQueue(self)
         self.sequence, self.next_poll, self.last_heartbeat = 0, 0, 0
@@ -82,15 +90,21 @@ class ComputeHelper:
     def heartbeat(self, stopped=False):
         budget = self.memory_budget.snapshot()
         capacity = 0 if stopped else budget["capacity"]
+        with self.assignment_lock:
+            active = list(self.tokens.values())
+            waiting = [lease["id"] for lease in self.control.get("leases",[])
+                       if lease["id"] not in active and not lease.get("revoke_requested") and self.valid_lease(lease)]
+            released = list(self.released)
         self.upload({"kind":"heartbeat","generated_at":time.time(),"capacity":capacity,
                      "heavy_capacity":min(capacity,budget["heavy_workers"]),
                      "heavy_active_workers":budget["heavy_active_workers"],
-                     "active":list(self.tokens.values()),"stopped":stopped,
+                     "active":active,"waiting":waiting,"released":released,"stopped":stopped,
                      "progress":{token:item for token,item in self.progress_records.items() if token in self.tokens.values()}})
         self.last_heartbeat = time.time()
 
     def targets(self):
-        return [lease["target"] for lease in self.control.get("leases",[]) if self.valid_lease(lease)]
+        return [lease["target"] for lease in self.control.get("leases",[])
+                if self.valid_lease(lease) and not lease.get("revoke_requested")]
 
     def target_valid(self,target):
         token=self.tokens.get(identity(target))
@@ -105,7 +119,7 @@ class ComputeHelper:
             return
         message, files = self.transport.read(latest)
         validate_message(message,self.session,self.code_sha)
-        if files or message.get("kind") != "control" or not isinstance(message.get("leases"),list) or len(message["leases"]) > 4:
+        if files or message.get("kind") != "control" or not isinstance(message.get("leases"),list) or len(message["leases"]) > 6:
             raise ValueError("Invalid coordinator control")
         times = [message.get(key) for key in ("generated_at","valid_until","deadline")]
         if (type(message.get("stop")) is not bool
@@ -123,10 +137,13 @@ class ComputeHelper:
                 raise ValueError("Invalid coordinator lease")
             tokens.add(lease["id"])
             targets.add(identity(lease["target"]))
-        self.control, self.latest_control = message, latest["name"]
-        with self.queue.lock:
-            for lease in message["leases"]:
-                self.queue.existing.update(lease["existing"])
+        with self.assignment_lock:
+            self.control, self.latest_control = message, latest["name"]
+            self.released = {lease["id"] for lease in message["leases"]
+                             if lease.get("revoke_requested") and lease["id"] not in self.tokens.values()}
+            with self.queue.lock:
+                for lease in message["leases"]:
+                    self.queue.existing.update(lease["existing"])
 
     def flush(self, key):
         target, staged, at = self.waiting[key]
