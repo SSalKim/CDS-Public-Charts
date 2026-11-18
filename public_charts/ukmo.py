@@ -420,7 +420,7 @@ def produce_ukmo(cycle,hour,root,existing,publish,*,force=False,checkpoint_root=
         if progress: progress("product_started",{"product":product,"domain":domain})
         frame=render(arrays,cycle,hour,product,domain,None,accumulation=accumulation,
                      model_name=policy.TITLES["ukmo"],precipitation_hours=interval,precipitation_field="precipitation",
-                     source_note="Data sourced from Met Office",profile=PUBLIC_PROFILE,physical_barb_spacing=True,
+                     source_note="Data sourced from UK Met Office",profile=PUBLIC_PROFILE,physical_barb_spacing=True,
                      model_id="ukmo",field_masks=masks,contour_filter=closed_contour_predicate(arrays),
                      diagnostic_snowfall=True,diagnostic_label="Diagnostic",return_frame=True)
         timings["plot_seconds"]+=time.monotonic()-began

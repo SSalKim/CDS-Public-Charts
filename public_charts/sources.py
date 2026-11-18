@@ -40,7 +40,7 @@ MODELS = {
     "icon": {"name": "DWD ICON (R03B07 L120)", "grid": .125, "interval": 3, "rain": 3,
              "max_hour": 180, "attribution": "Data sourced from DWD (CC BY 4.0)"},
     "ukmo": {"name":"UKMO (UM N1280 L70)","grid":.140625,"interval":3,"rain":3,
-             "max_hour":168,"attribution":"Data sourced from Met Office"},
+             "max_hour":168,"attribution":"Data sourced from UK Met Office"},
 }
 FAMILIES = {"z": "geopotential", "gh": "geopotential", "HGT": "geopotential",
             "t": "temperature", "TMP": "temperature", "u": "wind_u", "UGRD": "wind_u",
