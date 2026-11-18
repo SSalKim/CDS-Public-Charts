@@ -689,8 +689,8 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     cutoff=precipitation_threshold(cycle)
                     hatch(strict_display_values(rain,cutoff) if shared_rain_boundary else rain,cutoff,max(float(np.max(rain))+1,1),
                           WINTER_HATCH_COLOR,gid="rain-area-hatch")
-                if public and not pressure_only and product in {"acptot","acrain"}:
-                    snow_key=("total_" if product=="acrain" else "")+"snowfall_water_equivalent"
+                if public and not pressure_only and product=="acptot":
+                    snow_key="snowfall_water_equivalent"
                     if snow_key in arrays:
                         snow=snow_display_values(arrays[snow_key])
                         hatch(snow,SNOW_THRESHOLD,max(float(np.max(snow))+1,1),"#ff00ff",

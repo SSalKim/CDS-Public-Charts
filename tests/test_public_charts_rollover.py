@@ -57,6 +57,14 @@ class BatchWindowTests(unittest.TestCase):
 
 
 class RetryAffinityTests(unittest.TestCase):
+    def test_icon_12z_repair_invalidates_only_total_precipitation_composites(self):
+        for product in ("surfce","acptot","acptot1","acrain","acrain1","gph500"):
+            row={"model":"icon","cycle":"2026111812","hour":24,"product":product,"domain":"hkor",
+                 "render_version":4 if product=="gph500" else 10}
+            self.assertEqual(policy.render_is_current(row),product not in {"acrain","acrain1"})
+        row={"model":"icon","cycle":"2026111806","hour":24,"product":"acrain","domain":"hkor","render_version":8}
+        self.assertTrue(policy.render_is_current(row))
+
     def test_existing_icon_12z_keys_remain_current_without_rerender(self):
         for product,domain in (("gph500","asia"),("gph500","hkor"),("acptot","hkor"),("acrain","hkor")):
             row={"model":"icon","cycle":"2026111812","hour":0,"product":product,"domain":domain}
@@ -179,7 +187,9 @@ class RuntimeReuseTests(unittest.TestCase):
             version[0]="v24.1.0"
             self.assertNotEqual(install_transport(root),first)
             self.assertEqual(sum(c[0]=="npm" for c in calls),2)
-            self.assertIn("NODE_PATH=",(Path(root)/"github-env").read_text())
+            self.assertIn("PUBLIC_CHARTS_TRANSPORT_SCRIPT=",(Path(root)/"github-env").read_text())
+            self.assertEqual((first/"upload.cjs").read_bytes(),
+                             (Path(__file__).resolve().parents[1]/"public_charts/transport/upload.cjs").read_bytes())
 
 
 if __name__=="__main__":

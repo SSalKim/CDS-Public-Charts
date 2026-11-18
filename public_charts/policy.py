@@ -31,6 +31,8 @@ def winter_composite(cycle,model,product,domain):
 
 def render_version(cycle,model=None,product=None,domain=None):
     if winter_composite(cycle,model,product,domain):
+        if cycle>=WINTER_REGION_CUTOVER and product in {"acrain","acrain1"}:
+            return 12
         return 10 if cycle>=WINTER_REGION_CUTOVER else 9 if model=="ukmo" else 8
     if model=="ukmo" and domain=="asia" and ukmo_dateline_enabled(cycle):
         return 11

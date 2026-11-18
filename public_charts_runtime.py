@@ -49,24 +49,25 @@ def install_runtime(cache):
 def install_transport(cache):
     root=Path(__file__).resolve().parent/"public_charts/transport"
     version=subprocess.run(["node","--version"],capture_output=True,text=True,check=True).stdout.strip()
-    signature=hashlib.sha256((root/"package-lock.json").read_bytes()+version.encode()+sys.platform.encode()).hexdigest()
+    signature=hashlib.sha256((root/"package-lock.json").read_bytes()+(root/"upload.cjs").read_bytes()
+                             +version.encode()+sys.platform.encode()).hexdigest()
     directory=Path(cache)/("transport-"+signature)
     directory.mkdir(parents=True,exist_ok=True)
     marker=directory/".charts-ready"
-    env={**os.environ,"NODE_PATH":str(directory/"node_modules")}
     started=time.monotonic()
-    command=["node","-e","require('@actions/artifact')"]
+    command=["node","--input-type=module","-e","await import('@actions/artifact')"]
     ready=(marker.is_file() and marker.read_text()==signature
-           and subprocess.run(command,env=env,capture_output=True).returncode==0)
+           and (directory/"upload.cjs").is_file()
+           and subprocess.run(command,cwd=directory,capture_output=True).returncode==0)
     if not ready:
-        for name in ("package.json","package-lock.json"):
+        for name in ("package.json","package-lock.json","upload.cjs"):
             shutil.copy2(root/name,directory/name)
         subprocess.run(["npm","ci","--ignore-scripts","--no-audit","--no-fund"],cwd=directory,check=True)
-        subprocess.run(command,env=env,check=True)
+        subprocess.run(command,cwd=directory,check=True)
         marker.write_text(signature)
     if os.environ.get("GITHUB_ENV"):
         with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as stream:
-            stream.write("NODE_PATH="+env["NODE_PATH"]+"\n")
+            stream.write("PUBLIC_CHARTS_TRANSPORT_SCRIPT="+str(directory/"upload.cjs")+"\n")
     print(json.dumps({"event":"transport_ready","reused":ready,"seconds":round(time.monotonic()-started,3)}))
     return directory
 

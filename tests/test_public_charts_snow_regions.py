@@ -32,6 +32,8 @@ class SnowRegionTests(unittest.TestCase):
                 for product in ("surfce","acptot","acptot1","acrain","acrain1"):
                     with self.subTest(model=model,cycle=cycle,product=product):
                         expected=10 if cycle>="2026111812" else 9 if model=="ukmo" else 8
+                        if cycle>="2026111812" and product in {"acrain","acrain1"}:
+                            expected=12
                         self.assertEqual(policy.render_version(cycle,model,product,"hkor"),expected)
             self.assertNotEqual(policy.render_version("2026071800",model,"acptot","hkor"),10)
             self.assertNotEqual(policy.render_version("2026111800",model,"gph500","hkor"),10)
@@ -117,7 +119,7 @@ class SnowRegionTests(unittest.TestCase):
                     if artist.get_gid() in {"snow-area-hatch","shaded-field"}:
                         paths[artist.get_gid()]=[p.deepcopy() for p in artist.get_paths()]
             close(figure)
-        for family,key in (("acptot","snowfall_water_equivalent"),("acrain","total_snowfall_water_equivalent")):
+        for family,key in (("acptot","snowfall_water_equivalent"),):
             with self.subTest(family=family):
                 masks={key:valid}
                 with patch("cartopy.mpl.geoaxes.GeoAxes.add_feature"), \
@@ -174,23 +176,28 @@ class SnowRegionTests(unittest.TestCase):
                      patch("cartopy.mpl.geoaxes.GeoAxes.add_feature"), \
                      patch.object(plotter,"korean_admin_boundaries",return_value=[]), \
                      patch.object(plotter.plt,"close",side_effect=capture):
+                    captured.clear()
                     amount=total_rain if family=="acrain" else None
                     plotter.render(arrays,cycle,120,family,"hkor",None,accumulation=amount,
                                    precipitation_field="precipitation",profile=PUBLIC_PROFILE,return_frame=True)
                     rain_area=captured["shaded-field"][0]
-                    hatch,hatch_clip=captured["snow-area-hatch"]
-                    self.assertIsNotNone(hatch_clip)
-                    hatch=hatch.intersection(hatch_clip)
+                    if family=="acrain":
+                        self.assertNotIn("snow-area-hatch",captured)
+                    else:
+                        hatch,hatch_clip=captured["snow-area-hatch"]
+                        self.assertIsNotNone(hatch_clip)
+                        hatch=hatch.intersection(hatch_clip)
                     plotter.render(arrays,cycle,120,family+"_snow","hkor",None,accumulation=amount,
                                    precipitation_field="precipitation",profile=PUBLIC_PROFILE,return_frame=True)
                     shading,shading_clip=captured["shaded-field"]
                     self.assertIsNotNone(shading_clip)
                     shading=shading.intersection(shading_clip)
-                    self.assertGreater(hatch.area,0)
-                    self.assertLess(hatch.symmetric_difference(shading).area/hatch.area,1e-10)
-                    self.assertLess(hatch.difference(rain_area).area/hatch.area,1e-10)
+                    if family=="acptot":
+                        self.assertGreater(hatch.area,0)
+                        self.assertLess(hatch.symmetric_difference(shading).area/hatch.area,1e-10)
+                        self.assertLess(hatch.difference(rain_area).area/hatch.area,1e-10)
+                        self.assertLess(hatch_clip.symmetric_difference(shading_clip).area/max(hatch_clip.area,1),1e-10)
                     self.assertLess(shading.difference(rain_area).area/shading.area,1e-10)
-                    self.assertLess(hatch_clip.symmetric_difference(shading_clip).area/max(hatch_clip.area,1),1e-10)
         np.testing.assert_array_equal(snow,original)
 
     def test_window_mask_is_not_the_last_steps_flag_and_cache_is_corrected(self):

@@ -146,7 +146,8 @@ class GitHubArtifacts:
                     raise ArtifactError("Transfer exceeds its byte limit")
                 target = root / filename
                 target.write_bytes(Path(source).read_bytes())
-            command = ["node", str(Path(__file__).parent / "transport/upload.cjs"), name, str(root)]
+            script=os.environ.get("PUBLIC_CHARTS_TRANSPORT_SCRIPT",str(Path(__file__).parent / "transport/upload.cjs"))
+            command = ["node", script, name, str(root)]
             result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=120)
             if result.returncode:
                 raise ArtifactError("Actions artifact upload failed",operation="artifact_upload")

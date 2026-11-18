@@ -41,3 +41,12 @@ local preference. This is not a cross-runner field-cache sharing mechanism.
 The 90-second cleanup submission window remains in place while its backlog is
 large; this update does not pretend that deletion or hosted-runner startup is free.
 Fewer unnecessary rollovers reduce how often those costs interrupt new inputs.
+
+## Total Precipitation Panel Correction
+
+Only the first panel of `acptot` receives the magenta snow-area hatch. The first
+panel of `acrain` remains plain total precipitation; its snow and snow-depth
+panels retain their scientific values and styling. From 2026111812, only the
+`acrain`/`acrain1` winter composite revision advances to 12. At deployment the
+only published charts of that cycle are ICON, so this selectively repairs those
+two layouts without rebuilding ICON's other products or earlier cycles.
