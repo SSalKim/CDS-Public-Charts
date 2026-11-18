@@ -178,10 +178,9 @@ class UkmoDiagnosticsTests(unittest.TestCase):
             step=diag.step(15)
             self.assertFalse(step["sr_valid"][0,0])
             self.assertTrue(step["sr_valid"][0,1])
-            np.testing.assert_allclose(step["unfiltered_swe"],3.)
-            np.testing.assert_allclose(step["swe"],[[0.,3.],[3.,3.]])
+            np.testing.assert_allclose(step["swe"],3.)
 
-    def test_exp3_keeps_cold_convective_snow_but_filters_warm_saturated_cells(self):
+    def test_native_convective_swe_is_retained_independently_of_surface_occurrence(self):
         with tempfile.TemporaryDirectory() as root:
             diag=WinterDiagnostics(root,"2026111800",base(),6)
             source=FakeNative()
@@ -199,17 +198,17 @@ class UkmoDiagnosticsTests(unittest.TestCase):
             source.value=value
             diag.native=source
             step=diag.step(3)
-            np.testing.assert_allclose(step["unfiltered_swe"],3.)
-            np.testing.assert_array_equal(step["snow_phase_valid"],[[True,False],[True,True]])
-            np.testing.assert_allclose(step["swe"],[[3.,0.],[3.,3.]])
+            np.testing.assert_allclose(step["swe"],3.)
+            self.assertEqual(step["depth"][0,1],0.)
 
-    def test_exp3_filters_each_step_before_accumulating_and_ignores_v1_caches(self):
+    def test_native_swe_accumulates_without_exp3_and_ignores_superseded_caches(self):
         with tempfile.TemporaryDirectory() as root:
             diag=WinterDiagnostics(root,"2026111800",base(),6)
             old={"rain":np.full((2,2),999.),"swe":np.full((2,2),999.),
                  "depth":np.full((2,2),999.),"sr_valid":np.ones((2,2),dtype=bool)}
-            diag.save_checkpoint("ukmo-winter-v1/steps/003.npz",old)
-            diag.save_checkpoint("ukmo-winter-v1/totals/006.npz",old)
+            for version in ("ukmo-winter-v1","ukmo-winter-v2-exp3"):
+                diag.save_checkpoint(f"{version}/steps/003.npz",old)
+                diag.save_checkpoint(f"{version}/totals/006.npz",old)
             source=FakeNative()
             original=source.value
             def value(hour,token,unit,**kwargs):
@@ -220,8 +219,8 @@ class UkmoDiagnosticsTests(unittest.TestCase):
             diag.native=source
             total=diag.prefix(6)
             np.testing.assert_allclose(total["rain"],6.)
-            np.testing.assert_allclose(total["swe"],3.)
-            np.testing.assert_allclose(diag.step(3)["swe"],0.)
+            np.testing.assert_allclose(total["swe"],6.)
+            np.testing.assert_allclose(diag.step(3)["swe"],3.)
             np.testing.assert_allclose(diag.step(6)["swe"],3.)
 
     def test_each_native_interval_is_bounded_before_accumulating(self):

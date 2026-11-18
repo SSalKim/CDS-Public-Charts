@@ -25,7 +25,7 @@ KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/(\d{10})/(\d{3})
 def render_version(cycle,model=None,product=None,domain=None):
     if (model in {"aifs","gfs","cmc","ecmwf","icon","ukmo"} and winter(model,cycle) and domain=="hkor"
             and product in {"surfce","acptot","acptot1","acrain","acrain1"}):
-        return 8
+        return 9 if model=="ukmo" else 8
     if cycle >= WINTER_DIAGNOSTIC_CUTOVER:
         if model in {"gfs","ukmo"} and domain=="hkor" and product in {"surfce","acptot","acptot1","acrain","acrain1"}:
             return 7

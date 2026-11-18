@@ -28,11 +28,13 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   interval `acptot` and total `acrain`. Exactly 0.25 is excluded; a separately
   interpolated categorical boundary or the last subinterval's flag is not used.
   Native SWE (AIFS/ECMWF/CMC/ICON) and native GFS phase sampling are unchanged.
-- UKMO uses the exp3 surface-temperature/RH occurrence filter on each diagnostic
-  3h interval (native 6h after f144) before summing SWE. The three occurrence
-  branches are ORed, and convective-dominant cold snow is not excluded by type.
-  `ukmo-winter-v2-exp3` isolates both step and cumulative checkpoints from v1.
-  Render revision 8 refreshes only supported winter Korea composites and aliases;
+- UKMO integrates native large-scale and convective snowfall rates, retaining the
+  existing same-interval precipitation cap without an additional surface T/RH
+  filter on SWE. The strict `>0.25 kg/m2` display cutoff is shared by all models.
+  Surface occurrence conditions remain part of SR depth conversion, not SWE.
+  `ukmo-winter-v3-native-swe` isolates step and cumulative checkpoints from the
+  superseded exp3 caches. Render revision 9 refreshes UKMO winter Korea composites
+  and aliases; other snow-capable models retain revision 8. Previously
   published older images remain visible until replacement, behind new operational work.
 - `PUBLIC_CHARTS_ENABLED=true` enables production; `false` blocks production
   dispatches while still allowing a non-mutating dry run.

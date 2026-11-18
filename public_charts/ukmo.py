@@ -11,7 +11,7 @@ import requests
 
 from . import policy
 from .dates import parse_cycle
-from .diagnostics import snow_ratio,surface_snow_possible,wet_bulb_psychrometric
+from .diagnostics import snow_ratio,wet_bulb_psychrometric
 from .chart_style import SNOW_THRESHOLD
 from .extended_sources import ExtraFields,DiagnosticDeferred
 from .sources import NotReady,SourceDeferred,atomic_json
@@ -19,7 +19,7 @@ from .sources import NotReady,SourceDeferred,atomic_json
 BASE="https://met-office-atmospheric-model-data.s3.eu-west-2.amazonaws.com"
 BOUNDS=(29,45,115,138)
 PROFILE_LEVELS=(1000,975,950,925,900,850,800,750,700)
-DIAGNOSTIC_VERSION="ukmo-winter-v2-exp3"
+DIAGNOSTIC_VERSION="ukmo-winter-v3-native-swe"
 
 
 def source_url(cycle,hour,token):
@@ -354,17 +354,12 @@ class WinterDiagnostics(ExtraFields):
         humidity_valid=(rh>=-.2)&(rh<=100.2)
         valid=humidity_valid&(t850["flag_850"]==0)
         ratio,depth,_=snow_ratio(rain,t-273.15,np.clip(rh,0,100),t850["value_850"]-273.15,interval_hours=max(3,native_interval(end)))
-        # Filter each native diagnostic interval before window/cumulative summation (exp3).
-        phase=surface_snow_possible(rain,t-273.15,np.clip(rh,0,100))&humidity_valid
-        filtered=np.where(phase,snow,0.)
-        result={"rain":rain,"swe":filtered,"raw_swe":raw,"unfiltered_swe":snow,
-                "snow_phase_valid":phase,"depth":depth,"sr_valid":valid}
+        # Preserve model snowfall; surface occurrence conditions apply only to SR depth.
+        result={"rain":rain,"swe":snow,"raw_swe":raw,"depth":depth,"sr_valid":valid}
         with self.checkpoint_lock(commit=True): self.save_checkpoint(name,result)
         if self.progress:
             self.progress("ukmo_snow_qc",{"hour":end,"limited_cells":int((raw>snow+1e-6).sum()),
-                                         "limited_swe_sum":float((raw-snow).sum()),"sr_invalid_cells":int((~valid).sum()),
-                                         "surface_filtered_cells":int((snow>filtered).sum()),
-                                         "surface_filtered_swe_sum":float((snow-filtered).sum())})
+                                         "limited_swe_sum":float((raw-snow).sum()),"sr_invalid_cells":int((~valid).sum())})
         return result
 
     def prefix(self,end):

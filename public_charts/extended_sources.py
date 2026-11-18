@@ -336,7 +336,6 @@ def snow_step(extra,end,cadence):
     if extra.model=="gfs":
         if policy.hourly_gfs_snow(extra.cycle):
             snow=gfs_sampled_snow(extra,end,cadence,lat,lon).values
-            snow_flag=snow>.01
         else:
             snow_flag=interpolate(extra.get(end,"categorical_snow"),lat,lon,nearest=True)>=.5
             snow=rain*snow_flag
@@ -345,7 +344,7 @@ def snow_step(extra,end,cadence):
         previous=None if int(current.metadata["startStep"])==end-cadence else extra.get(end-cadence,"snowfall_water_equivalent")
         amount=rainfall_interval(current,previous,end,cadence)
         snow=interpolate(Decoded(amount,current.latitude,current.longitude,{}),lat,lon)
-        snow_flag=snow>.01
+    snow_flag=snow>SNOW_THRESHOLD
     return {"latitude":lat,"longitude":lon,"temperature_2m":t,"relative_humidity_2m":rh,
             "surface_pressure":pressure,"snow_ratio":ratio,"snow_expected":snow_flag.astype(float),
             "snowfall_water_equivalent":snow,"snowfall_depth_diagnostic":depth}
@@ -359,6 +358,7 @@ def cached_snow_step(extra,end,cadence):
         extra.save_checkpoint(name,current)
         if extra.progress:
             extra.progress("diagnostic_step_ready",{"kind":"snow","step_hour":end})
+    current["snow_expected"]=(current["snowfall_water_equivalent"]>SNOW_THRESHOLD).astype(float)
     return current
 
 

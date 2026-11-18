@@ -7,23 +7,60 @@ from matplotlib import pyplot as plt
 
 from public_charts import plotter
 from public_charts import policy
-from public_charts.chart_style import PUBLIC_PROFILE
+from public_charts.chart_style import PUBLIC_PROFILE,SNOW_THRESHOLD,precipitation_threshold,winter_season
 from public_charts.diagnostics import surface_snow_possible
-from public_charts.extended_sources import ExtraFields,winter_fields
+from public_charts.extended_sources import ExtraFields,cached_snow_step,snow_step,winter_fields
 from public_charts.sources import Decoded
 
 
 class SnowRegionTests(unittest.TestCase):
+    def test_rain_cutoff_and_winter_layout_have_distinct_october_boundaries(self):
+        for month in range(1,13):
+            cycle=f"2026{month:02}1800"
+            with self.subTest(month=month):
+                self.assertEqual(precipitation_threshold(cycle),.5 if 5<=month<=10 else .25)
+                winter=month<=4 or month>=10
+                self.assertEqual(winter_season(cycle),winter)
+                for model in ("aifs","gfs","ecmwf","cmc","icon","ukmo"):
+                    self.assertEqual(policy.winter(model,cycle),winter)
+                self.assertFalse(policy.winter("aigfs",cycle))
+                self.assertEqual(SNOW_THRESHOLD,.25)
+
     def test_revision_refreshes_only_supported_winter_snow_composites_and_aliases(self):
         for model in ("aifs","gfs","cmc","ecmwf","icon","ukmo"):
             for cycle in ("2026111712","2026111800"):
                 for product in ("surfce","acptot","acptot1","acrain","acrain1"):
                     with self.subTest(model=model,cycle=cycle,product=product):
-                        self.assertEqual(policy.render_version(cycle,model,product,"hkor"),8)
+                        self.assertEqual(policy.render_version(cycle,model,product,"hkor"),9 if model=="ukmo" else 8)
             self.assertNotEqual(policy.render_version("2026071800",model,"acptot","hkor"),8)
             self.assertNotEqual(policy.render_version("2026111800",model,"gph500","hkor"),8)
             self.assertNotEqual(policy.render_version("2026111800",model,"surfce","asia"),8)
         self.assertNotEqual(policy.render_version("2026111800","aigfs","acptot","hkor"),8)
+
+    def test_all_native_and_gfs_steps_use_strict_cutoff_and_fix_legacy_flags(self):
+        latitude,longitude=np.array([35.,36.]),np.array([127.,128.])
+        snow=np.array([[.02,.25],[.251,1.]])
+        expected=np.array([[False,False],[True,True]])
+        ones=np.ones_like(snow)
+        surface={"latitude":latitude,"longitude":longitude,"temperature_2m":ones*268.,
+                 "relative_humidity_2m":ones*90,"surface_pressure":ones*101000}
+        def get(hour,key,**kwargs):
+            values=ones*260 if key=="temperature_850" else snow
+            return Decoded(values,latitude,longitude,{"startStep":0,"endStep":3})
+        for model in ("aifs","ecmwf","cmc","icon","gfs"):
+            with self.subTest(model=model),tempfile.TemporaryDirectory() as root:
+                extra=ExtraFields(root,model,"2026111800")
+                with patch.object(extra,"prefetch"),patch.object(extra,"get",side_effect=get), \
+                     patch("public_charts.extended_sources.near_surface_fields",return_value=surface), \
+                     patch("public_charts.extended_sources.collect_rainfall",return_value=(ones,Decoded(ones,latitude,longitude,{}),[])), \
+                     patch("public_charts.extended_sources.gfs_sampled_snow",return_value=Decoded(snow,latitude,longitude,{})):
+                    step=snow_step(extra,3,3)
+                np.testing.assert_array_equal(step["snow_expected"],expected)
+                legacy={**step,"snow_expected":np.ones_like(snow)}
+                with patch.object(extra,"checkpoint",return_value=legacy), \
+                     patch("public_charts.extended_sources.snow_step",side_effect=AssertionError("Use cached SWE")):
+                    cached=cached_snow_step(extra,3,3)
+                np.testing.assert_array_equal(cached["snow_expected"],expected)
 
     def test_exact_cutoff_is_excluded_without_quantizing_the_continuous_swe(self):
         values=np.array([0.,.01,.249,.25,np.nextafter(.25,np.inf),.6,100.])
