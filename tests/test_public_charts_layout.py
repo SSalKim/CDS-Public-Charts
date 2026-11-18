@@ -175,9 +175,10 @@ class LayoutTests(unittest.TestCase):
                             self.assertEqual(label.get_text(),"Diagnostic")
                             renderer=figure.canvas.get_renderer()
                             self.assertGreaterEqual(label.get_window_extent(renderer).y0,threshold.get_window_extent(renderer).y1)
-                            self.assertLess(label.get_window_extent(renderer).y0-threshold.get_window_extent(renderer).y1,3)
-                            self.assertEqual(label.get_position(),(.515,.031))
-                            self.assertEqual(threshold.get_position(),(.515,.017))
+                            self.assertGreater(label.get_window_extent(renderer).y0-threshold.get_window_extent(renderer).y1,4)
+                            self.assertLess(label.get_window_extent(renderer).y0-threshold.get_window_extent(renderer).y1,8)
+                            self.assertEqual(label.get_position(),(.515,.033))
+                            self.assertEqual(threshold.get_position(),(.515,.015))
                             self.assertIn("Snow > 0.25",threshold.get_text())
                             self.assertGreater(threshold.get_window_extent(renderer).y0,0)
                         else:

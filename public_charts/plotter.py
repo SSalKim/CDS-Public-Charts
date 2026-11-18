@@ -871,8 +871,8 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             if diagnostic_label and product in snow_products:
                 # Date tokens have proportional widths; the diagnostic marker must not follow them.
                 if public and korea:
-                    label_x,label_y=.515,.031
-                    note_x,note_y=.515,.017
+                    label_x,label_y=.515,.033
+                    note_x,note_y=.515,.015
                 else:
                     label_x,label_y=note_x,note_y
                     note_y-=.015
