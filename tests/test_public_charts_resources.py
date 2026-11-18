@@ -152,6 +152,7 @@ class MemoryBudgetTests(unittest.TestCase):
         for hour in (0,3):
             self.budget.start("render",self.target(hour=hour))
         self.assertFalse(self.budget.can_start("render",self.target(hour=6)))
+        self.assertEqual(self.budget.summary()["memory_pause_count"],0)
         self.assertTrue(self.budget.can_start("prepare",self.target(hour=6)))
         self.host=2*1024**3
         self.now+=2

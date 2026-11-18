@@ -99,7 +99,7 @@ class ComputeHelper:
                      "heavy_capacity":min(capacity,budget["heavy_workers"]),
                      "heavy_active_workers":budget["heavy_active_workers"],
                      "active":active,"waiting":waiting,"released":released,"stopped":stopped,
-                     "progress":{token:item for token,item in self.progress_records.items() if token in self.tokens.values()}})
+                     "progress":{token:item for token,item in self.progress_records.items() if token in active}})
         self.last_heartbeat = time.time()
 
     def targets(self):

@@ -170,10 +170,11 @@ class WorkerMemoryBudget:
             rooms = [value*1024**2-reserve for value,reserve in (
                 (state["available_memory_mib"],self.LINUX_RESERVE),
                 (state["windows_available_memory_mib"],self.WINDOWS_RESERVE)) if value is not None]
-            allowed = (len(self.tasks) < self.workers
-                       and sum(key[0] == phase for key in self.tasks) < self.phase_limits.get(phase,0)
-                       and (not rooms or min(rooms)-self.growth() >= self.estimate(phase,target)))
-            pressured = not allowed and state["active_workers"] < self.workers
+            slots = (len(self.tasks) < self.workers
+                     and sum(key[0] == phase for key in self.tasks) < self.phase_limits.get(phase,0))
+            fits = not rooms or min(rooms)-self.growth() >= self.estimate(phase,target)
+            allowed = slots and fits
+            pressured = slots and not fits
             now = self.clock()
             if pressured and self.pause_started is None:
                 self.pause_started, self.pause_count = now, self.pause_count+1

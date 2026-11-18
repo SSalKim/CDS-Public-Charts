@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import time
 import uuid
 import zipfile
@@ -84,6 +85,13 @@ def prune(work, *, now=None, max_bytes=MAX_BYTES):
         raise ValueError("Unsafe partial field cache root")
     now = time.time() if now is None else now
     candidates, completeness = [], {}
+    for path in root.glob("*/*/*"):
+        if path.is_symlink() or any(p.is_symlink() for p in (path.parent,path.parent.parent)):
+            raise ValueError("Unsafe partial field cache entry")
+        orphan = re.fullmatch(r"[a-f0-9]{64}\.npz",path.name) and not path.with_suffix(".json").exists()
+        temporary = re.fullmatch(r"[a-f0-9]{64}\.(?:npz|json)[0-9]+-[a-f0-9]{32}\.tmp",path.name)
+        if path.is_file() and (orphan or temporary):
+            path.unlink()
     for meta in root.glob("*/*/*.json"):
         if meta.is_symlink() or any(p.is_symlink() for p in (meta.parent,meta.parent.parent)):
             raise ValueError("Unsafe partial field cache entry")

@@ -42,6 +42,16 @@ class FieldCacheTests(unittest.TestCase):
         self.assertFalse(field_cache.paths(self.root,self.signature)[0].exists())
         self.assertEqual(unrelated.read_text(),"keep")
 
+    def test_interrupted_atomic_writes_do_not_escape_the_cache_budget(self):
+        path,meta=field_cache.paths(self.root,self.signature)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"orphan")
+        temporary=meta.with_name(meta.name+"123-"+"a"*32+".tmp")
+        temporary.write_bytes(b"interrupted")
+        self.assertEqual(field_cache.prune(self.work),0)
+        self.assertFalse(path.exists())
+        self.assertFalse(temporary.exists())
+
     def test_partial_fetch_resumes_without_redownloading_a_verified_field(self):
         class Remapper:
             latitude=longitude=np.array([0,.125])
