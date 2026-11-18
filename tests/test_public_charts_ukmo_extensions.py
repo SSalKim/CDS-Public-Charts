@@ -39,6 +39,13 @@ class UkmoExtensionPolicyTests(unittest.TestCase):
               "gfs":{**row(),"model":"gfs","render_version":4}}
         self.assertEqual(current_render_keys(rows),{"new","gfs"})
 
+    def test_diagnostic_layout_revision_refreshes_only_snow_composites(self):
+        self.assertEqual(policy.render_version("2026111800","gfs","acptot","hkor"),6)
+        self.assertEqual(policy.render_version("2026111800","ukmo","acrain1","hkor"),6)
+        self.assertEqual(policy.render_version("2026111800","gfs","surfce","asia"),4)
+        self.assertEqual(policy.render_version("2026111800","gfs","gph500","hkor"),4)
+        self.assertEqual(policy.render_version("2026111800","aifs","acptot","hkor"),4)
+
     def test_full_catalog_only_at_new_cycles_or_extended_leads(self):
         for cycle in ("2026111806","2026111818","2027051806"):
             self.assertEqual(policy.hours("ukmo",cycle),tuple(range(0,70,3)))

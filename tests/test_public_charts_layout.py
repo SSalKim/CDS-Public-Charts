@@ -189,6 +189,28 @@ class LayoutTests(unittest.TestCase):
                                    profile=PUBLIC_PROFILE,model_id="ukmo",precipitation_field="precipitation",
                                    source_note="Data sourced from Met Office",diagnostic_label="Diagnostic",return_frame=True)
 
+    def test_diagnostic_label_does_not_move_across_forecast_dates(self):
+        latitude,longitude=np.linspace(29,45,15),np.linspace(115,138,21)
+        x,y=np.meshgrid(longitude,latitude)
+        snow=np.zeros_like(x)
+        arrays={"latitude":latitude,"longitude":longitude,"pressure_msl":101000+10*y,
+                "precipitation":snow,"total_snowfall_water_equivalent":snow}
+        positions=[]
+        close=plt.close
+        def capture(figure):
+            if hasattr(figure,"texts"):
+                label=next(t for t in figure.texts if t.get_gid()=="diagnostic-snow-note")
+                positions.append(tuple(label.get_position()))
+            close(figure)
+        with patch("cartopy.mpl.geoaxes.GeoAxes.add_feature"), \
+             patch.object(plotter,"korean_admin_boundaries",return_value=[]), \
+             patch.object(plotter.plt,"close",side_effect=capture):
+            for hour in (0,3,24,84,120,240):
+                plotter.render(arrays,"2026113000",hour,"acrain_snow","hkor",None,
+                               profile=PUBLIC_PROFILE,model_id="gfs",diagnostic_label="Diagnostic",return_frame=True)
+        self.assertEqual(len(positions),6)
+        self.assertEqual(len(set(positions)),1)
+
 
 if __name__ == "__main__":
     unittest.main()

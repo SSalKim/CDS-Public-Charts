@@ -869,7 +869,9 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                 note_x=(footer_blocks["valid"][1]+footer_blocks["init"][0])/2
             note_y=pos.y0-(.019 if public else .010)
             if diagnostic_label and product in snow_products:
-                figure.text(note_x,note_y,diagnostic_label,size=fs(5.5 if korea else 7),color="navy",ha="center",gid="diagnostic-snow-note")
+                # Date tokens have proportional widths; the diagnostic marker must not follow them.
+                label_x,label_y=(.515,.045) if public and korea else (note_x,note_y)
+                figure.text(label_x,label_y,diagnostic_label,size=fs(5.5 if korea else 7),color="navy",ha="center",gid="diagnostic-snow-note")
                 note_y-=.015
             figure.text(note_x,note_y,footer,size=fs(5.5 if korea else 7),color="navy",ha="center",gid="rain-threshold-note")
         if source_note:
