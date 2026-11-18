@@ -28,14 +28,31 @@ class SnowRegionTests(unittest.TestCase):
 
     def test_revision_refreshes_only_supported_winter_snow_composites_and_aliases(self):
         for model in ("aifs","gfs","cmc","ecmwf","icon","ukmo"):
-            for cycle in ("2026111712","2026111800"):
+            for cycle in ("2026111712","2026111800","2026111806","2026111812","2026111900"):
                 for product in ("surfce","acptot","acptot1","acrain","acrain1"):
                     with self.subTest(model=model,cycle=cycle,product=product):
-                        self.assertEqual(policy.render_version(cycle,model,product,"hkor"),10)
+                        expected=10 if cycle>="2026111812" else 9 if model=="ukmo" else 8
+                        self.assertEqual(policy.render_version(cycle,model,product,"hkor"),expected)
             self.assertNotEqual(policy.render_version("2026071800",model,"acptot","hkor"),10)
             self.assertNotEqual(policy.render_version("2026111800",model,"gph500","hkor"),10)
             self.assertNotEqual(policy.render_version("2026111800",model,"surfce","asia"),10)
         self.assertNotEqual(policy.render_version("2026111800","aigfs","acptot","hkor"),10)
+
+    def test_existing_pre_cutover_winter_images_are_kept_without_relabeling_or_rebuild(self):
+        from public_charts_run import current_render_keys
+        rows={}
+        for model in ("aifs","gfs","cmc","ecmwf","icon","ukmo"):
+            for version in (0,3,4,7,8,9,10):
+                key=f"{model}-{version}"
+                rows[key]={"model":model,"cycle":"2026111800","hour":120,"product":"acptot","domain":"hkor",
+                           "render_version":version,"url":"https://example.invalid/keep","file_id":key}
+        original={key:dict(row) for key,row in rows.items()}
+        self.assertEqual(current_render_keys(rows),set(rows))
+        self.assertEqual(rows,original)
+        future={"old":{**rows["aifs-4"],"cycle":"2026111812"},
+                "new":{**rows["aifs-10"],"cycle":"2026111812"},
+                "upper":{**rows["aifs-3"],"product":"gph500","domain":"asia"}}
+        self.assertEqual(current_render_keys(future),{"new"})
 
     def test_all_native_and_gfs_steps_use_strict_cutoff_and_fix_legacy_flags(self):
         latitude,longitude=np.array([35.,36.]),np.array([127.,128.])
@@ -151,7 +168,7 @@ class SnowRegionTests(unittest.TestCase):
                         clipped=clip.get_transformed_path_and_affine()[0] if clip is not None else None
                         captured[artist.get_gid()]=(region,geometry(clipped) if clipped is not None else None)
             close(figure)
-        for cycle in ("2026111800","2026101800"):
+        for cycle in ("2026111812","2027101800"):
             for family in ("acptot","acrain"):
                 with self.subTest(cycle=cycle,family=family), \
                      patch("cartopy.mpl.geoaxes.GeoAxes.add_feature"), \

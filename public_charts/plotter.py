@@ -38,6 +38,7 @@ from .chart_style import (map_spec, heading_style, source_note_alpha, STYLE_VERS
                          PUBLIC_MAP_AXES, precipitation_edge_levels,precipitation_threshold,
                          PUBLIC_SNOW_LEVELS,PUBLIC_SNOW_COLORS,PUBLIC_SNOW_OVER,SNOW_THRESHOLD,WINTER_HATCH_COLOR)
 from .dates import parse_cycle
+from .policy import WINTER_REGION_CUTOVER
 from .chart_titles import product_title
 
 import os
@@ -315,6 +316,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
     spec = map_spec(domain, cycle, profile)
     korea = domain == "hkor"
     public=profile==PUBLIC_PROFILE
+    shared_rain_boundary=public and cycle>=WINTER_REGION_CUTOVER
     font_scale=(1.25 if korea else 1.35) if public else 1
     def fs(size):
         return size*font_scale
@@ -641,7 +643,8 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     rain_levels=(threshold,*legend_levels[1:])
                     palette=PUBLIC_SNOW_COLORS if snow_panel else PUBLIC_RAIN_COLORS
                     # contourf closes its top interval on the right; 100 belongs to the green overflow here.
-                    shade=snow_display_values(precip) if snow_panel else strict_display_values(precip,threshold)
+                    shade=(snow_display_values(precip) if snow_panel else
+                           strict_display_values(precip,threshold) if shared_rain_boundary else precip)
                     shade=np.where(shade==100,np.nextafter(100.,np.inf),shade) if snow_panel else shade
                     rain_fill=filled(shade,rain_levels,palette,PUBLIC_SNOW_OVER if snow_panel else palette[-1],
                                      grid=rain_grid,valid_mask=precip_valid,colorbar_levels=legend_levels,colorbar_extendfrac=.045 if snow_panel else 0)
@@ -652,7 +655,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                                     levels=precipitation_edge_levels(float(np.max(precip)),threshold),colors="#282828",
                                     linewidths=.35,transform=projection,zorder=3,corner_mask=True)
                     edge.set_gid("precipitation-edge")
-                    if snow_panel:
+                    if snow_panel and shared_rain_boundary:
                         clip_snow_to_rain(rain_fill)
                         clip_snow_to_rain(edge)
                 else:
@@ -660,7 +663,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             else:
                 cax.set_axis_off()
             numeric_valid=precip_valid
-            if public and product in snow_products:
+            if shared_rain_boundary and product in snow_products:
                 rain_valid=precipitation_region().contains_points(projected[:,:,:2].reshape(-1,2)).reshape(visible.shape)
                 numeric_valid=rain_valid if numeric_valid is None else numeric_valid&rain_valid
             if product in {"surfce","acptot","acptot_snowdepth"} or (public and product in {"acrain","acrain_snow","acrain_snowdepth"}):
@@ -684,14 +687,15 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     title=f"MSLP, Accum.Snow Amount(cm) by SR Ratio and Precip.Area[{hour-precipitation_hours:03}-{hour:03}]"
                     rain=arrays["precipitation"]
                     cutoff=precipitation_threshold(cycle)
-                    hatch(strict_display_values(rain,cutoff),cutoff,max(float(np.max(rain))+1,1),
+                    hatch(strict_display_values(rain,cutoff) if shared_rain_boundary else rain,cutoff,max(float(np.max(rain))+1,1),
                           WINTER_HATCH_COLOR,gid="rain-area-hatch")
                 if public and not pressure_only and product in {"acptot","acrain"}:
                     snow_key=("total_" if product=="acrain" else "")+"snowfall_water_equivalent"
                     if snow_key in arrays:
                         snow=snow_display_values(arrays[snow_key])
                         hatch(snow,SNOW_THRESHOLD,max(float(np.max(snow))+1,1),"#ff00ff",
-                              gid="snow-area-hatch",valid_mask=field_masks.get(snow_key),clip_to=precipitation_region())
+                              gid="snow-area-hatch",valid_mask=field_masks.get(snow_key),
+                              clip_to=precipitation_region() if shared_rain_boundary else None)
                 elif not public and product=="acptot" and "snow_expected" in arrays:
                     hatch(arrays["snow_expected"],.5,1.5,"#ff00ff",gid="snow-area-hatch")
             elif product=="acptot_snow":

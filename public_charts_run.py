@@ -45,7 +45,7 @@ def manifest_bytes(payload):
     return (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 def current_render_keys(rows):
-    return {key for key, row in rows.items() if row.get("render_version") == policy.render_version(row["cycle"],row["model"],row.get("product"),row.get("domain"))}
+    return {key for key,row in rows.items() if policy.render_is_current(row)}
 
 
 def resolve_plan(models, cycle=None, requested_hours=None, now=None, start_cycle=None):

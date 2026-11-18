@@ -19,18 +19,30 @@ TITLES["ukmo"] = "UKMO (UM N1280 L70)"
 MAX_IMAGE_BYTES = 14_000_000_000
 PIPELINE_VERSION = 7
 WINTER_DIAGNOSTIC_CUTOVER = "2026111800"
+WINTER_REGION_CUTOVER = "2026111812"
 KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
 
 
+def winter_composite(cycle,model,product,domain):
+    return (model in {"aifs","gfs","cmc","ecmwf","icon","ukmo"} and winter(model,cycle) and domain=="hkor"
+            and product in {"surfce","acptot","acptot1","acrain","acrain1"})
+
+
 def render_version(cycle,model=None,product=None,domain=None):
-    if (model in {"aifs","gfs","cmc","ecmwf","icon","ukmo"} and winter(model,cycle) and domain=="hkor"
-            and product in {"surfce","acptot","acptot1","acrain","acrain1"}):
-        return 10
+    if winter_composite(cycle,model,product,domain):
+        return 10 if cycle>=WINTER_REGION_CUTOVER else 9 if model=="ukmo" else 8
     if cycle >= WINTER_DIAGNOSTIC_CUTOVER:
         if model in {"gfs","ukmo"} and domain=="hkor" and product in {"surfce","acptot","acptot1","acrain","acrain1"}:
             return 7
         return 5 if model=="ukmo" else 4
     return 3 if cycle >= ASIA_LAYOUT_CUTOVER else 2
+
+
+def render_is_current(row):
+    cycle,model,product,domain=row["cycle"],row["model"],row.get("product"),row.get("domain")
+    if cycle<WINTER_REGION_CUTOVER and winter_composite(cycle,model,product,domain):
+        return True
+    return row.get("render_version")==render_version(cycle,model,product,domain)
 
 
 def ukmo_full_catalog(cycle,hour):

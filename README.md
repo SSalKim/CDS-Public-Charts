@@ -38,9 +38,11 @@ The [CDS viewer](https://ssalkim.github.io/CDS/) and VTG remain in
   filter on SWE. The strict `>0.25 kg/m2` display cutoff is shared by all models.
   Surface occurrence conditions remain part of SR depth conversion, not SWE.
   `ukmo-winter-v3-native-swe` isolates step and cumulative checkpoints from the
-  superseded exp3 caches. Render revision 10 refreshes snow-capable winter Korea
-  composites and aliases for the shared precipitation boundary. Previously
-  published older images remain visible until replacement, behind new operational work.
+  superseded exp3 caches. The shared precipitation boundary (render revision 10)
+  starts at initialization `2026111812`. Existing winter Korea composites and
+  aliases from earlier cycles are accepted at their published revisions and are
+  not rebuilt for these changes. Missing older products may still be completed;
+  nothing already published is rolled back or deleted for a style update.
 - `PUBLIC_CHARTS_ENABLED=true` enables production; `false` blocks production
   dispatches while still allowing a non-mutating dry run.
 - `PUBLIC_CHARTS_START_CYCLE=2026111512` preserves the production start boundary.
