@@ -175,6 +175,9 @@ class LayoutTests(unittest.TestCase):
                             self.assertEqual(label.get_text(),"Diagnostic")
                             renderer=figure.canvas.get_renderer()
                             self.assertGreaterEqual(label.get_window_extent(renderer).y0,threshold.get_window_extent(renderer).y1)
+                            self.assertLess(label.get_window_extent(renderer).y0-threshold.get_window_extent(renderer).y1,3)
+                            self.assertEqual(label.get_position(),(.515,.031))
+                            self.assertEqual(threshold.get_position(),(.515,.017))
                             self.assertIn("Snow > 0.25",threshold.get_text())
                             self.assertGreater(threshold.get_window_extent(renderer).y0,0)
                         else:
@@ -200,7 +203,8 @@ class LayoutTests(unittest.TestCase):
         def capture(figure):
             if hasattr(figure,"texts"):
                 label=next(t for t in figure.texts if t.get_gid()=="diagnostic-snow-note")
-                positions.append(tuple(label.get_position()))
+                threshold=next(t for t in figure.texts if t.get_gid()=="rain-threshold-note")
+                positions.append((tuple(label.get_position()),tuple(threshold.get_position())))
             close(figure)
         with patch("cartopy.mpl.geoaxes.GeoAxes.add_feature"), \
              patch.object(plotter,"korean_admin_boundaries",return_value=[]), \

@@ -40,8 +40,8 @@ class UkmoExtensionPolicyTests(unittest.TestCase):
         self.assertEqual(current_render_keys(rows),{"new","gfs"})
 
     def test_diagnostic_layout_revision_refreshes_only_snow_composites(self):
-        self.assertEqual(policy.render_version("2026111800","gfs","acptot","hkor"),6)
-        self.assertEqual(policy.render_version("2026111800","ukmo","acrain1","hkor"),6)
+        self.assertEqual(policy.render_version("2026111800","gfs","acptot","hkor"),7)
+        self.assertEqual(policy.render_version("2026111800","ukmo","acrain1","hkor"),7)
         self.assertEqual(policy.render_version("2026111800","gfs","surfce","asia"),4)
         self.assertEqual(policy.render_version("2026111800","gfs","gph500","hkor"),4)
         self.assertEqual(policy.render_version("2026111800","aifs","acptot","hkor"),4)

@@ -17,7 +17,7 @@ TITLES = {"aifs": "ECMWF AIFS-Single (N320)", "gfs": "NCEP GFS (C768 L127)",
 TITLES["icon"] = "DWD ICON (R03B07 L120)"
 TITLES["ukmo"] = "UKMO (UM N1280 L70)"
 MAX_IMAGE_BYTES = 14_000_000_000
-PIPELINE_VERSION = 6
+PIPELINE_VERSION = 7
 WINTER_DIAGNOSTIC_CUTOVER = "2026111800"
 KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
 
@@ -25,7 +25,7 @@ KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/(\d{10})/(\d{3})
 def render_version(cycle,model=None,product=None,domain=None):
     if cycle >= WINTER_DIAGNOSTIC_CUTOVER:
         if model in {"gfs","ukmo"} and domain=="hkor" and product in {"surfce","acptot","acptot1","acrain","acrain1"}:
-            return 6
+            return 7
         return 5 if model=="ukmo" else 4
     return 3 if cycle >= ASIA_LAYOUT_CUTOVER else 2
 
