@@ -1,9 +1,42 @@
 """Selective display filtering of complete closed contours, never terrain holes."""
 import numpy as np
+from scipy.ndimage import gaussian_filter
+
+from . import policy
 
 GRAVITY = 9.80665
 QUALITY_VERSION = 3
 TIBET_BOUNDS = (25, 40, 70, 105)
+
+
+# Reduced MSLP is unreliable where the surface is high: the reduction extrapolates through a
+# fictitious air column, producing grid-scale bulls-eyes over the Tibetan Plateau. KMA charts keep
+# the model's values but draw broad, smooth isobars there. Blend towards a 250 km Gaussian mean
+# as terrain rises from 0.7 to 2 km (Mongolian, Qaidam and Qilian ranges included). The Korea map has no such
+# plateau and is never smoothed, so its mountain isobars stay exactly as published.
+TERRAIN_SMOOTH_LOW, TERRAIN_SMOOTH_HIGH, TERRAIN_SMOOTH_KM = 700., 2000., 250.
+
+
+def terrain_weighted_pressure(pressure, terrain, latitude, longitude):
+    weight = np.clip((terrain - TERRAIN_SMOOTH_LOW) / (TERRAIN_SMOOTH_HIGH - TERRAIN_SMOOTH_LOW), 0, 1)
+    if not np.any(weight):
+        return pressure
+    dy = float(np.median(np.abs(np.diff(latitude)))) * 111
+    dx = float(np.median(np.abs(np.diff(longitude)))) * 111 * np.cos(np.deg2rad(35))
+    finite = np.isfinite(pressure)
+    filled = np.where(finite, pressure, np.nanmean(pressure))
+    smooth = gaussian_filter(filled, (TERRAIN_SMOOTH_KM / dy, TERRAIN_SMOOTH_KM / dx), mode="nearest")
+    return np.where(finite, (1 - weight) * pressure + weight * smooth, pressure)
+
+
+def display_fields(arrays, cycle, domain="asia"):
+    """Fields as drawn: from the KMA-style cutover, Asia MSLP is terrain-smoothed for every model."""
+    if (domain != "asia" or not policy.kma_style(cycle) or "pressure_msl" not in arrays or "terrain_height" not in arrays
+            or np.shape(arrays["pressure_msl"]) != np.shape(arrays["terrain_height"])):
+        return arrays
+    smoothed = terrain_weighted_pressure(arrays["pressure_msl"], arrays["terrain_height"],
+                                         arrays["latitude"], arrays["longitude"])
+    return arrays if smoothed is arrays["pressure_msl"] else {**arrays, "pressure_msl": smoothed}
 
 
 def terrain_masks(arrays):

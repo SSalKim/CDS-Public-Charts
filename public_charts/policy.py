@@ -24,6 +24,10 @@ UKMO_DATELINE_CUTOVER = "2026111812"
 # 256-colour palette encoding starts here; earlier cycles keep their images and versions.
 PALETTE_CUTOVER = "2026111912"
 PALETTE_RENDER_STEP = 100
+# KMA-style drawing: terrain-weighted MSLP smoothing and one km-based extrema policy for every
+# model. Earlier cycles keep their images and versions.
+KMA_STYLE_CUTOVER = "2026111912"
+KMA_STYLE_RENDER_STEP = 200
 KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
 
 
@@ -36,9 +40,14 @@ def palette_enabled(cycle):
     return cycle>=PALETTE_CUTOVER
 
 
+def kma_style(cycle):
+    return cycle>=KMA_STYLE_CUTOVER
+
+
 def render_version(cycle,model=None,product=None,domain=None):
     base=_layout_render_version(cycle,model,product,domain)
-    return base+PALETTE_RENDER_STEP if palette_enabled(cycle) else base
+    return (base+(PALETTE_RENDER_STEP if palette_enabled(cycle) else 0)
+            +(KMA_STYLE_RENDER_STEP if kma_style(cycle) else 0))
 
 
 def _layout_render_version(cycle,model=None,product=None,domain=None):

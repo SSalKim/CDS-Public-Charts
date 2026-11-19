@@ -14,7 +14,7 @@ from .chart_style import PUBLIC_PROFILE, PUBLIC_IMAGE_SIZES
 from .diagnostics import interpolate
 from .extended_sources import ExtraFields, winter_fields
 from .plotter import render
-from .quality import closed_contour_predicate
+from .quality import closed_contour_predicate, display_fields
 from .sources import MODELS, collect, accumulation_hours, NotReady
 
 WINTER_COMPOSITE_SIZES = {False: (1750, 660), True: (600, 2000)}
@@ -180,6 +180,7 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
 
     def draw(arrays, product, domain, *, accumulation=None, pressure_only=False):
         started = time.monotonic()
+        arrays = display_fields(arrays, cycle, domain)
         if progress:
             progress("product_started", {"product": product, "domain": domain})
         frame = render(arrays, cycle, hour, product, domain, None, accumulation,

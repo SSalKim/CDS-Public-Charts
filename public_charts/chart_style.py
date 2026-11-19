@@ -140,6 +140,38 @@ def center_parameters(domain, kind, model_id=None):
     return {"pressure": (.6, 500), "height": (4, 400), "temperature": (.35, 350)}[kind]
 
 
+# KMA-style extrema (cycles from policy.KMA_STYLE_CUTOVER): one table for every model.
+# smooth_km makes detection independent of the native grid; spacing_km keeps centres of the same
+# kind apart (H from H, L from L) while opposite kinds may sit close; limit caps each kind.
+# Korea is a zoomed map, so it resolves smaller features with a shorter spacing.
+KMA_CENTER_RULES = {
+    "asia": {"pressure": {"prominence": .8, "radius": 550, "smooth_km": 45, "spacing_km": 1000, "limit": 8},
+             "height": {"prominence": 5, "radius": 500, "smooth_km": 45, "spacing_km": 1000, "limit": 7},
+             "temperature": {"prominence": 1, "radius": 550, "smooth_km": 45, "spacing_km": 1000, "limit": 6},
+             "temperature_strict": {"prominence": 1.5, "radius": 550, "smooth_km": 45, "spacing_km": 1100, "limit": 6}},
+    "hkor": {"pressure": {"prominence": .5, "radius": 170, "smooth_km": 22, "spacing_km": 330, "limit": 4},
+             "height": {"prominence": 3, "radius": 170, "smooth_km": 22, "spacing_km": 330, "limit": 4},
+             "temperature": {"prominence": .5, "radius": 200, "smooth_km": 22, "spacing_km": 330, "limit": 4},
+             "temperature_strict": {"prominence": 1, "radius": 200, "smooth_km": 22, "spacing_km": 360, "limit": 3}},
+}
+KMA_NUMERIC_RULES = {
+    "asia": {"precipitation": {"radius": 260, "prominence": .4, "minimum": 1, "smooth_km": 45},
+             "wind": {"radius": 450, "prominence": 4, "minimum": 0, "smooth_km": 45},
+             "vorticity": {"radius": 500, "prominence": 2, "minimum": 5, "smooth_km": 45}},
+    "hkor": {"precipitation": {"radius": 130, "prominence": .2, "minimum": 1, "smooth_km": 22},
+             "wind": {"radius": 200, "prominence": 2.5, "minimum": 0, "smooth_km": 22},
+             "vorticity": {"radius": 220, "prominence": 1.2, "minimum": 4, "smooth_km": 22}},
+}
+
+
+def kma_center_rule(domain, kind):
+    return KMA_CENTER_RULES[domain][kind]
+
+
+def kma_numeric_rule(domain, kind):
+    return KMA_NUMERIC_RULES[domain][kind]
+
+
 def numeric_extrema_parameters(domain, kind, model_id=None):
     korea = domain == "hkor"
     if model_id in {"gfs","icon"}:
