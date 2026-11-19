@@ -198,6 +198,10 @@ def equivalent_potential_temperature(arrays, level):
     return mpcalc.equivalent_potential_temperature(level * units.hPa, temp, dewpoint).to("K").m
 
 
+# How far past the frame (fraction of the map) a KMA-style centre may sit and still show its cut label.
+FRAME_SPILL = .02
+
+
 def smooth_valid(value, sigma, valid_mask=None):
     if valid_mask is None:
         return gaussian_filter(value, sigma)
@@ -206,14 +210,11 @@ def smooth_valid(value, sigma, valid_mask=None):
     return np.divide(values,weights,out=np.zeros_like(values),where=weights>1e-8)
 
 
-def extrema_candidates(value, latitude, longitude, radius_km, prominence, high, valid_mask=None, smooth_km=None,
-                       frame_mask=None):
+def extrema_candidates(value, latitude, longitude, radius_km, prominence, high, valid_mask=None, smooth_km=None):
     """Find distinct closed extrema, rejecting flat and weak undulations.
 
     smooth_km sets the pre-smoothing in kilometres so every model is judged at the same
     effective resolution; without it the legacy 0.8-cell smoothing is used.
-    frame_mask limits the judgement to what the map shows: a field still rising at the frame
-    peaks on the frame, as on KMA charts.
     """
     lat_step = float(np.median(np.abs(np.diff(latitude))))
     lon_step = float(np.median(np.abs(np.diff(longitude))))
@@ -226,10 +227,6 @@ def extrema_candidates(value, latitude, longitude, radius_km, prominence, high, 
     sigma = .8 if smooth_km is None else (smooth_km / (111 * lat_step), smooth_km / (111 * .8 * lon_step))
     smooth = smooth_valid(np.asarray(value, dtype=float),sigma,valid_mask)
     allowed = valid_mask
-    if frame_mask is not None:
-        allowed = frame_mask if valid_mask is None else (np.asarray(valid_mask, dtype=bool) & frame_mask)
-        if not np.any(allowed):
-            return []
     search = smooth if allowed is None else np.where(allowed,smooth,-np.inf if high else np.inf)
     background = smooth_valid(smooth,(max(2,ry/2),max(2,rx/2)),allowed)
     strength = (smooth - background) * (1 if high else -1)
@@ -240,8 +237,6 @@ def extrema_candidates(value, latitude, longitude, radius_km, prominence, high, 
     peaks = (smooth == neighborhood) & (strength > max(prominence, tolerance)) & np.isfinite(value)
     if valid_mask is not None:
         peaks &= binary_erosion(valid_mask,iterations=3)
-    if frame_mask is not None:
-        peaks &= frame_mask
     peaks[:2] = peaks[-2:] = False
     peaks[:, :2] = peaks[:, -2:] = False
     if np.any(peaks):
@@ -597,8 +592,8 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             px, py = projection.transform_point(lon, lat, plate)
             nx = (px-spec["xlim"][0]) / np.ptp(spec["xlim"])
             ny = (py-spec["ylim"][0]) / np.ptp(spec["ylim"])
-            # KMA keeps a centre right at the frame and lets the frame cut its mark or value.
-            if not ((0 <= nx <= 1 and 0 <= ny <= 1) if edge else (.025 < nx < .975 and .045 < ny < .955)):
+            # KMA keeps a centre at (or just past) the frame and lets the frame cut its mark or value.
+            if not ((-FRAME_SPILL <= nx <= 1+FRAME_SPILL and -FRAME_SPILL <= ny <= 1+FRAME_SPILL) if edge else (.025 < nx < .975 and .045 < ny < .955)):
                 return None
             sx, sy = ax.transData.transform((px, py))
             return lon, lat, px, py, sx, sy
@@ -679,9 +674,10 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                 pin(lon, lat, color)
                 stroke = [effects.withStroke(linewidth=1.2, foreground=(1, 1, 1, .7))]
                 for text, offset, size, va in ((mark, 5, 10.5, "bottom"), (f"{actual:.0f}", -5, 8.7, "top")):
+                    # The map outline cuts a label that spills past the frame, as on KMA charts.
                     ax.annotate(text, (px, py), xytext=(0, offset), textcoords="offset points", color=color,
-                                fontsize=fs(size), ha="center", va=va, zorder=9, annotation_clip=True,
-                                path_effects=stroke, clip_on=True, gid=f"center-{kind}-{mark}")
+                                fontsize=fs(size), ha="center", va=va, zorder=9, annotation_clip=False,
+                                path_effects=stroke, clip_on=True, gid=f"center-{kind}-{mark}").set_clip_path(ax.patch)
 
         def centers(value, modes, kind,valid_mask=None,*,strict=False):
             if public and kma_style(cycle):
@@ -735,20 +731,17 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             settings = kma_numeric_rule(domain, kind) if kma else numeric_extrema_parameters(domain, kind, model_id if public else None)
             selected=base_grid if grid is None else grid
             modes = (True,) if kind == "precipitation" else (True, False)
-            frame = None
-            if kma and settings.get("frame"):
-                nx = (selected["projected"][:,:,0]-spec["xlim"][0]) / np.ptp(spec["xlim"])
-                ny = (selected["projected"][:,:,1]-spec["ylim"][0]) / np.ptp(spec["ylim"])
-                frame = (nx >= 0) & (nx <= 1) & (ny >= 0) & (ny <= 1)
             candidates = [item for high in modes for item in
                           extrema_candidates(value, selected["latitude"], selected["longitude"],
                                              settings["radius"], settings["prominence"], high,valid_mask,
-                                             smooth_km=settings.get("smooth_km") if kma else None, frame_mask=frame)]
+                                             smooth_km=settings.get("smooth_km") if kma else None)]
             occupied = []
             floor = max(threshold, settings["minimum"])
             if kind == "precipitation" and settings.get("relative_minimum"):
                 # More, smaller maxima are shown, but not the trace amounts at the rim of a heavy area.
-                shown_values = np.asarray(value, dtype=float)[frame] if frame is not None else np.asarray(value, dtype=float)
+                nx = (selected["projected"][:,:,0]-spec["xlim"][0]) / np.ptp(spec["xlim"])
+                ny = (selected["projected"][:,:,1]-spec["ylim"][0]) / np.ptp(spec["ylim"])
+                shown_values = np.asarray(value, dtype=float)[(nx >= 0) & (nx <= 1) & (ny >= 0) & (ny <= 1)]
                 if shown_values.size and np.isfinite(shown_values).any():
                     floor = max(floor, settings["relative_minimum"] * float(np.nanmax(shown_values)))
             for _, row, col, actual in sorted(candidates, reverse=True):
@@ -756,8 +749,8 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     continue
                 if kind == "vorticity" and abs(actual) < settings["minimum"]:
                     continue
-                # KMA-style rain and snow maxima may sit on the frame, like KMA's own charts.
-                point = annotation_point(row, col,grid,edge=kma and kind == "precipitation")
+                # KMA-style maxima may sit on the frame, cut by it like KMA's own charts.
+                point = annotation_point(row, col,grid,edge=kma)
                 if point is None:
                     continue
                 lon, lat, px, py, sx, sy = point
@@ -766,14 +759,10 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     continue
                 text = str(int(np.rint(actual)))
                 pin(lon, lat, color, 8)
-                if frame is not None:
-                    # A maximum on the frame keeps its mark there; its number moves just inside.
-                    px = float(np.clip(px, spec["xlim"][0]+.02*np.ptp(spec["xlim"]), spec["xlim"][1]-.02*np.ptp(spec["xlim"])))
-                    py = float(np.clip(py, spec["ylim"][0]+.035*np.ptp(spec["ylim"]), spec["ylim"][1]-.005*np.ptp(spec["ylim"])))
                 ax.annotate(text, (px, py), xytext=(0, -4), textcoords="offset points", color=color,
-                            fontsize=fs(7), ha="center", va="top", zorder=8, annotation_clip=True, clip_on=True,
+                            fontsize=fs(7), ha="center", va="top", zorder=8, annotation_clip=not kma, clip_on=True,
                             path_effects=[effects.withStroke(linewidth=1, foreground=(1, 1, 1, .7))],
-                            gid=f"{kind}-extreme")
+                            gid=f"{kind}-extreme").set_clip_path(ax.patch)
                 occupied.append((sx, sy))
 
         def pressure_centers():
