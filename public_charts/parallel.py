@@ -466,8 +466,10 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
         raise ValueError("Use one to four workers; a local cache override requires one")
     if renderer is not None and prefetcher is None:
         prefetch = False
-    if prepare_workers not in (1, 2):
-        raise ValueError("Use one or two bounded preparation workers")
+    # Preparation is mostly network wait, so a slow source (CMC, ICON) must not hold every
+    # slot while fast sources queue behind it. The memory budget still gates each start.
+    if prepare_workers not in (1, 2, 3, 4):
+        raise ValueError("Use one to four bounded preparation workers")
     prepare_workers = prepare_workers if prefetch else 0
     cleanup_models = set(queue.queues)
     memory_budget = memory_budget or WorkerMemoryBudget(workers)

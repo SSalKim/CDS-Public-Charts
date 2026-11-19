@@ -538,6 +538,13 @@ class ActionRoleTests(unittest.TestCase):
                 self.assertEqual(image.size,(910,660))
                 self.assertEqual(image.getpixel((0,0)),(0,80,180))
 
+    def test_coordinator_uses_four_preparation_workers_unless_configured(self):
+        env = {"CHART_WORK": "/tmp/charts", "DRY_RUN": "false"}
+        args = action_args("coordinator", env)
+        self.assertEqual(args[args.index("--prepare-workers") + 1], "4")
+        args = action_args("coordinator", {**env, "PREPARE_WORKERS_INPUT": "2"})
+        self.assertEqual(args[args.index("--prepare-workers") + 1], "2")
+
     def test_only_non_forced_continuous_production_adds_a_helper(self):
         env = {"CHART_WORK":"/tmp/charts","DRY_RUN":"false","HELPER_AVAILABLE":"true"}
         self.assertIn("--remote-helper",action_args("coordinator",env))

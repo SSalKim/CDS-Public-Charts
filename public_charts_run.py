@@ -287,6 +287,8 @@ def run(args, store=None):
     reserve_bytes = 0
     before_ids = {item["id"] for item in inventory} | {row["file_id"] for row in rows.values()}
     upload_workers = getattr(args, "upload_workers", 1)
+    # Tests and older callers omit the option; production defaults to four.
+    prepare_workers = getattr(args, "prepare_workers", 2)
     uploader = UploadPool(store, upload_workers) if not local else None
     pending_bytes = 0
     publication_dirty = False
@@ -574,7 +576,7 @@ def run(args, store=None):
             remote = None
 
     print(json.dumps({"event": "runtime_profile", "workers": args.workers, "upload_workers": upload_workers,
-                      "prepare_workers":0 if local else 2,"prepared_queue_limit":args.workers+(0 if local else 2),
+                      "prepare_workers":0 if local else prepare_workers,"prepared_queue_limit":args.workers+(0 if local else prepare_workers),
                       "heavy_workers":memory_budget.snapshot()["heavy_workers"],
                       "resource_policy":"measured_worker_memory",
                       "cpu_capacity": cpu_capacity(), "available_memory_mib": round(available_memory()/1024**2, 1) if available_memory() is not None else None,
@@ -606,7 +608,7 @@ def run(args, store=None):
                       progress=lambda event: print(json.dumps(event), flush=True), on_idle=tick,
                       cleanup_staged=False,keep_alive=remote.keep_alive if remote else None,
                       can_prepare=lambda:batch_window.deadline is None or time.monotonic()<batch_window.deadline-90,
-                      memory_budget=memory_budget)
+                      memory_budget=memory_budget,prepare_workers=prepare_workers)
     except BudgetReached:
         pass
     except BaseException as exception:
@@ -677,6 +679,8 @@ def main():
     parser.add_argument("--workers", choices=("auto", "1", "2", "3", "4"), default="auto",
                         help="Separate renderers, capped by available CPU and memory")
     parser.add_argument("--upload-workers", type=int, choices=(1, 2, 3, 4), default=3)
+    parser.add_argument("--prepare-workers", type=int, choices=(1, 2, 3, 4), default=4,
+                        help="Concurrent source downloads/preparations; memory-gated like renders")
     parser.add_argument("--time-budget-minutes", type=float, default=0,
                         help="Continuously refresh ready work until the dispatch budget expires")
     parser.add_argument("--adaptive-rollover",action="store_true",
