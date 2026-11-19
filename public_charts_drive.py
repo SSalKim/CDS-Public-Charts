@@ -670,8 +670,26 @@ class ChartDriveStore:
         except (ValueError, TypeError, UnicodeError):
             raise ChartDriveError("Managed JSON content is invalid.") from None
 
-    def write_json(self, name: str, payload: Any) -> dict:
-        """Create/update a private managed JSON blob; reject stale ETag updates."""
+    def write_json(self, name: str, payload: Any, *, attempts: int = 3) -> dict:
+        """Create/update a private managed JSON blob; reject stale ETag updates.
+
+        Transient failures (timeouts, 5xx, rate limits) retry the whole write. Each attempt
+        re-reads the file: content already stored by a timed-out request is detected and
+        returned, and any other change gets a fresh ETag precondition.
+        """
+        for attempt in range(attempts):
+            try:
+                return self._write_json_once(name, payload)
+            except ChartDriveError as error:
+                if not error.transient or attempt == attempts - 1:
+                    raise
+                print(json.dumps({"event": "drive_json_retry", "name": name, "attempt": attempt + 1,
+                                  "reason": error.reason, "http_status": error.http_status,
+                                  "retry_after_seconds": 2 ** (attempt + 1)}), flush=True)
+                time.sleep(2 ** (attempt + 1))
+        raise AssertionError("unreachable")
+
+    def _write_json_once(self, name: str, payload: Any) -> dict:
         self._json_name(name)
         try:
             data = (json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False,

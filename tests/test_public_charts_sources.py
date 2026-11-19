@@ -83,6 +83,21 @@ class FileSizeTests(unittest.TestCase):
         with self.assertRaises(requests.HTTPError):
             self.client.file_size("https://example.invalid/data.grib2")
 
+    def test_redirect_page_instead_of_data_is_deferred_not_a_corrupt_forecast(self):
+        # NOMADS answered an AIGFS byte-range request with a 718-byte 302 page (2026-11-18 18Z f132).
+        from public_charts.sources import SourceDeferred
+        self.client.session.get.return_value = response(302, content=b"<html>moved</html>")
+        with patch("sys.stdout"), self.assertRaises(SourceDeferred) as caught:
+            self.client.get("https://nomads.example.invalid/aigfs.grib2", (0, 1945345), attempts=1)
+        self.assertEqual(caught.exception.reason, "source_redirect")
+
+    def test_redirected_mirror_with_other_missing_copy_is_pending(self):
+        from public_charts.sources import SourceDeferred
+        client = Mock()
+        client.get.side_effect = [SourceDeferred("source_redirect"), NotReady("Missing")]
+        with self.assertRaises(NotReady):
+            Provider("aigfs", client).fetch("2026111818", 132, {"pressure_msl"})
+
     def test_last_ncep_field_uses_real_size_and_never_reversed_range(self):
         client = Mock()
         client.get.side_effect = lambda url, *args, **kwargs: (

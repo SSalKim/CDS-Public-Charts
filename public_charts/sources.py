@@ -188,6 +188,13 @@ class HttpCache:
                 self.requests += 1
                 if response.status_code in (404, 410):
                     raise NotReady(f"HTTP {response.status_code}: {url}")
+                if 300 <= response.status_code < 400:
+                    # NOMADS answers throttled or maintenance requests with a small redirect page
+                    # instead of data. That is a temporary source state, not a corrupt forecast.
+                    print(json.dumps({"event":"source_redirected",**self.context,
+                                      "source_host":urlsplit(url).hostname,
+                                      "http_status":response.status_code}),flush=True)
+                    raise SourceDeferred("source_redirect")
                 if response.status_code in (429, 500, 502, 503, 504) and attempt < attempts-1:
                     time.sleep(min(max(0,deadline-time.monotonic()),30,max(2,Retry().get_retry_after(response) or 3)))
                     continue
