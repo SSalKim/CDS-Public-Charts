@@ -268,8 +268,8 @@ def main():
     parser.add_argument("--workdir",type=Path,required=True)
     parser.add_argument("--smoke",action="store_true")
     args = parser.parse_args()
-    if any(name.startswith("PUBLIC_CHARTS_DRIVE") for name in os.environ):
-        raise RuntimeError("Compute helper must not receive Drive credentials")
+    if any(name.startswith(("PUBLIC_CHARTS_DRIVE", "PUBLIC_CHARTS_R2")) for name in os.environ):
+        raise RuntimeError("Compute helper must not receive Drive or R2 credentials")
     workers = 2 if args.smoke else worker_count()
     return ComputeHelper(GitHubArtifacts(),args.session,args.code_sha,args.workdir,workers,smoke=args.smoke).run()
 

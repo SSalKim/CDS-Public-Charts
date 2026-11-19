@@ -759,6 +759,57 @@ class FakeStore:
                 "size": Path(path).stat().st_size, "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest()}
 
 
+class R2DualWriteTests(unittest.TestCase):
+    def test_coordinator_mirrors_every_git_manifest_to_r2_and_forces_the_last_one(self):
+        from public_charts import r2
+
+        class DriveStore(FakeStore):
+            def upload_image(self, path, key):
+                record = super().upload_image(path, key)
+                file_id = hashlib.sha256(key.encode()).hexdigest()[:20]
+                return {**record, "file_id": file_id, "url": r2.DRIVE_URL.format(file_id)}
+
+        class Client:
+            writes = reads = 0
+            def __init__(self):
+                self.objects = {}
+            def put(self, key, body, **kwargs):
+                self.writes += 1
+                self.objects[key] = body
+            def get(self, key):
+                self.reads += 1
+                return self.objects.get(key)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = argparse.Namespace(models=["aifs", "gfs"], cycle=CYCLE, hours=[0],
+                                      start_cycle=None, dry_run=False, workdir=root / "work", local=False,
+                                      max_leads=1, force=False, workers=1, cache_root=None,
+                                      max_bytes=1_000_000, manifest=root / "manifest.json",
+                                      publish_incremental=True, fail_fast=True)
+            client, forced = Client(), []
+            publisher = r2.R2Publisher(client, emit=lambda item: None)
+            original = publisher.publish
+            def publish(manifest, *, force=False):
+                forced.append(force)
+                return original(manifest, force=force)
+            publisher.publish = publish
+            def execute(*positional, **kwargs):
+                return execute_leads(*positional, **kwargs, renderer=sample_renderer)
+            with patch("public_charts_run.execute_leads", side_effect=execute),                  patch("public_charts_run.verify_public_url"),                  patch("public_charts_run.publish_manifest"),                  patch("public_charts.r2.publisher_from_env", return_value=("shadow", publisher)):
+                self.assertEqual(run(args, DriveStore()), 0)
+            self.assertTrue(forced and forced[-1], "The final snapshot must bypass write coalescing")
+            index = json.loads(client.objects[r2.INDEX_KEY])
+            manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+            self.assertEqual(sum(item["count"] for item in index["runs"].values()), len(manifest["charts"]))
+            self.assertEqual(set(index["runs"]), {f"aifs/{CYCLE}", f"gfs/{CYCLE}"})
+            for run_name, item in index["runs"].items():
+                fragment = json.loads(client.objects[r2.fragment_key(run_name, item["rev"])])
+                urls = {r2.DRIVE_URL.format(chart[3]) for chart in fragment["charts"]}
+                self.assertEqual(urls, {row["url"] for row in manifest["charts"]
+                                        if f"{row['model']}/{row['cycle']}" == run_name})
+
+
 class CoordinatorTests(unittest.TestCase):
     def test_first_verified_image_is_public_while_its_lead_is_still_running(self):
         with tempfile.TemporaryDirectory() as directory:

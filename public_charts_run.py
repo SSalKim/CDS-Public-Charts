@@ -296,6 +296,15 @@ def run(args, store=None):
     source_monitor = None
     from public_charts.kma_gate import KmaReleaseGate
     kma_gate=KmaReleaseGate() if not local else None
+    r2 = None
+    if not local:
+        from public_charts import r2 as r2_publication
+        try:
+            r2_mode, r2 = r2_publication.publisher_from_env()
+        except ValueError as error:
+            print(json.dumps({"event": "r2_disabled", "reason": str(error)}), flush=True)
+        else:
+            print(json.dumps({"event": "r2_publication", "mode": r2_mode}), flush=True)
 
     def save_state():
         if local:
@@ -308,7 +317,7 @@ def run(args, store=None):
                                 if len(accounts) > 1 else {}),
                              "pending_delete_after": state.get("pending_delete_after", {})})
 
-    def snapshot():
+    def snapshot(final=False):
         nonlocal last_publication, publication_dirty
         if publication_dirty:
             save_state()
@@ -326,6 +335,9 @@ def run(args, store=None):
                    **({"storage_folders": store.storage_folders} if len(accounts) > 1 else {})})
         if args.publish_incremental:
             publish_manifest(ROOT)
+        if r2:
+            # Git stays authoritative during dual-write; R2 failures never stop production.
+            r2_publication.safe_publish(r2, manifest, force=final)
         last_publication = time.monotonic()
         publication_dirty = False
         now = datetime.now(timezone.utc)
@@ -420,6 +432,8 @@ def run(args, store=None):
             publication_dirty=True
         if not local and publication_dirty and time.monotonic() - last_publication >= publication_interval:
             snapshot()
+        elif r2 and r2.due():
+            r2_publication.safe_publish(r2, r2.latest)
 
     def consume(target, staged):
         model, cycle, hour = target["model"], target["cycle"], target["hour"]
@@ -593,7 +607,7 @@ def run(args, store=None):
         resource_usage = {**sampler.finish(),**memory_budget.summary()}
         save_state()
         if not local:
-            kept, delete_ids = snapshot()
+            kept, delete_ids = snapshot(final=True)
     if failure is not None:
         print(json.dumps({"event": "production_failed", "error": type(failure).__name__,
                           "chart_key": getattr(failure, "chart_key", None),
