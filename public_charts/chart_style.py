@@ -145,14 +145,14 @@ def center_parameters(domain, kind, model_id=None):
 # kind apart (H from H, L from L) while opposite kinds may sit close; limit caps each kind.
 # Korea is a zoomed map, so it resolves smaller features with a shorter spacing.
 KMA_CENTER_RULES = {
-    "asia": {"pressure": {"prominence": .8, "radius": 550, "smooth_km": 45, "spacing_km": 1000, "limit": 8},
-             "height": {"prominence": 5, "radius": 500, "smooth_km": 45, "spacing_km": 1000, "limit": 7},
-             "temperature": {"prominence": 1, "radius": 550, "smooth_km": 45, "spacing_km": 1000, "limit": 6},
-             "temperature_strict": {"prominence": 1.5, "radius": 550, "smooth_km": 45, "spacing_km": 1100, "limit": 6}},
-    "hkor": {"pressure": {"prominence": .5, "radius": 170, "smooth_km": 22, "spacing_km": 330, "limit": 4},
-             "height": {"prominence": 3, "radius": 170, "smooth_km": 22, "spacing_km": 330, "limit": 4},
-             "temperature": {"prominence": .5, "radius": 200, "smooth_km": 22, "spacing_km": 330, "limit": 4},
-             "temperature_strict": {"prominence": 1, "radius": 200, "smooth_km": 22, "spacing_km": 360, "limit": 3}},
+    "asia": {"pressure": {"prominence": .8, "radius": 550, "smooth_km": 45, "spacing_km": 1000, "limit": 8, "sparse_km": 1500, "sparse_relief": .5, "sparse_limit": 2},
+             "height": {"prominence": 5, "radius": 500, "smooth_km": 45, "spacing_km": 1000, "limit": 7, "sparse_km": 1500, "sparse_relief": .5, "sparse_limit": 2},
+             "temperature": {"prominence": 1, "radius": 550, "smooth_km": 45, "spacing_km": 1000, "limit": 6, "sparse_km": 1500, "sparse_relief": .5, "sparse_limit": 2},
+             "temperature_strict": {"prominence": 1.5, "radius": 550, "smooth_km": 45, "spacing_km": 1100, "limit": 6, "sparse_km": 1500, "sparse_relief": .5, "sparse_limit": 2}},
+    "hkor": {"pressure": {"prominence": .5, "radius": 170, "smooth_km": 22, "spacing_km": 330, "limit": 4, "sparse_km": 500, "sparse_relief": .5, "sparse_limit": 2},
+             "height": {"prominence": 3, "radius": 170, "smooth_km": 22, "spacing_km": 330, "limit": 4, "sparse_km": 500, "sparse_relief": .5, "sparse_limit": 2},
+             "temperature": {"prominence": .5, "radius": 200, "smooth_km": 22, "spacing_km": 330, "limit": 4, "sparse_km": 500, "sparse_relief": .5, "sparse_limit": 2},
+             "temperature_strict": {"prominence": 1, "radius": 200, "smooth_km": 22, "spacing_km": 360, "limit": 3, "sparse_km": 500, "sparse_relief": .5, "sparse_limit": 2}},
 }
 KMA_NUMERIC_RULES = {
     "asia": {"precipitation": {"radius": 260, "prominence": .4, "minimum": 1, "smooth_km": 45},
@@ -221,7 +221,12 @@ def seasonal_products(products,cycle):
                  or product in {f"gph{selected}",f"wnd{selected}"})
 
 
-def contour_steps(domain, level, profile=None):
+# Bold-line anchors that match KMA's KIM global charts (every 4th contour), checked on
+# 2026111900 KIM images for both maps. Used from the KMA-style cutover.
+KIM_HEIGHT_ANCHORS = {700: 3000, 850: 1500, 925: 810}
+
+
+def contour_steps(domain, level, profile=None, kma=False):
     korea = domain == "hkor"
     height = (30 if korea else 60) if level == 500 else (60 if level in (200, 300) else 30)
     steps = {"height": height,
@@ -246,4 +251,11 @@ def contour_steps(domain, level, profile=None):
             steps.update(height_major=60,height_anchor=5580,temperature_major=2,temperature_anchor=0)
         elif level in (700,850,925):
             steps.update(height_major=120,height_anchor={700:3060,850:1500,925:810}[level])
+    if profile == PUBLIC_PROFILE and kma:
+        if level in KIM_HEIGHT_ANCHORS:
+            # Asia used anchor 0 (bold 1440/1560 m at 850 hPa) and Korea 3060 m at 700 hPa.
+            steps.update(height_major=steps["height"]*4,height_anchor=KIM_HEIGHT_ANCHORS[level])
+        elif level==500 and korea:
+            # KIM Korea 500 hPa: 30 m contours bold every 120 m from 5580 m; isotherms bold every 4 C.
+            steps.update(height_major=120,temperature_major=4,temperature_anchor=0)
     return steps

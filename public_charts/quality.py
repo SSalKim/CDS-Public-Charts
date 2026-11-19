@@ -36,7 +36,10 @@ def display_fields(arrays, cycle, domain="asia"):
         return arrays
     smoothed = terrain_weighted_pressure(arrays["pressure_msl"], arrays["terrain_height"],
                                          arrays["latitude"], arrays["longitude"])
-    return arrays if smoothed is arrays["pressure_msl"] else {**arrays, "pressure_msl": smoothed}
+    if smoothed is arrays["pressure_msl"]:
+        return arrays
+    # The published field is kept for centre detection over lowlands, where both are identical.
+    return {**arrays, "pressure_msl": smoothed, "pressure_msl_published": arrays["pressure_msl"]}
 
 
 def terrain_masks(arrays):

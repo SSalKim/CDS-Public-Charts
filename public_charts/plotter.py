@@ -352,6 +352,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
     def fs(size):
         return size*font_scale
     field_masks = field_masks or {}
+    kma_drawing = public and kma_style(cycle)
     figure = None
     try:
         figure = plt.figure(figsize=spec["figsize"], dpi=160)
@@ -427,11 +428,11 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             ax.text(120, 70, "70N", transform=plate, fontsize=fs(5.4), color="#555555", ha="center", va="bottom",
                     bbox={"facecolor":"white", "edgecolor":"none", "alpha":.65, "pad":.3}, zorder=7)
 
-        def contour(value, levels, color="black", width=.55, text_size=7.7, smooth=True, label_levels=None, label_color=None,valid_mask=None,quality_kind=None,sparse_zero=False):
+        def contour(value, levels, color="black", width=.55, text_size=7.7, smooth=True, label_levels=None, label_color=None,valid_mask=None,quality_kind=None,sparse_zero=False,zorder=5):
             values = smooth_valid(value,sigma,valid_mask) if smooth else value
             allowed = visible if valid_mask is None else visible & valid_mask
             obj = ax.contour(projected[:, :, 0], projected[:, :, 1], np.ma.masked_where(~allowed, values),
-                             levels=levels, colors=color, linewidths=width, linestyles="solid", transform=projection, zorder=5,corner_mask=True)
+                             levels=levels, colors=color, linewidths=width, linestyles="solid", transform=projection, zorder=zorder,corner_mask=True)
             if contour_filter is not None and quality_kind is not None:
                 inverse=lambda points:plate.transform_points(projection,points[:,0],points[:,1])[:,:2]
                 obj.set_paths(prune_closed_paths(obj.get_paths(),obj.levels,
@@ -477,7 +478,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             return obj
 
         def height_contour(value, level, color=None, major_every=None):
-            steps = contour_steps(domain, level,profile)
+            steps = contour_steps(domain, level,profile,kma=kma_drawing)
             if major_every is not None:
                 steps.update(height_major=steps["height"]*major_every,
                              height_anchor={850:1500,925:810}[level])
@@ -488,13 +489,14 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             obj.set_gid("height-contours")
 
         def temperature_contour(value, level, major_every=None):
-            steps = contour_steps(domain, level,profile)
+            steps = contour_steps(domain, level,profile,kma=kma_drawing)
             levels = np.arange(-99 if level < 700 else -60, 51, steps["temperature"])
             major = steps["temperature"]*major_every if major_every is not None else steps["temperature_major"]
             widths = np.where((levels-steps.get("temperature_anchor",0)) % major == 0, .85, .35) if major else .5
             labels = levels[levels%steps["temperature_label"]==0] if product=="gph500" and "temperature_label" in steps else None
+            # KMA style: isotherms sit under the height contours.
             obj = contour(value, levels, "red", widths, 7 if level >= 700 else 7.7,
-                          label_levels=labels,valid_mask=field_masks.get(level))
+                          label_levels=labels,valid_mask=field_masks.get(level),zorder=4.8 if kma_drawing else 5)
             obj.set_gid("temperature-contours")
 
         def filled(value, levels, colors, over,valid_mask=None,grid=None,colorbar_levels=None,colorbar_extendfrac=0):
@@ -597,15 +599,28 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
         def kma_centers(value, modes, kind, valid_mask=None, *, strict=False):
             rule = kma_center_rule(domain, "temperature_strict" if strict and kind == "temperature" else kind)
             radii = (rule["radius"], rule["radius"]*2) if domain == "asia" and kind in ("pressure", "height") else (rule["radius"],)
-            for mark, high, color in modes:
+            quality_kind = "pressure" if kind == "pressure" else int(product[-3:]) if kind == "height" and not product.startswith("thk") else None
+
+            def usable(high, prominence):
                 found = {}
                 for radius in radii:
                     for item in extrema_candidates(value, arrays["latitude"], arrays["longitude"], radius,
-                                                   rule["prominence"], high, valid_mask, smooth_km=rule["smooth_km"]):
+                                                   prominence, high, valid_mask, smooth_km=rule["smooth_km"]):
                         if (item[1], item[2]) not in found or item[0] > found[(item[1], item[2])][0]:
                             found[(item[1], item[2])] = item
-                quality_kind = "pressure" if kind == "pressure" else int(product[-3:]) if kind == "height" and not product.startswith("thk") else None
-                usable = []
+                if kind == "pressure" and "pressure_msl_published" in arrays and "terrain_height" in arrays:
+                    # Terrain smoothing of nearby mountains can hide a genuine lowland centre (e.g. a
+                    # Caspian low beside the Caucasus). Below the smoothing threshold the published and
+                    # drawn values are identical, so lowland centres found there are added too.
+                    from .quality import TERRAIN_SMOOTH_LOW
+                    published = arrays["pressure_msl_published"]/100
+                    for radius in radii:
+                        for item in extrema_candidates(published, arrays["latitude"], arrays["longitude"], radius,
+                                                       prominence, high, valid_mask, smooth_km=rule["smooth_km"]):
+                            if arrays["terrain_height"][item[1], item[2]] < TERRAIN_SMOOTH_LOW and (
+                                    (item[1], item[2]) not in found or item[0] > found[(item[1], item[2])][0]):
+                                found[(item[1], item[2])] = item
+                result = []
                 for item in found.values():
                     point = annotation_point(item[1], item[2])
                     if point is None:
@@ -613,16 +628,36 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     if (contour_filter is not None and quality_kind is not None
                             and contour_filter(np.array([[point[0], point[1]]]), item[3], quality_kind)):
                         continue
-                    usable.append(item)
-                for _, row, col, actual in spaced_centers(usable, arrays["latitude"], arrays["longitude"],
-                                                          rule["spacing_km"], rule["limit"]):
-                    lon, lat, px, py, _, _ = annotation_point(row, col)
-                    pin(lon, lat, color)
-                    stroke = [effects.withStroke(linewidth=1.2, foreground=(1, 1, 1, .7))]
-                    for text, offset, size, va in ((mark, 5, 10.5, "bottom"), (f"{actual:.0f}", -5, 8.7, "top")):
-                        ax.annotate(text, (px, py), xytext=(0, offset), textcoords="offset points", color=color,
-                                    fontsize=fs(size), ha="center", va=va, zorder=9, annotation_clip=True,
-                                    path_effects=stroke, clip_on=True, gid=f"center-{kind}-{mark}")
+                    result.append(item)
+                return result
+
+            shown = [(mark, color, item) for mark, high, color in modes
+                     for item in spaced_centers(usable(high, rule["prominence"]), arrays["latitude"], arrays["longitude"],
+                                                rule["spacing_km"], rule["limit"])]
+            # A region with no centre at all may show up to two weaker ones (half the prominence),
+            # but only far from every centre already drawn, of either kind.
+            extras = sorted(((item, mark, color) for mark, high, color in modes
+                             for item in usable(high, rule["prominence"] * rule["sparse_relief"])),
+                            key=lambda entry: entry[0][0], reverse=True)
+            added = 0
+            for item, mark, color in extras:
+                if added >= rule["sparse_limit"]:
+                    break
+                if any((other[1], other[2]) == (item[1], item[2]) for _, _, other in shown):
+                    continue
+                if all(great_circle_km(arrays["latitude"][item[1]], arrays["longitude"][item[2]],
+                                       arrays["latitude"][other[1]], arrays["longitude"][other[2]]) >= rule["sparse_km"]
+                       for _, _, other in shown):
+                    shown.append((mark, color, item))
+                    added += 1
+            for mark, color, (_, row, col, actual) in shown:
+                lon, lat, px, py, _, _ = annotation_point(row, col)
+                pin(lon, lat, color)
+                stroke = [effects.withStroke(linewidth=1.2, foreground=(1, 1, 1, .7))]
+                for text, offset, size, va in ((mark, 5, 10.5, "bottom"), (f"{actual:.0f}", -5, 8.7, "top")):
+                    ax.annotate(text, (px, py), xytext=(0, offset), textcoords="offset points", color=color,
+                                fontsize=fs(size), ha="center", va=va, zorder=9, annotation_clip=True,
+                                path_effects=stroke, clip_on=True, gid=f"center-{kind}-{mark}")
 
         def centers(value, modes, kind,valid_mask=None,*,strict=False):
             if public and kma_style(cycle):
@@ -934,7 +969,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             level = 500 if product == "gph500" else (upper_level_override or (300 if product == "gph300" else upper_level(cycle)))
             height = arrays[f"geopotential_{level}"] / 9.80665
             temp = arrays[f"temperature_{level}"] - 273.15
-            steps = contour_steps(domain, level,profile)
+            steps = contour_steps(domain, level,profile,kma=kma_drawing)
             valid_mask=field_masks.get(level)
             if level == 500:
                 vort_valid=binary_erosion(valid_mask) if valid_mask is not None else None
@@ -964,7 +999,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             colors = THETA_COLORS[domain]
             valid_mask=field_masks.get(level)
             filled(theta, THETA_LEVELS, colors, colors[-1],valid_mask)
-            steps = contour_steps(domain, level,profile)
+            steps = contour_steps(domain, level,profile,kma=kma_drawing)
             anchor=steps.get("theta_anchor",240)
             first=240+(anchor-240)%steps["theta_e"]
             levels=np.arange(first,421,steps["theta_e"])
