@@ -81,5 +81,24 @@ def publish_manifest(root):
     return published
 
 
+def publish_r2(root, env=None, publisher=None):
+    """Final R2 publication before Drive cleanup.
+
+    In ``required`` mode a failure blocks cleanup, so R2 readers never see deleted images.
+    In ``shadow`` mode a failure is reported and Git remains the only gate.
+    """
+    from public_charts import r2
+    selected, publisher = (r2.mode(env), publisher) if publisher else r2.publisher_from_env(env)
+    if selected == "off":
+        return "off"
+    manifest = json.loads((Path(root).resolve() / MANIFEST).read_bytes())
+    status = r2.safe_publish(publisher, manifest, force=True)
+    if status == "failed" and selected == "required":
+        raise PublicationError("R2 manifest publication failed; cleanup is blocked")
+    return status
+
+
 if __name__ == "__main__":
-    publish_manifest(Path(__file__).resolve().parent)
+    ROOT = Path(__file__).resolve().parent
+    publish_manifest(ROOT)
+    publish_r2(ROOT)
