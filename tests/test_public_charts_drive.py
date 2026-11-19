@@ -806,6 +806,49 @@ class PublicChartDriveTests(unittest.TestCase):
                 self.store.write_json("state.json", payload)
                 self.assertEqual(payload, self.store.read_json("state.json", "absent"))
 
+    def json_update_failures(self, failures, *, commit_first=False, error=None):
+        from requests.exceptions import ReadTimeout
+        self.store.write_json("state.json", {"run": 1})
+        patches = []
+        def request(method, url, **kwargs):
+            if method in ("PATCH", "PUT") and "upload" in url:
+                patches.append(kwargs["data"])
+                if len(patches) <= failures:
+                    if commit_first and len(patches) == 1:
+                        self.client.dispatch(method, url, **kwargs)
+                    raise (error or ReadTimeout)("private-refresh-token")
+            return self.client.dispatch(method, url, **kwargs)
+        self.client.request.side_effect = request
+        return patches
+
+    def test_json_update_timeout_is_retried_with_a_fresh_precondition(self):
+        patches = self.json_update_failures(1)
+        with patch.object(charts.time, "sleep"), patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.store.write_json("state.json", {"run": 2})
+        self.assertEqual(len(patches), 2)
+        self.assertEqual({"run": 2}, self.store.read_json("state.json", None))
+        event = json.loads(output.getvalue())
+        self.assertEqual((event["event"], event["reason"]), ("drive_json_retry", "timeout"))
+        self.assertNotIn("private-refresh-token", output.getvalue())
+
+    def test_json_update_that_landed_before_the_timeout_is_not_written_twice(self):
+        patches = self.json_update_failures(1, commit_first=True)
+        with patch.object(charts.time, "sleep"), patch("sys.stdout", new_callable=io.StringIO):
+            self.store.write_json("state.json", {"run": 2})
+        self.assertEqual(len(patches), 1, "The retry sees the stored content and stops")
+        self.assertEqual({"run": 2}, self.store.read_json("state.json", None))
+
+    def test_json_update_retries_are_bounded_and_permanent_errors_are_not_retried(self):
+        patches = self.json_update_failures(5)
+        with patch.object(charts.time, "sleep"), patch("sys.stdout", new_callable=io.StringIO),                 self.assertRaises(charts.ChartDriveError) as caught:
+            self.store.write_json("state.json", {"run": 2})
+        self.assertEqual(len(patches), 3)
+        self.assertTrue(caught.exception.transient)
+        patches = self.json_update_failures(5, error=ValueError)
+        with patch.object(charts.time, "sleep"), self.assertRaises(charts.ChartDriveError):
+            self.store.write_json("state.json", {"run": 3})
+        self.assertEqual(len(patches), 1)
+
     def test_json_upload_integrity_failure_is_not_silently_accepted(self):
         self.client.corrupt_upload = True
         with self.assertRaisesRegex(charts.ChartDriveError, "integrity"):

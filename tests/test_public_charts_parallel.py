@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -865,6 +866,64 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(verify.call_count, 2)
             self.assertEqual(len({row["file_id"] for row in store.data["state.json"]["rows"]}), 2)
             self.assertEqual(json.loads((args.workdir / "cleanup-plan.json").read_text())["delete_ids"], [])
+
+    def test_drive_state_is_written_once_per_interval_and_always_at_the_end(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = argparse.Namespace(models=["aifs", "gfs"], cycle=CYCLE, hours=[0, 6],
+                                      start_cycle=None, dry_run=False, workdir=root / "work", local=False,
+                                      max_leads=2, force=False, workers=1, cache_root=None,
+                                      max_bytes=1_000_000, manifest=root / "manifest.json",
+                                      publish_incremental=True, fail_fast=True,
+                                      publish_interval_seconds=0, state_interval_seconds=3600)
+            store, writes, published = FakeStore(), [], []
+            original = store.write_json
+
+            def write_json(name, value):
+                writes.append(name)
+                original(name, value)
+            store.write_json = write_json
+
+            def execute(*positional, **kwargs):
+                return execute_leads(*positional, **kwargs, renderer=sample_renderer)
+
+            with patch("public_charts_run.execute_leads", side_effect=execute),                  patch("public_charts_run.verify_public_url"),                  patch("public_charts_run.publish_manifest", side_effect=lambda _: published.append(1)):
+                self.assertEqual(run(args, store), 0)
+            self.assertGreaterEqual(len(published), 4, "Git publication keeps its own short interval")
+            self.assertLessEqual(writes.count("manifest.json"), 2, "Drive manifest: first snapshot and final only")
+            self.assertLessEqual(writes.count("state.json"), 3, "Drive state: first, end-of-run and final only")
+            final = json.loads(args.manifest.read_text(encoding="utf-8"))
+            self.assertEqual(store.data["manifest.json"], final, "Cleanup requires the final Drive manifest")
+            self.assertEqual(len({row["file_id"] for row in store.data["state.json"]["rows"]}), 4)
+
+    def test_transient_mid_run_drive_write_failure_does_not_stop_production(self):
+        from public_charts_drive import ChartDriveError
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = argparse.Namespace(models=["aifs", "gfs"], cycle=CYCLE, hours=[0, 6],
+                                      start_cycle=None, dry_run=False, workdir=root / "work", local=False,
+                                      max_leads=2, force=False, workers=1, cache_root=None,
+                                      max_bytes=1_000_000, manifest=root / "manifest.json",
+                                      publish_incremental=True, fail_fast=True,
+                                      publish_interval_seconds=0, state_interval_seconds=0)
+            store, failed = FakeStore(), []
+            original = store.write_json
+
+            def write_json(name, value):
+                if name == "manifest.json" and not failed and "manifest.json" in store.data:
+                    failed.append(name)
+                    raise ChartDriveError("timeout", transient=True, reason="timeout")
+                original(name, value)
+            store.write_json = write_json
+
+            def execute(*positional, **kwargs):
+                return execute_leads(*positional, **kwargs, renderer=sample_renderer)
+
+            with patch("public_charts_run.execute_leads", side_effect=execute),                  patch("public_charts_run.verify_public_url"),                  patch("public_charts_run.publish_manifest"),                  patch("sys.stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(run(args, store), 0)
+            self.assertEqual(failed, ["manifest.json"])
+            self.assertIn('"event": "drive_manifest_deferred"', output.getvalue())
+            self.assertEqual(store.data["manifest.json"], json.loads(args.manifest.read_text(encoding="utf-8")))
 
     def test_upload_failure_keeps_verified_rows_only_and_blocks_failed_file_publication(self):
         with tempfile.TemporaryDirectory() as directory:

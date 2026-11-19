@@ -17,6 +17,7 @@ from threading import local
 from public_charts import policy
 from public_charts.dates import parse_cycle
 from public_charts.parallel import LeadQueue, child_path, cleanup_raw, cleanup_staging, execute_leads, model_workspace
+from public_charts_drive import ChartDriveError
 from public_charts_publish import publish_manifest
 from public_charts.uploads import UploadPool, UploadBudgetExceeded, StreamingUploads
 from public_charts.resources import (LaptopLease, ResourceSampler, available_memory, windows_available_memory,
@@ -292,6 +293,10 @@ def run(args, store=None):
     publication_metrics, pending_aliases, uploading_keys = {}, [], set()
     last_publication = 0.
     publication_interval = getattr(args, "publish_interval_seconds", 15)
+    # Private Drive state and the Drive manifest copy are rewritten at most this often during a
+    # run; the final snapshot always writes both before cleanup can run.
+    state_interval = getattr(args, "state_interval_seconds", 60)
+    last_drive_write, state_dirty, drive_manifest = None, False, None
     remote = None
     source_monitor = None
     from public_charts.kma_gate import KmaReleaseGate
@@ -318,9 +323,22 @@ def run(args, store=None):
                              "pending_delete_after": state.get("pending_delete_after", {})})
 
     def snapshot(final=False):
-        nonlocal last_publication, publication_dirty
-        if publication_dirty:
-            save_state()
+        nonlocal last_publication, publication_dirty, last_drive_write, state_dirty, drive_manifest
+        state_dirty = state_dirty or publication_dirty
+        drive_due = final or last_drive_write is None or time.monotonic() - last_drive_write >= state_interval
+        drive_failed = False
+        if state_dirty and drive_due:
+            try:
+                save_state()
+                state_dirty = False
+            except ChartDriveError as error:
+                # Mid-run state is a checkpoint; keep producing and retry at the next interval.
+                # The final snapshot must succeed, because cleanup depends on it.
+                if final or not error.transient:
+                    raise
+                drive_failed = True
+                print(json.dumps({"event": "drive_state_deferred", "reason": error.reason,
+                                  "http_status": error.http_status}), flush=True)
         account_budgets = {account: args.max_bytes - reserve_by_account[account] for account in accounts}
         kept, delete_ids = plan_cleanup(list(rows.values()), inventory, args.max_bytes, reserve_bytes,
                                        account_budgets=account_budgets if len(accounts) > 1 else None)
@@ -328,7 +346,18 @@ def run(args, store=None):
         previous = read_json(args.manifest, {})
         if previous.get("charts") == manifest["charts"] and previous.get("models") == manifest["models"]:
             manifest = previous
-        store.write_json("manifest.json", manifest)
+        if drive_due and not drive_failed and (final or manifest != drive_manifest):
+            try:
+                store.write_json("manifest.json", manifest)
+                drive_manifest = manifest
+            except ChartDriveError as error:
+                if final or not error.transient:
+                    raise
+                drive_failed = True
+                print(json.dumps({"event": "drive_manifest_deferred", "reason": error.reason,
+                                  "http_status": error.http_status}), flush=True)
+        if drive_due and not drive_failed:
+            last_drive_write = time.monotonic()
         write_json(args.manifest, manifest)
         write_json(work / "cleanup-plan.json", {"namespace": "cds-public-charts-v1", "folder_id": store.folder_id,
                    "manifest_sha256": hashlib.sha256(manifest_bytes(manifest)).hexdigest(), "delete_ids": delete_ids,
@@ -606,6 +635,8 @@ def run(args, store=None):
         lease.close()
         resource_usage = {**sampler.finish(),**memory_budget.summary()}
         save_state()
+        # The state was just saved; the final snapshot need not write it again.
+        state_dirty = False
         if not local:
             kept, delete_ids = snapshot(final=True)
     if failure is not None:
@@ -654,6 +685,8 @@ def main():
     parser.add_argument("--publish-interval-seconds", type=float, default=15,
                         help="Coalesce completed-image URL publication without waiting for an entire lead")
     parser.add_argument("--refresh-seconds", type=float, default=60)
+    parser.add_argument("--state-interval-seconds", type=float, default=60,
+                        help="Minimum spacing of private Drive state writes; the final snapshot always writes")
     parser.add_argument("--no-source-monitor",dest="source_monitor",action="store_false",default=True,
                         help="Use validated preparation directly without background discovery")
     parser.add_argument("--max-bytes", type=int, default=policy.MAX_IMAGE_BYTES)
@@ -671,6 +704,8 @@ def main():
     args.workers = worker_count(args.workers, local=args.local)
     if not 1 <= args.publish_interval_seconds <= 60 or not 5 <= args.refresh_seconds <= 120:
         parser.error("Publication must use 1-60 seconds and source-plan refresh 5-120 seconds")
+    if not 0 <= args.state_interval_seconds <= 300:
+        parser.error("Drive state writes must be spaced 0-300 seconds")
     if not 0 <= args.time_budget_minutes <= 30 or args.time_budget_minutes and (args.force or args.local):
         parser.error("Continuous production allows 0-30 minutes; force and local mode require a bounded batch")
     if args.cache_root and args.workers != 1 or args.local and args.publish_incremental:
