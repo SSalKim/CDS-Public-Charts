@@ -22,6 +22,24 @@ PROFILE_LEVELS=(1000,975,950,925,900,850,800,750,700)
 DIAGNOSTIC_VERSION="ukmo-winter-v3-native-swe"
 
 
+def source_open_error(error):
+    """Recover the retryable reason fsspec hides behind FileNotFoundError when opening a URL.
+
+    fsspec's HTTP ``info()`` turns any failure of its size probe, including our own
+    NotReady (404) and SourceDeferred (429/5xx, timeouts, input budget), into
+    FileNotFoundError.  A URL that cannot be opened is a missing upload, not a corrupt
+    forecast, so it must stay pending instead of failing the whole batch.
+    """
+    seen=set()
+    cause=error.__cause__ or error.__context__
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause,NotReady) or not isinstance(cause,Exception):
+            return cause
+        cause=cause.__cause__ or cause.__context__
+    return NotReady("UKMO field has not arrived")
+
+
 def source_url(cycle,hour,token):
     run=parse_cycle(cycle)
     maximum=69 if run.hour in (6,18) else 168
@@ -159,7 +177,11 @@ class NativeReader:
             block_size=262144 if self.bounds==BOUNDS else 1048576
             fs=HTTPFileSystem(block_size=block_size)
             fs.session,fs.js=session,False
-            with fs.open(url,"rb",block_size=block_size) as stream,h5py.File(stream,"r") as data:
+            try:
+                handle=fs.open(url,"rb",block_size=block_size)
+            except FileNotFoundError as error:
+                raise source_open_error(error) from None
+            with handle as stream,h5py.File(stream,"r") as data:
                 if (int(data["forecast_period"][()])!=hour*3600 or int(data["forecast_reference_time"][()])!=int(run.timestamp())
                         or int(data["time"][()])!=int((run+timedelta(hours=hour)).timestamp())):
                     raise ValueError("UKMO initialization/valid-time mismatch")

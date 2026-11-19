@@ -1,5 +1,6 @@
 from concurrent.futures import Future
 import argparse
+import io
 from datetime import datetime,timedelta,timezone
 import json
 from pathlib import Path
@@ -162,6 +163,42 @@ class UkmoDiagnosticsTests(unittest.TestCase):
                  self.assertRaises(SourceDeferred) as error:
                 reader.download(39,"snowfall_rate",())
             self.assertEqual(error.exception.reason,"ukmo_source_transient")
+
+    def source_response(self,status):
+        response=requests.Response()
+        response.status_code,response._content,response.url=status,b"",source_url("2026111800",39,"snowfall_rate")
+        response.raw=io.BytesIO(b"")
+        return response
+
+    def test_missing_upload_behind_fsspec_size_probe_stays_pending(self):
+        # The real fsspec HTTP filesystem wraps our NotReady in FileNotFoundError.
+        from public_charts.sources import NotReady
+        with tempfile.TemporaryDirectory() as root:
+            reader=NativeReader(root,"2026111800")
+            with patch("requests.Session.request",return_value=self.source_response(404)),                  self.assertRaises(NotReady) as error:
+                reader.download(39,"snowfall_rate",())
+            self.assertNotIsInstance(error.exception,FileNotFoundError)
+            self.assertNotIsInstance(error.exception,SourceDeferred)
+
+    def test_transient_source_status_behind_fsspec_size_probe_keeps_its_reason(self):
+        with tempfile.TemporaryDirectory() as root:
+            reader=NativeReader(root,"2026111800")
+            with patch("requests.Session.request",return_value=self.source_response(503)),                  self.assertRaises(SourceDeferred) as error:
+                reader.download(39,"snowfall_rate",())
+            self.assertEqual(error.exception.reason,"ukmo_source_transient")
+
+    def test_unexplained_open_failure_is_pending_not_an_error(self):
+        from public_charts.sources import NotReady
+        from public_charts.ukmo import source_open_error
+        self.assertIsInstance(source_open_error(FileNotFoundError("x")),NotReady)
+        cancelled=KeyboardInterrupt()
+        try:
+            try:
+                raise cancelled
+            except KeyboardInterrupt as inner:
+                raise FileNotFoundError("x") from inner
+        except FileNotFoundError as wrapped:
+            self.assertIs(source_open_error(wrapped),cancelled,"Cancellation must not be swallowed")
 
     def test_one_unphysical_rh_cell_is_masked_without_losing_valid_snow(self):
         with tempfile.TemporaryDirectory() as root:
