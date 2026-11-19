@@ -468,8 +468,9 @@ def produce_ukmo(cycle,hour,root,existing,publish,*,force=False,checkpoint_root=
         completed.add(identity)
         if path.exists(): path.unlink()
     def draw(arrays,product,domain,*,accumulation=None,masks=None):
-        from .quality import closed_contour_predicate
+        from .quality import closed_contour_predicate,display_fields
         began=time.monotonic()
+        arrays=display_fields(arrays,cycle,domain)
         if progress: progress("product_started",{"product":product,"domain":domain})
         frame=render(arrays,cycle,hour,product,domain,None,accumulation=accumulation,
                      model_name=policy.TITLES["ukmo"],precipitation_hours=interval,precipitation_field="precipitation",

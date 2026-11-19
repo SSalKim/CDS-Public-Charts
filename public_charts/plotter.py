@@ -33,12 +33,13 @@ from scipy.ndimage import gaussian_filter, maximum_filter, minimum_filter, label
 from .chart_style import (map_spec, heading_style, source_note_alpha, STYLE_VERSION, CENTER_MARKER_SIZE, CENTER_MARKER_WIDTH, UPPER_CENTER_COLORS, BARB_LENGTH,
                          ISOTACH_LEVELS, ISOTACH_COLORS, THETA_LEVELS, THETA_COLORS, barb_stride,
                          center_parameters, numeric_extrema_parameters, contour_steps, surface_steps, upper_level,
+                         kma_center_rule, kma_numeric_rule,
                          stream_isotach_levels,stream_shading,
                          PUBLIC_PROFILE, PUBLIC_IMAGE_SIZES, PUBLIC_IMAGE_TRIM, PUBLIC_RAIN_LEVELS, PUBLIC_RAIN_COLORS,
                          PUBLIC_MAP_AXES, precipitation_edge_levels,precipitation_threshold,
                          PUBLIC_SNOW_LEVELS,PUBLIC_SNOW_COLORS,PUBLIC_SNOW_OVER,SNOW_THRESHOLD,WINTER_HATCH_COLOR)
 from .dates import parse_cycle
-from .policy import WINTER_REGION_CUTOVER
+from .policy import WINTER_REGION_CUTOVER, kma_style
 from .chart_titles import product_title
 
 import os
@@ -200,8 +201,12 @@ def smooth_valid(value, sigma, valid_mask=None):
     return np.divide(values,weights,out=np.zeros_like(values),where=weights>1e-8)
 
 
-def extrema_candidates(value, latitude, longitude, radius_km, prominence, high, valid_mask=None):
-    """Find distinct closed extrema, rejecting flat and weak undulations."""
+def extrema_candidates(value, latitude, longitude, radius_km, prominence, high, valid_mask=None, smooth_km=None):
+    """Find distinct closed extrema, rejecting flat and weak undulations.
+
+    smooth_km sets the pre-smoothing in kilometres so every model is judged at the same
+    effective resolution; without it the legacy 0.8-cell smoothing is used.
+    """
     lat_step = float(np.median(np.abs(np.diff(latitude))))
     lon_step = float(np.median(np.abs(np.diff(longitude))))
     ry = max(2, int(radius_km / (111 * lat_step)))
@@ -210,7 +215,8 @@ def extrema_candidates(value, latitude, longitude, radius_km, prominence, high, 
     footprint = (fy / ry)**2 + (fx / rx)**2 <= 1
     if valid_mask is not None and not np.any(valid_mask):
         return []
-    smooth = smooth_valid(np.asarray(value, dtype=float),.8,valid_mask)
+    sigma = .8 if smooth_km is None else (smooth_km / (111 * lat_step), smooth_km / (111 * .8 * lon_step))
+    smooth = smooth_valid(np.asarray(value, dtype=float),sigma,valid_mask)
     search = smooth if valid_mask is None else np.where(valid_mask,smooth,-np.inf if high else np.inf)
     background = smooth_valid(smooth,(max(2,ry/2),max(2,rx/2)),valid_mask)
     strength = (smooth - background) * (1 if high else -1)
@@ -260,6 +266,26 @@ def center_candidates(value, latitude, longitude, domain, kind, high, valid_mask
             if key not in candidates or item[0] > candidates[key][0]:
                 candidates[key] = item
     return sorted(candidates.values(), reverse=True)
+
+
+def great_circle_km(lat1, lon1, lat2, lon2):
+    lat1, lat2 = np.deg2rad(lat1), np.deg2rad(lat2)
+    dlat, dlon = lat2-lat1, np.deg2rad(lon2-lon1)
+    return 2*6371*np.arcsin(np.sqrt(np.clip(np.sin(dlat/2)**2+np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2,0,1)))
+
+
+def spaced_centers(candidates, latitude, longitude, spacing_km, limit):
+    """Strongest first; drop a centre within spacing_km of a kept centre of the same kind."""
+    kept = []
+    for item in sorted(candidates, reverse=True):
+        _, row, col = item[:3]
+        if any(great_circle_km(latitude[row], longitude[col], latitude[other[1]], longitude[other[2]]) < spacing_km
+               for other in kept):
+            continue
+        kept.append(item)
+        if len(kept) >= limit:
+            break
+    return kept
 
 
 def merge_similar_centers(candidates,latitude,longitude,distance_km,temperature_difference=2):
@@ -549,7 +575,39 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             ax.plot(lon, lat, marker="x", markersize=CENTER_MARKER_SIZE*.7, color=color,
                     markeredgewidth=CENTER_MARKER_WIDTH, transform=plate, zorder=zorder)
 
+        def kma_centers(value, modes, kind, valid_mask=None, *, strict=False):
+            rule = kma_center_rule(domain, "temperature_strict" if strict and kind == "temperature" else kind)
+            radii = (rule["radius"], rule["radius"]*2) if domain == "asia" and kind in ("pressure", "height") else (rule["radius"],)
+            for mark, high, color in modes:
+                found = {}
+                for radius in radii:
+                    for item in extrema_candidates(value, arrays["latitude"], arrays["longitude"], radius,
+                                                   rule["prominence"], high, valid_mask, smooth_km=rule["smooth_km"]):
+                        if (item[1], item[2]) not in found or item[0] > found[(item[1], item[2])][0]:
+                            found[(item[1], item[2])] = item
+                quality_kind = "pressure" if kind == "pressure" else int(product[-3:]) if kind == "height" and not product.startswith("thk") else None
+                usable = []
+                for item in found.values():
+                    point = annotation_point(item[1], item[2])
+                    if point is None:
+                        continue
+                    if (contour_filter is not None and quality_kind is not None
+                            and contour_filter(np.array([[point[0], point[1]]]), item[3], quality_kind)):
+                        continue
+                    usable.append(item)
+                for _, row, col, actual in spaced_centers(usable, arrays["latitude"], arrays["longitude"],
+                                                          rule["spacing_km"], rule["limit"]):
+                    lon, lat, px, py, _, _ = annotation_point(row, col)
+                    pin(lon, lat, color)
+                    stroke = [effects.withStroke(linewidth=1.2, foreground=(1, 1, 1, .7))]
+                    for text, offset, size, va in ((mark, 5, 10.5, "bottom"), (f"{actual:.0f}", -5, 8.7, "top")):
+                        ax.annotate(text, (px, py), xytext=(0, offset), textcoords="offset points", color=color,
+                                    fontsize=fs(size), ha="center", va=va, zorder=9, annotation_clip=True,
+                                    path_effects=stroke, clip_on=True, gid=f"center-{kind}-{mark}")
+
         def centers(value, modes, kind,valid_mask=None,*,strict=False):
+            if public and kma_style(cycle):
+                return kma_centers(value, modes, kind, valid_mask, strict=strict)
             merged=None
             def candidates_for(high):
                 if strict:
@@ -595,12 +653,14 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                                     path_effects=stroke, clip_on=True, gid=f"center-{kind}-{mark}")
 
         def numeric_extrema(value, kind, threshold=0,valid_mask=None,grid=None,color="black"):
-            settings = numeric_extrema_parameters(domain, kind, model_id if public else None)
+            kma = public and kma_style(cycle)
+            settings = kma_numeric_rule(domain, kind) if kma else numeric_extrema_parameters(domain, kind, model_id if public else None)
             selected=base_grid if grid is None else grid
             modes = (True,) if kind == "precipitation" else (True, False)
             candidates = [item for high in modes for item in
                           extrema_candidates(value, selected["latitude"], selected["longitude"],
-                                             settings["radius"], settings["prominence"], high,valid_mask)]
+                                             settings["radius"], settings["prominence"], high,valid_mask,
+                                             smooth_km=settings.get("smooth_km") if kma else None)]
             occupied = []
             for _, row, col, actual in sorted(candidates, reverse=True):
                 if kind == "precipitation" and actual < max(threshold, settings["minimum"]):
