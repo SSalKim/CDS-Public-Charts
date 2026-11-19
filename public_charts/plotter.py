@@ -494,6 +494,8 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             major = steps["temperature"]*major_every if major_every is not None else steps["temperature_major"]
             widths = np.where((levels-steps.get("temperature_anchor",0)) % major == 0, .85, .35) if major else .5
             labels = levels[levels%steps["temperature_label"]==0] if product=="gph500" and "temperature_label" in steps else None
+            if kma_drawing and korea and steps["temperature"] == 1:
+                labels = levels[levels % 2 == 0]  # KIM Korea charts: 1 C isotherms, numbers every 2 C
             # KMA style: isotherms sit under the height contours.
             obj = contour(value, levels, "red", widths, 7 if level >= 700 else 7.7,
                           label_levels=labels,valid_mask=field_masks.get(level),zorder=4.8 if kma_drawing else 5)
