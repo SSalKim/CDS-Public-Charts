@@ -15,7 +15,8 @@ def action_args(role, env):
     if role != "coordinator":
         raise ValueError("Unexpected Actions role")
     result = ["public_charts_run.py","--workdir",work,"--max-leads",env.get("LIMIT_INPUT","2"),
-              "--workers",env.get("WORKERS_INPUT","auto"),"--upload-workers",env.get("UPLOAD_WORKERS_INPUT","3")]
+              "--workers",env.get("WORKERS_INPUT","auto"),"--upload-workers",env.get("UPLOAD_WORKERS_INPUT","3"),
+              "--prepare-workers",env.get("PREPARE_WORKERS_INPUT","4")]
     dry = env.get("DRY_RUN","true") == "true"
     result.append("--dry-run" if dry else "--publish-incremental")
     if env.get("MODEL_INPUT","all") != "all":

@@ -81,6 +81,7 @@ jobs:
       LIMIT_INPUT: ${{ inputs.max_leads || 2 }}
       WORKERS_INPUT: ${{ vars.PUBLIC_CHARTS_WORKERS || 'auto' }}
       UPLOAD_WORKERS_INPUT: ${{ vars.PUBLIC_CHARTS_UPLOAD_WORKERS || 3 }}
+      PREPARE_WORKERS_INPUT: ${{ vars.PUBLIC_CHARTS_PREPARE_WORKERS || 4 }}
       TIME_BUDGET_INPUT: ${{ vars.PUBLIC_CHARTS_TIME_BUDGET_MINUTES || 20 }}
       MINUTES_INPUT: ${{ inputs.run_minutes || 0 }}
       FORCE_INPUT: ${{ inputs.force }}

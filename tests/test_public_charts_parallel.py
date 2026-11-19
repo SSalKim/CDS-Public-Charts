@@ -165,6 +165,20 @@ def saturated_prepare(item, work):
     return {"error":None,"inputs":{"seconds":.1}}
 
 
+def slow_source_prepare(item, work):
+    """Slow sources hold their preparation slot until the fast source has been prepared."""
+    work = Path(work)
+    if item["model"] == "aifs":
+        (work / "fast-source-prepared").touch()
+    else:
+        deadline = time.monotonic() + 20
+        while not (work / "fast-source-prepared").exists():
+            if time.monotonic() > deadline:
+                raise TimeoutError("Slow downloads held every preparation slot")
+            time.sleep(.02)
+    return {"error": None, "inputs": {"seconds": .1}}
+
+
 def saturated_renderer(model, cycle, hour, root, existing, emit, **kwargs):
     work=Path(kwargs["checkpoint_root"]).parents[1]
     if hour in (0,6):
@@ -394,6 +408,24 @@ class StagingTests(unittest.TestCase):
                           refresh=refresh,refresh_seconds=.05,idle_seconds=.2,memory_budget=budget,
                           started=lambda item,active:starts.append(item["model"]))
             self.assertEqual(starts,["gfs","aifs"])
+
+    def test_fast_source_is_prepared_while_three_slow_downloads_are_in_flight(self):
+        # Before 2026-11-19, two slots let slow CMC/ICON downloads stall fast ECMWF/AIFS inputs.
+        with tempfile.TemporaryDirectory() as directory:
+            received = []
+            queue = LeadQueue([target("gfs"), target("cmc"), target("aigfs"), target("aifs")], set(), 1)
+            budget = WorkerMemoryBudget(1, memory_reader=lambda: 12 * 1024**3, host_reader=lambda: None)
+            execute_leads(queue, directory, 1, lambda item, staged: received.append((item["model"], staged["error"])),
+                          renderer=every_product_renderer, prefetch=True, prefetcher=slow_source_prepare,
+                          prepare_workers=4, memory_budget=budget)
+            self.assertEqual(sorted(received), [("aifs", None), ("aigfs", None), ("cmc", None), ("gfs", None)])
+            self.assertFalse(budget.tasks)
+
+    def test_preparation_workers_are_bounded(self):
+        for workers in (0, 5):
+            with self.subTest(workers=workers), self.assertRaises(ValueError):
+                execute_leads(LeadQueue([target()], set(), 1), ".", 1, lambda *_: None,
+                              prefetch=True, prepare_workers=workers)
 
     def test_all_render_slots_overlap_with_an_independent_prepare_slot(self):
         with tempfile.TemporaryDirectory() as directory:
