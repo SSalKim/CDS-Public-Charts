@@ -109,6 +109,21 @@ class DrawingOrderAndSparseCentreTests(unittest.TestCase):
         self.assertEqual(counts["H"], 1)
         self.assertEqual(counts["L"], 1, "The isolated weak low is shown because nothing else is nearby")
 
+    def test_strong_neighbouring_lows_and_frame_edge_lows_are_labelled(self):
+        latitude, longitude = np.arange(-5, 85.01, .5), np.arange(20, 220.01, .5)
+        lat, lon = np.meshgrid(latitude, longitude, indexing="ij")
+        low = lambda depth, y, x, size: -depth * np.exp(-(((lat - y) / size) ** 2 + ((lon - x) / (size * 1.4)) ** 2))
+        kuril, sakhalin = low(35, 48.2, 155.5, 3), low(14, 49, 143.2, 2)  # ~900 km apart, like 2026-11-19 12Z
+        corner = low(45, 61.5, 187.5, 5)  # sits on the top frame of the Asia map
+        weak = low(1.5, 40, 150, 2)  # a shallow dent between them must still obey the spacing
+        arrays = {"latitude": latitude, "longitude": longitude, "terrain_height": np.zeros_like(lat),
+                  "pressure_msl": (1015 + kuril + sakhalin + corner + weak) * 100}
+        _, shown = self.render("surfce", "asia", arrays, NEW)
+        values = sorted(int(text) for text in shown if text.isdigit())
+        self.assertEqual(shown.count("L"), 3, shown)
+        self.assertEqual(len(values), 3, "Kuril, Sakhalin and the frame-edge low each show a value")
+        self.assertLess(values[0], 975, "The low cut by the frame keeps its value like KMA")
+
 
 if __name__ == "__main__":
     unittest.main()

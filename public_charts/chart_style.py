@@ -145,11 +145,11 @@ def center_parameters(domain, kind, model_id=None):
 # kind apart (H from H, L from L) while opposite kinds may sit close; limit caps each kind.
 # Korea is a zoomed map, so it resolves smaller features with a shorter spacing.
 KMA_CENTER_RULES = {
-    "asia": {"pressure": {"prominence": .8, "radius": 550, "smooth_km": 45, "spacing_km": 1000, "limit": 8, "sparse_km": 1500, "sparse_relief": .5, "sparse_limit": 2},
+    "asia": {"pressure": {"prominence": .8, "radius": 550, "smooth_km": 45, "spacing_km": 1000, "limit": 8, "strong_low": 4, "strong_low_spacing_km": 600, "sparse_km": 1500, "sparse_relief": .5, "sparse_limit": 2},
              "height": {"prominence": 5, "radius": 500, "smooth_km": 45, "spacing_km": 1000, "limit": 7, "sparse_km": 1500, "sparse_relief": .5, "sparse_limit": 2},
              "temperature": {"prominence": 1, "radius": 550, "smooth_km": 45, "spacing_km": 1000, "limit": 6, "sparse_km": 1500, "sparse_relief": .5, "sparse_limit": 2},
              "temperature_strict": {"prominence": 1.5, "radius": 550, "smooth_km": 45, "spacing_km": 1100, "limit": 6, "sparse_km": 1500, "sparse_relief": .5, "sparse_limit": 2}},
-    "hkor": {"pressure": {"prominence": .5, "radius": 170, "smooth_km": 22, "spacing_km": 330, "limit": 4, "sparse_km": 500, "sparse_relief": .5, "sparse_limit": 2},
+    "hkor": {"pressure": {"prominence": .5, "radius": 170, "smooth_km": 22, "spacing_km": 330, "limit": 4, "strong_low": 2.5, "strong_low_spacing_km": 200, "sparse_km": 500, "sparse_relief": .5, "sparse_limit": 2},
              "height": {"prominence": 3, "radius": 170, "smooth_km": 22, "spacing_km": 330, "limit": 4, "sparse_km": 500, "sparse_relief": .5, "sparse_limit": 2},
              "temperature": {"prominence": .5, "radius": 200, "smooth_km": 22, "spacing_km": 330, "limit": 4, "sparse_km": 500, "sparse_relief": .5, "sparse_limit": 2},
              "temperature_strict": {"prominence": 1, "radius": 200, "smooth_km": 22, "spacing_km": 360, "limit": 3, "sparse_km": 500, "sparse_relief": .5, "sparse_limit": 2}},

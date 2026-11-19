@@ -581,13 +581,14 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     patch.remove()
             stream_direction_arrows(ax,stream.lines.get_segments())
 
-        def annotation_point(row, col,grid=None):
+        def annotation_point(row, col,grid=None,edge=False):
             selected=base_grid if grid is None else grid
             lon, lat = selected["xx"][row, col], selected["yy"][row, col]
             px, py = projection.transform_point(lon, lat, plate)
             nx = (px-spec["xlim"][0]) / np.ptp(spec["xlim"])
             ny = (py-spec["ylim"][0]) / np.ptp(spec["ylim"])
-            if not (.025 < nx < .975 and .045 < ny < .955):
+            # KMA keeps a centre right at the frame and lets the frame cut its mark or value.
+            if not ((0 <= nx <= 1 and 0 <= ny <= 1) if edge else (.025 < nx < .975 and .045 < ny < .955)):
                 return None
             sx, sy = ax.transData.transform((px, py))
             return lon, lat, px, py, sx, sy
@@ -624,7 +625,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                                 found[(item[1], item[2])] = item
                 result = []
                 for item in found.values():
-                    point = annotation_point(item[1], item[2])
+                    point = annotation_point(item[1], item[2], edge=True)
                     if point is None:
                         continue
                     if (contour_filter is not None and quality_kind is not None
@@ -633,9 +634,20 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     result.append(item)
                 return result
 
-            shown = [(mark, color, item) for mark, high, color in modes
-                     for item in spaced_centers(usable(high, rule["prominence"]), arrays["latitude"], arrays["longitude"],
-                                                rule["spacing_km"], rule["limit"])]
+            shown = []
+            for mark, high, color in modes:
+                found = usable(high, rule["prominence"])
+                kept = spaced_centers(found, arrays["latitude"], arrays["longitude"], rule["spacing_km"], rule["limit"])
+                if kind == "pressure" and not high:
+                    # A deep, sharply defined low keeps its own label even beside a deeper one
+                    # (e.g. a Sakhalin low next to a Kuril low); weaker lows still obey the spacing.
+                    for item in sorted(found, reverse=True):
+                        if item[0] >= rule["strong_low"] and item not in kept and all(
+                                great_circle_km(arrays["latitude"][item[1]], arrays["longitude"][item[2]],
+                                                arrays["latitude"][other[1]], arrays["longitude"][other[2]])
+                                >= rule["strong_low_spacing_km"] for other in kept):
+                            kept.append(item)
+                shown += [(mark, color, item) for item in kept]
             # A region with no centre at all may show up to two weaker ones (half the prominence),
             # but only far from every centre already drawn, of either kind.
             extras = sorted(((item, mark, color) for mark, high, color in modes
@@ -653,7 +665,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                     shown.append((mark, color, item))
                     added += 1
             for mark, color, (_, row, col, actual) in shown:
-                lon, lat, px, py, _, _ = annotation_point(row, col)
+                lon, lat, px, py, _, _ = annotation_point(row, col, edge=True)
                 pin(lon, lat, color)
                 stroke = [effects.withStroke(linewidth=1.2, foreground=(1, 1, 1, .7))]
                 for text, offset, size, va in ((mark, 5, 10.5, "bottom"), (f"{actual:.0f}", -5, 8.7, "top")):
