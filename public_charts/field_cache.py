@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 import zipfile
+from . import npz
 
 TTL_SECONDS = 24*3600
 MAX_BYTES = 256*1024**2
@@ -66,7 +67,7 @@ def save(root, signature, field, sources):
     temporary = path.with_name(path.name+tag)
     try:
         with temporary.open("wb") as stream:
-            np.savez_compressed(stream,values=field.values,latitude=field.latitude,longitude=field.longitude)
+            npz.save(stream,values=field.values,latitude=field.latitude,longitude=field.longitude)
         digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
         temporary.replace(path)
         temporary = meta.with_name(meta.name+tag)

@@ -15,6 +15,7 @@ from .sources import Decoded,HttpCache,Provider,NotReady,MODELS,atomic_json,coll
 from .diagnostics import interpolate,snow_ratio,wet_bulb_psychrometric
 from .chart_style import precipitation_threshold,SNOW_THRESHOLD
 from . import policy
+from . import npz
 
 
 class DiagnosticDeferred(NotReady):
@@ -107,7 +108,7 @@ class ExtraFields:
         path.parent.mkdir(parents=True,exist_ok=True)
         temporary=path.with_name(path.name+f".{uuid.uuid4().hex}.tmp")
         with temporary.open("wb") as stream:
-            np.savez_compressed(stream,**arrays)
+            npz.save(stream,**arrays)
         temporary.replace(path)
         atomic_json(path.with_suffix(".json"),{"model":self.model,"cycle":self.cycle,"version":1,
                     "sha256":hashlib.sha256(path.read_bytes()).hexdigest()})
@@ -153,7 +154,7 @@ class ExtraFields:
         path.parent.mkdir(parents=True,exist_ok=True)
         temporary=path.with_suffix(".tmp")
         with temporary.open("wb") as stream:
-            np.savez_compressed(stream,values=field.values,latitude=field.latitude,longitude=field.longitude)
+            npz.save(stream,values=field.values,latitude=field.latitude,longitude=field.longitude)
         temporary.replace(path)
         atomic_json(path.with_suffix(".json"),{"model":self.model,"cycle":self.cycle,"field":field.metadata,
                                                "sha256":hashlib.sha256(path.read_bytes()).hexdigest()})
@@ -448,7 +449,7 @@ def winter_fields(extra,base,hour,interval,*,cumulative=True):
     temporary=target.with_suffix(".tmp")
     target.parent.mkdir(parents=True,exist_ok=True)
     with temporary.open("wb") as stream:
-        np.savez_compressed(stream,**last)
+        npz.save(stream,**last)
     temporary.replace(target)
     metadata["sha256"]=hashlib.sha256(target.read_bytes()).hexdigest()
     atomic_json(metadata_path,metadata)

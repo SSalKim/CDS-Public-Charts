@@ -14,6 +14,7 @@ import numpy as np
 import requests
 from urllib3.util.retry import Retry
 from urllib3.exceptions import HTTPError as RawHTTPError
+from . import npz
 
 GRAVITY = 9.80665
 LEVELS = (200, 300, 500, 700, 850, 925)
@@ -716,7 +717,7 @@ def collect(model, cycle, hour, root, *, include_precipitation=True, upper_level
                                                       "seconds": round(time.perf_counter()-started, 2)}}
     temporary = path.with_suffix(".tmp")
     with temporary.open("wb") as handle:
-        np.savez_compressed(handle, **arrays)
+        npz.save(handle, **arrays)
     temporary.replace(path)
     atomic_json(meta_path, meta)
     return arrays, meta, meta["statistics"]
