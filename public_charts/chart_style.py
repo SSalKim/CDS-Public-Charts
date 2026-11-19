@@ -158,7 +158,7 @@ KMA_NUMERIC_RULES = {
     "asia": {"precipitation": {"radius": 260, "prominence": .4, "minimum": 1, "smooth_km": 45},
              "wind": {"radius": 450, "prominence": 4, "minimum": 0, "smooth_km": 45},
              "vorticity": {"radius": 500, "prominence": 2, "minimum": 5, "smooth_km": 45}},
-    "hkor": {"precipitation": {"radius": 60, "prominence": .1, "minimum": 1, "smooth_km": 10, "spacing_px": 36, "frame": True, "relative_minimum": .1},
+    "hkor": {"precipitation": {"radius": 60, "prominence": .1, "minimum": 1, "smooth_km": 10, "spacing_px": 36, "relative_minimum": .1},
              "wind": {"radius": 200, "prominence": 2.5, "minimum": 0, "smooth_km": 22},
              "vorticity": {"radius": 220, "prominence": 1.2, "minimum": 4, "smooth_km": 22}},
 }
