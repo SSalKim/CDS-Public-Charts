@@ -84,6 +84,32 @@ class CommonExtremaRuleTests(unittest.TestCase):
             self.assertEqual(legacy[0], .8, "Legacy cycles keep the 0.8-cell smoothing")
         self.assertEqual(set(widths.values()), {(45.0, 45.0)})
 
+    def test_rain_still_rising_at_the_frame_peaks_on_the_frame(self):
+        latitude, longitude = np.arange(30, 45.01, .125), np.arange(118, 140.01, .125)
+        lat, lon = np.meshgrid(latitude, longitude, indexing="ij")
+        rain = 40 * np.exp(-(((lat - 38) / 1.5) ** 2 + ((lon - 136) / 2) ** 2))  # heaviest beyond the map
+        frame = lon <= 132.9
+        rule = KMA_NUMERIC_RULES["hkor"]["precipitation"]
+        args = (rain, latitude, longitude, rule["radius"], rule["prominence"], True)
+        self.assertFalse([item for item in extrema_candidates(*args, smooth_km=rule["smooth_km"]) if frame[item[1], item[2]]],
+                         "Without the frame the visible part has no maximum")
+        found = extrema_candidates(*args, smooth_km=rule["smooth_km"], frame_mask=frame)
+        self.assertEqual(len(found), 1)
+        _, row, col, value = found[0]
+        self.assertTrue(frame[row, col], "The native-grid refinement stays inside the map")
+        self.assertAlmostEqual(latitude[row], 38, delta=.2)
+        self.assertAlmostEqual(value, 40 * np.exp(-(3.1 / 2) ** 2), delta=.3)  # the field value at the frame
+
+    def test_korea_rain_resolves_a_small_core_beside_a_broad_area(self):
+        latitude, longitude = np.arange(33, 40.01, .117), np.arange(123, 131.01, .117)
+        lat, lon = np.meshgrid(latitude, longitude, indexing="ij")
+        broad = 22 * np.exp(-(((lat - 36.4) / .5) ** 2 + ((lon - 126.2) / .5) ** 2))
+        core = 25 * np.exp(-(((lat - 36.75) / .15) ** 2 + ((lon - 127.05) / .15) ** 2))  # Asan-like, ~80 km away
+        rule = KMA_NUMERIC_RULES["hkor"]["precipitation"]
+        found = extrema_candidates(broad + core, latitude, longitude, rule["radius"], rule["prominence"], True,
+                                   smooth_km=rule["smooth_km"])
+        self.assertTrue(any(abs(latitude[r] - 36.75) < .2 and abs(longitude[c] - 127.05) < .2 for _, r, c, _ in found))
+
     def test_same_kind_centres_are_spaced_and_capped_strongest_first(self):
         latitude, longitude = np.arange(0, 60.1, 1.), np.arange(100, 160.1, 1.)
         candidates = [(9., 30, 20, 1030), (8., 31, 21, 1028), (7., 30, 40, 1024), (6., 50, 50, 1020), (5., 10, 10, 1018)]
