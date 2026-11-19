@@ -103,7 +103,8 @@ class PaletteCutoverTests(unittest.TestCase):
         cycle = policy.PALETTE_CUTOVER
         for model, product, domain in (("gfs", "gph500", "asia"), ("cmc", "acrain", "hkor")):
             layout = policy._layout_render_version(cycle, model, product, domain)
-            self.assertEqual(policy.render_version(cycle, model, product, domain), layout + policy.PALETTE_RENDER_STEP)
+            later = policy.KMA_STYLE_RENDER_STEP if policy.kma_style(cycle) else 0  # styles introduced at the same cutover
+            self.assertEqual(policy.render_version(cycle, model, product, domain), layout + policy.PALETTE_RENDER_STEP + later)
             stale = {"cycle": cycle, "model": model, "product": product, "domain": domain, "render_version": layout}
             self.assertFalse(policy.render_is_current(stale), "A pre-palette image of a new cycle is redrawn")
 

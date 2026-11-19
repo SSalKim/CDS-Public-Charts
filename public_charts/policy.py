@@ -26,7 +26,7 @@ PALETTE_CUTOVER = "2026111912"
 PALETTE_RENDER_STEP = 100
 # KMA-style drawing: terrain-weighted MSLP smoothing and one km-based extrema policy for every
 # model. Earlier cycles keep their images and versions.
-KMA_STYLE_CUTOVER = "2026111918"
+KMA_STYLE_CUTOVER = "2026111912"
 KMA_STYLE_RENDER_STEP = 200
 KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
 

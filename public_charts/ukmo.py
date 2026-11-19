@@ -15,6 +15,7 @@ from .diagnostics import snow_ratio,wet_bulb_psychrometric
 from .chart_style import SNOW_THRESHOLD
 from .extended_sources import ExtraFields,DiagnosticDeferred
 from .sources import NotReady,SourceDeferred,atomic_json
+from . import npz
 
 BASE="https://met-office-atmospheric-model-data.s3.eu-west-2.amazonaws.com"
 BOUNDS=(29,45,115,138)
@@ -123,7 +124,7 @@ class NativeReader:
             path.parent.mkdir(parents=True,exist_ok=True)
             temporary=path.with_name(path.name+f".{uuid.uuid4().hex}.tmp")
             with temporary.open("wb") as stream:
-                np.savez_compressed(stream,**arrays)
+                npz.save(stream,**arrays)
             temporary.replace(path)
             meta={**meta,"sha256":hashlib.sha256(path.read_bytes()).hexdigest()}
             atomic_json(path.with_suffix(".json"),meta)
@@ -311,7 +312,7 @@ def collect_ukmo(cycle,hour,root,*,deadline=None,upper_level=None):
         raise ValueError("Nonfinite UKMO base inputs")
     directory.mkdir(parents=True,exist_ok=True)
     temporary=path.with_suffix(".tmp")
-    with temporary.open("wb") as stream: np.savez_compressed(stream,**arrays)
+    with temporary.open("wb") as stream: npz.save(stream,**arrays)
     temporary.replace(path)
     meta={"model":"ukmo","cycle":cycle,"hour":hour,"collector_version":version,"upper_level":upper_level if full else None,
           "sha256":hashlib.sha256(path.read_bytes()).hexdigest(),"sources":source.records}

@@ -18,6 +18,7 @@ from matplotlib.path import Path as MplPath
 from matplotlib.textpath import TextPath, TextToPath
 from matplotlib.patches import PathPatch,FancyArrowPatch
 from matplotlib.transforms import Affine2D
+from matplotlib.collections import LineCollection
 from matplotlib.ticker import FixedLocator
 import cartopy
 import cartopy.crs as ccrs
@@ -40,6 +41,7 @@ from .chart_style import (map_spec, heading_style, source_note_alpha, STYLE_VERS
                          PUBLIC_SNOW_LEVELS,PUBLIC_SNOW_COLORS,PUBLIC_SNOW_OVER,SNOW_THRESHOLD,WINTER_HATCH_COLOR)
 from .dates import parse_cycle
 from .policy import WINTER_REGION_CUTOVER, kma_style
+from .streamlines import streamlines as fast_streamlines
 from .chart_titles import product_title
 
 import os
@@ -116,6 +118,9 @@ def korean_admin_boundaries():
         raise ValueError("Korean first-order administrative boundary dataset is incomplete")
     return tuple(unary_union([item.boundary for item in geometries]).difference(unary_union(geometries).boundary)
                  for geometries in groups.values())
+
+
+FAST_STREAMLINES = True
 
 
 def stream_direction_arrows(ax,segments,*,color="#0000ff",spacing=180):
@@ -549,6 +554,20 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             u=RegularGridInterpolator((arrays["latitude"],arrays["longitude"]),arrays[f"wind_u_{level}"],bounds_error=False,fill_value=np.nan)(points)
             v=RegularGridInterpolator((arrays["latitude"],arrays["longitude"]),arrays[f"wind_v_{level}"],bounds_error=False,fill_value=np.nan)(points)
             ru,rv=projection.transform_vectors(plate,geographic[:,:,0],geographic[:,:,1],u,v)
+            if FAST_STREAMLINES:
+                # Same trajectories as cartopy's GeoAxes.streamplot: regrid to the density grid over
+                # the map extent exactly as cartopy does, then integrate every seed at once.
+                from cartopy.vector_transform import vector_scalar_to_grid
+                gx,gy,gu,gv=vector_scalar_to_grid(projection,projection,[int(30*1.35)]*2,x,y,ru,rv,
+                                                  target_extent=ax.get_extent(projection))
+                paths=fast_streamlines(gx,gy,np.ma.filled(np.ma.masked_invalid(gu),np.nan),
+                                       np.ma.filled(np.ma.masked_invalid(gv),np.nan),
+                                       density=1.35,minlength=.08,maxlength=8)
+                lines=LineCollection(paths,colors="#0000ff",linewidths=.28,zorder=6,transform=ax.transData)
+                ax.add_collection(lines,autolim=False)
+                lines.set_gid("streamlines")
+                stream_direction_arrows(ax,paths)
+                return
             existing={id(patch) for patch in ax.patches}
             stream=ax.streamplot(x,y,ru,rv,density=1.35,color="#0000ff",linewidth=.28,arrowsize=.65,zorder=6,
                                  broken_streamlines=False,minlength=.08,maxlength=8)
