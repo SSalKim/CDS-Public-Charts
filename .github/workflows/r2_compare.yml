@@ -1,5 +1,10 @@
 name: Check R2 manifest
 on:
+  # GitHub skips most cron ticks for this repository (one run in 12 h on 2026-11-19), so
+  # the check follows every production run, which the Cloudflare scheduler keeps going.
+  workflow_run:
+    workflows: [Generate public model charts]
+    types: [completed]
   schedule:
     - cron: '7,37 * * * *'
   workflow_dispatch:
