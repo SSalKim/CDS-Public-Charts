@@ -21,6 +21,9 @@ PIPELINE_VERSION = 7
 WINTER_DIAGNOSTIC_CUTOVER = "2026111800"
 WINTER_REGION_CUTOVER = "2026111812"
 UKMO_DATELINE_CUTOVER = "2026111812"
+# 256-colour palette encoding starts here; earlier cycles keep their images and versions.
+PALETTE_CUTOVER = "2026111912"
+PALETTE_RENDER_STEP = 100
 KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
 
 
@@ -29,7 +32,16 @@ def winter_composite(cycle,model,product,domain):
             and product in {"surfce","acptot","acptot1","acrain","acrain1"})
 
 
+def palette_enabled(cycle):
+    return cycle>=PALETTE_CUTOVER
+
+
 def render_version(cycle,model=None,product=None,domain=None):
+    base=_layout_render_version(cycle,model,product,domain)
+    return base+PALETTE_RENDER_STEP if palette_enabled(cycle) else base
+
+
+def _layout_render_version(cycle,model=None,product=None,domain=None):
     if winter_composite(cycle,model,product,domain):
         if cycle>=WINTER_REGION_CUTOVER and product in {"acrain","acrain1"}:
             return 12
