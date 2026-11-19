@@ -67,6 +67,10 @@ class LaptopMemoryTests(unittest.TestCase):
 
 
 class LaptopCacheTests(unittest.TestCase):
+    def test_memory_snapshot_excludes_unrelated_proc_fields(self):
+        with patch.object(Path,"read_text",return_value="Cached: 2048 kB\nAnonPages: 1024 kB\nOther: 55 kB\n"):
+            self.assertEqual(laptop.memory_state(),{"cached_mib":2.0,"anonpages_mib":1.0})
+
     def test_only_cold_unprotected_inputs_are_hinted_within_budget(self):
         with TemporaryDirectory() as directory:
             root = Path(directory).resolve()

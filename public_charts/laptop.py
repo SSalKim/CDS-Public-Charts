@@ -21,6 +21,19 @@ RECLAIM_BYTES = 512*MIB
 RECLAIM_INTERVAL = 120
 
 
+def memory_state():
+    fields = {"Cached","Buffers","SReclaimable","AnonPages","Shmem","Dirty","Writeback","SwapFree"}
+    try:
+        values = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key,value = line.split(":",1)
+            if key in fields:
+                values[key.lower()+"_mib"] = round(int(value.split()[0])/1024,1)
+        return values
+    except (OSError,ValueError,IndexError):
+        return {}
+
+
 def profile_file(work):
     package = Path(__file__).parent
     sources = sorted(package.glob("*.py")) + sorted(package.parent.glob("requirements-*charts.txt"))
@@ -120,12 +133,14 @@ class LaptopReclaim:
 
     def _run(self, protected_cycles, before):
         try:
+            guest_before = memory_state()
             requested = self.advise(self.work,protected_cycles)
             if requested:
                 self.host_refresh()
             after = self.budget.snapshot(force=True)["windows_available_memory_bytes"]
             print(json.dumps({"event":"laptop_cache_reclaim","hinted_bytes":requested,
-                              "windows_available_before":before,"windows_available_after":after}),flush=True)
+                              "windows_available_before":before,"windows_available_after":after,
+                              "linux_before":guest_before,"linux_after":memory_state()}),flush=True)
         except (OSError,ValueError) as error:
             print(json.dumps({"event":"laptop_cache_reclaim_skipped","error":type(error).__name__}),flush=True)
 

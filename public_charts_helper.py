@@ -233,6 +233,8 @@ class ComputeHelper:
                               "resource_policy":"laptop_learned_headroom" if self.reclaim else "measured_worker_memory",
                               "loaded_memory_profiles":len(self.memory_budget.laptop_profiles or {}),
                               "idle_policy":"coordinator_lifetime"}),flush=True)
+            if self.reclaim:
+                print(json.dumps({"event":"laptop_memory_state","phase":"start",**laptop.memory_state()}),flush=True)
             # Missing inputs are normal; healthy coordinator control keeps the helper waiting.
             execute_leads(self.queue,self.work,self.workers,self.consume,streaming=True,
                           prefetch=not self.smoke, renderer=smoke_renderer if self.smoke else None,
@@ -253,6 +255,8 @@ class ComputeHelper:
                 except OSError as error:
                     print(json.dumps({"event":"laptop_memory_profile_save_skipped",
                                       "error":type(error).__name__}),flush=True)
+            if self.reclaim:
+                print(json.dumps({"event":"laptop_memory_state","phase":"end",**laptop.memory_state()}),flush=True)
             print(json.dumps({"event":"helper_resources",**sampler.finish(),**self.memory_budget.summary()}),flush=True)
         return 0
 
