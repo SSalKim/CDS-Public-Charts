@@ -15,6 +15,7 @@ import requests
 
 from .dates import parse_cycle
 from .sources import BOUNDS, Decoded, GRAVITY, Provider, atomic_json
+from . import npz
 
 
 BASE = "https://opendata.dwd.de/weather/nwp"
@@ -197,7 +198,7 @@ class IconRemapper:
         self.validate()
         temporary = path.with_name(f"{path.stem}-{os.getpid()}.tmp")
         with temporary.open("wb") as stream:
-            np.savez_compressed(stream, **dict(zip(("input", "output", "index", "distance"), self.neighbours)))
+            npz.save(stream, **dict(zip(("input", "output", "index", "distance"), self.neighbours)))
         temporary.replace(path)
         metadata_temp = meta.with_name(f"{meta.stem}-{os.getpid()}.tmp")
         metadata_temp.write_text(json.dumps({"signature": signature,
