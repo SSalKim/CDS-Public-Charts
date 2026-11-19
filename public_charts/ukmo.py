@@ -440,7 +440,7 @@ def produce_ukmo(cycle,hour,root,existing,publish,*,force=False,checkpoint_root=
         if not force and identity in completed: return
         path=Path(root)/"images"/"ukmo"/f"{cycle}_{hour:03}_{product}_{domain}.webp"
         if frame is not None:
-            began=time.monotonic();encode(frame,path)
+            began=time.monotonic();encode(frame,path,palette=policy.palette_enabled(cycle))
             timings["encode_seconds"]+=time.monotonic()-began
         publish(product,domain,path if frame is not None else None,**({"alias_of":alias_of} if alias_of else {}))
         completed.add(identity)
