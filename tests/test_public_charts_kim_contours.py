@@ -78,6 +78,25 @@ class DrawingOrderAndSparseCentreTests(unittest.TestCase):
         legacy, _ = self.render("gph500", "hkor", upper_fields(), OLD)
         self.assertEqual({z for color, z in legacy if color == "red"}, {5})
 
+    def test_korea_isotherm_numbers_every_two_degrees(self):
+        from public_charts import plotter
+        original = plotter.plt.Axes.clabel
+
+        def isotherm_labels(cycle):
+            seen = []
+            def spy(self, contour_set, *args, **kwargs):
+                seen.append([float(level) for level in kwargs.get("levels", args[0] if args else [])])
+                return original(self, contour_set, *args, **kwargs)
+            with patch.object(plotter.plt.Axes, "clabel", spy):
+                self.render("gph500", "hkor", upper_fields(), cycle)
+            # Isotherms are the only labelled set with sub-zero levels at 500 hPa.
+            return [levels for levels in seen if levels and max(levels) <= 50 and min(levels) < 0]
+
+        new = isotherm_labels(NEW)
+        self.assertTrue(new and all(level % 2 == 0 for levels in new for level in levels))
+        old = isotherm_labels(OLD)
+        self.assertTrue(any(level % 2 for levels in old for level in levels), "Legacy cycles number every isotherm")
+
     def test_an_empty_region_gets_a_weaker_centre(self):
         latitude, longitude = np.arange(-5, 85.01, .5), np.arange(20, 220.01, .5)
         lat, lon = np.meshgrid(latitude, longitude, indexing="ij")
