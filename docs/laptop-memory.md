@@ -27,6 +27,8 @@ laptop helper. No Windows, WSL, swap, worker-count or VTG settings are required.
   instead of the 1 GiB floor. These profiles are versioned and stay on the
   laptop. Below the normal 1 GiB headroom, only one specific lead can be
   offered, and its prepare and render estimates must both fit.
+  Before starting a laptop task, Windows headroom is refreshed even if the
+  previous cached reading was high enough to admit work.
 - A laptop lead blocked for 30 seconds due to memory before preparation or
   render goes back to GitHub without a source-unavailable backoff.
 

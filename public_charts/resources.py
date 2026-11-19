@@ -108,7 +108,7 @@ class WorkerMemoryBudget:
     LEARNED_SAMPLES = 3
 
     def __init__(self, workers, *, memory_reader=None, host_reader=None, rss_reader=None, clock=None,
-                 laptop_profiles=None):
+                 laptop_profiles=None, host_refresh=None):
         self.workers = workers
         self.memory_reader = memory_reader or available_memory
         self.host_reader = host_reader or windows_available_memory
@@ -117,6 +117,7 @@ class WorkerMemoryBudget:
         self.lock, self.tasks, self.recent_peaks = RLock(), {}, deque(maxlen=8)
         self.profiles = {}
         self.laptop_profiles = laptop_profiles
+        self.host_refresh = host_refresh
         self.phase_limits = {"render":workers, "prepare":workers}
         self.checked, self.values = float("-inf"), {}
         self.pause_started, self.pause_count, self.pause_seconds = None, 0, 0.
@@ -240,6 +241,15 @@ class WorkerMemoryBudget:
             fits = room is None or room >= self.estimate(phase,target)
             if self.laptop_profiles is not None and room is not None and room < self.GIB:
                 fits = fits and not self.tasks
+            if slots and fits and self.host_refresh is not None:
+                host = self.host_refresh()
+                state["windows_available_memory_bytes"] = host
+                state["windows_available_memory_mib"] = round(host/1024**2,1) if host is not None else None
+                self.values.update(state)
+                room = self.spare_bytes(state)
+                fits = host is not None and room is not None and room >= self.estimate(phase,target)
+                if room is not None and room < self.GIB:
+                    fits = fits and not self.tasks
             allowed = slots and fits
             pressured = slots and not fits
             now = self.clock()

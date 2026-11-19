@@ -73,7 +73,8 @@ class ComputeHelper:
                       and Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe").is_file())
         self.profile_path = laptop.profile_file(input_cache.storage_work(work)) if use_laptop else None
         profiles = laptop.load_profiles(self.profile_path) if self.profile_path else None
-        self.memory_budget = WorkerMemoryBudget(workers,laptop_profiles=profiles)
+        self.memory_budget = WorkerMemoryBudget(workers,laptop_profiles=profiles,
+            host_refresh=(lambda: laptop.windows_available_memory(force=True)) if use_laptop else None)
         self.reclaim = laptop.LaptopReclaim(input_cache.storage_work(work),self.memory_budget) if use_laptop else None
         self.transport_failures = 0
 

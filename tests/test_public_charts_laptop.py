@@ -56,6 +56,15 @@ class LaptopMemoryTests(unittest.TestCase):
         self.host = None
         self.assertEqual(self.budget.snapshot(force=True)["capacity"],0)
 
+    def test_admission_rechecks_host_even_when_previous_snapshot_had_headroom(self):
+        self.host = 4096*MIB
+        refresh = Mock(return_value=1800*MIB)
+        self.budget.host_refresh = refresh
+        self.assertGreater(self.budget.snapshot()["capacity"],0)
+        self.assertFalse(self.budget.can_start("prepare",TARGET))
+        refresh.assert_called_once()
+        self.assertEqual(self.budget.snapshot()["windows_available_memory_mib"],1800.)
+
 
 class LaptopCacheTests(unittest.TestCase):
     def test_only_cold_unprotected_inputs_are_hinted_within_budget(self):
