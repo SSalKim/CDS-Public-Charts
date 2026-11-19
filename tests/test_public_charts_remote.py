@@ -126,6 +126,37 @@ class RemoteCoordinatorTests(unittest.TestCase):
         self.assertFalse(self.queue.issued)
         self.assertIsNotNone(self.queue.next(set()))
 
+    def test_trial_offer_is_nonexclusive_and_only_claims_one_current_candidate(self):
+        self.assertIn(target("aifs"),self.transport.controls[-1]["candidates"])
+        self.assertFalse(self.queue.issued)
+        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=0,active=[],
+                                    trial_target=target("aifs")))
+        self.broker.tick()
+        self.assertEqual([lease["target"] for lease in self.broker.leases.values()],[target("aifs")])
+        self.assertEqual(self.queue.next(set()),target())
+
+    def test_trial_offer_cannot_reassign_a_lead_already_claimed_by_github(self):
+        self.assertEqual(self.queue.next(set()),target())
+        self.transport.push(message("heartbeat",generated_at=self.clock,capacity=0,active=[],
+                                    trial_target=target()))
+        self.broker.tick()
+        self.assertFalse(self.broker.leases)
+        self.assertEqual(self.queue.next(set()),target("aifs"))
+
+    def test_prepared_memory_deferral_returns_to_github_without_source_backoff(self):
+        self.heartbeat()
+        lease = next(iter(self.broker.leases.values()))
+        lead = lease["target"]
+        staged = {"artifacts":[],"partial":False,"result":{},"error":{
+            "type":"SourceDeferred","pending":True,"phase":"surface","reason":"helper_memory_pressure"}}
+        bundle, files = pack_bundle(lease["id"],lead,staged)
+        self.transport.push(message("bundle",**{key:value for key,value in bundle.items() if key != "kind"}),files)
+        self.clock += 5
+        self.broker.tick()
+        self.assertNotIn(lease["id"],self.broker.leases)
+        self.assertIsNone(self.queue.next(set(),remote=True))
+        self.assertEqual(self.queue.next(set()),lead)
+
     def test_helper_receives_operational_work_before_existing_image_refresh(self):
         self.queue.mark_published(policy.expected_keys("gfs","2026111612",0))
         self.heartbeat()

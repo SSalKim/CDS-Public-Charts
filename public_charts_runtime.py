@@ -72,7 +72,24 @@ def install_transport(cache):
     return directory
 
 
-def prune_checkpoints(root):
+def prepare_laptop_checkpoints(work, revision):
+    if not re.fullmatch(r"[a-f0-9]{64}",revision):
+        raise ValueError("Invalid derived checkpoint revision")
+    work = Path(work).resolve()
+    raw = work/"raw-cache"
+    root = raw/"checkpoints"
+    marker = raw/".checkpoint-revision"
+    if any(path.is_symlink() for path in (raw,root,marker)) or not root.resolve().is_relative_to(work):
+        raise ValueError("Unsafe laptop checkpoint path")
+    if marker.exists() and marker.read_text(encoding="ascii") == revision:
+        return
+    if root.exists():
+        shutil.rmtree(root)
+    raw.mkdir(parents=True,exist_ok=True)
+    marker.write_text(revision,encoding="ascii")
+
+
+def prune_checkpoints(root, *, max_bytes=None):
     root = Path(root).resolve()
     models = {model: [] for model in RETENTION}
     if not root.exists():
@@ -83,12 +100,31 @@ def prune_checkpoints(root):
         for model in RETENTION:
             if (directory / model).is_dir():
                 models[model].append(directory.name)
+    def remove(target):
+        if target.is_symlink() or not target.resolve().is_relative_to(root):
+            raise ValueError("Unsafe derived checkpoint path")
+        shutil.rmtree(target)
+
     for model, cycles in models.items():
         for cycle in sorted(cycles, reverse=True)[RETENTION[model] + 1:]:
-            target = root / cycle / model
-            if target.is_symlink() or not target.resolve().is_relative_to(root):
-                raise ValueError("Unsafe derived checkpoint path")
-            shutil.rmtree(target)
+            remove(root/cycle/model)
+    if max_bytes is not None:
+        entries = []
+        for model,cycles in models.items():
+            for cycle in cycles:
+                directory = root/cycle/model
+                if directory.is_symlink():
+                    raise ValueError("Unsafe derived checkpoint path")
+                if directory.is_dir():
+                    size = sum(path.stat().st_size for path in directory.rglob("*")
+                               if path.is_file() and not path.is_symlink())
+                    entries.append((cycle,model,size))
+        total = sum(size for _,_,size in entries)
+        for cycle,model,size in sorted(entries):
+            if total <= max_bytes:
+                break
+            remove(root/cycle/model)
+            total -= size
     for directory in root.iterdir():
         if directory.is_dir() and not any(directory.iterdir()):
             directory.rmdir()
@@ -98,10 +134,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare-maps", action="store_true")
     parser.add_argument("--prune-checkpoints", type=Path)
+    parser.add_argument("--checkpoint-max-mib", type=int)
+    parser.add_argument("--prepare-laptop-checkpoints", nargs=2, metavar=("CACHE", "REVISION"))
     parser.add_argument("--prune-inputs", type=Path)
+    parser.add_argument("--prune-without-rehashing", action="store_true")
     parser.add_argument("--install-runtime",type=Path)
     parser.add_argument("--install-transport",type=Path)
     args = parser.parse_args()
+    if args.prepare_laptop_checkpoints:
+        prepare_laptop_checkpoints(*args.prepare_laptop_checkpoints)
     if args.install_runtime:
         install_runtime(args.install_runtime)
     if args.install_transport:
@@ -115,10 +156,13 @@ def main():
                                             ("10m", "cultural", "admin_1_states_provinces")):
             shapereader.natural_earth(resolution=resolution, category=category, name=name)
     if args.prune_checkpoints:
-        prune_checkpoints(args.prune_checkpoints)
+        if args.checkpoint_max_mib is not None and args.checkpoint_max_mib <= 0:
+            parser.error("--checkpoint-max-mib must be positive")
+        prune_checkpoints(args.prune_checkpoints,max_bytes=(
+            None if args.checkpoint_max_mib is None else args.checkpoint_max_mib*1024**2))
     if args.prune_inputs:
         from public_charts.input_cache import prune
-        prune(args.prune_inputs)
+        prune(args.prune_inputs,verify_hash=not args.prune_without_rehashing)
 
 
 if __name__ == "__main__":

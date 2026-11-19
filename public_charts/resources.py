@@ -10,14 +10,14 @@ _windows_memory_lock = Lock()
 _windows_memory = {"at": float("-inf"), "value": None}
 
 
-def windows_available_memory():
+def windows_available_memory(*, force=False):
     """A WSL VM's free allowance is not necessarily free physical RAM on its host."""
     powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
     if not powershell.exists():
         return None
     with _windows_memory_lock:
         now = time.monotonic()
-        if now - _windows_memory["at"] >= 10:
+        if force or now - _windows_memory["at"] >= 10:
             try:
                 value = subprocess.check_output(
                     [str(powershell), "-NoProfile", "-NonInteractive", "-Command",
@@ -103,8 +103,12 @@ class WorkerMemoryBudget:
     HEAVY_RSS = GIB
     LINUX_RESERVE = GIB
     WINDOWS_RESERVE = 1536*1024**2
+    LEARNED_FLOOR = 512*1024**2
+    LEARNED_MARGIN = 128*1024**2
+    LEARNED_SAMPLES = 3
 
-    def __init__(self, workers, *, memory_reader=None, host_reader=None, rss_reader=None, clock=None):
+    def __init__(self, workers, *, memory_reader=None, host_reader=None, rss_reader=None, clock=None,
+                 laptop_profiles=None):
         self.workers = workers
         self.memory_reader = memory_reader or available_memory
         self.host_reader = host_reader or windows_available_memory
@@ -112,6 +116,7 @@ class WorkerMemoryBudget:
         self.clock = clock or time.monotonic
         self.lock, self.tasks, self.recent_peaks = RLock(), {}, deque(maxlen=8)
         self.profiles = {}
+        self.laptop_profiles = laptop_profiles
         self.phase_limits = {"render":workers, "prepare":workers}
         self.checked, self.values = float("-inf"), {}
         self.pause_started, self.pause_count, self.pause_seconds = None, 0, 0.
@@ -140,11 +145,55 @@ class WorkerMemoryBudget:
             profile = phase,target["model"]
             peaks = [*self.profiles.get(profile,()),
                      *(item["peak"] for item in self.tasks.values() if item["profile"] == profile)]
-        return max(self.GIB, int(max(peaks,default=0)*1.25))
+        peak = max(peaks,default=0)
+        if self.laptop_profiles is not None and target is not None:
+            samples = self.laptop_profiles.get(self.profile_key(phase,target), ())
+            if len(samples) >= self.LEARNED_SAMPLES:
+                return max(self.LEARNED_FLOOR, int(max(peak, max(samples))*1.25)+self.LEARNED_MARGIN)
+        return max(self.GIB, int(peak*1.25))
+
+    @staticmethod
+    def profile_key(phase,target):
+        from . import policy
+        model,cycle,hour = target["model"],target["cycle"],target["hour"]
+        band = "zero" if hour == 0 else "short" if hour <= 120 else "long"
+        winter = policy.winter(model,cycle)
+        upper = "300" if "gph300" in policy.products(cycle) else "200"
+        return f"{phase}:{model}:{int(winter)}:{upper}:{band}"
+
+    def spare_bytes(self, state):
+        free, host = (state[k] for k in ("available_memory_bytes","windows_available_memory_bytes"))
+        if self.laptop_profiles is not None and (free is None or host is None):
+            return 0
+        rooms = [value-reserve for value,reserve in ((free,self.LINUX_RESERVE),(host,self.WINDOWS_RESERVE))
+                 if value is not None]
+        return min(rooms)-self.growth() if rooms else None
+
+    def trial_fits(self, target):
+        with self.lock:
+            state = self.snapshot()
+            if self.laptop_profiles is None or self.tasks or state["capacity"]:
+                return False
+            spare = self.spare_bytes(state)
+            return all(self.estimate(phase,target) <= spare for phase in ("prepare","render"))
+
+    def running(self,target):
+        with self.lock:
+            return any(self.key(phase,target) in self.tasks for phase in ("prepare","render"))
+
+    def host_pressured(self, targets):
+        with self.lock:
+            state = self.snapshot()
+            free, host = state["available_memory_bytes"],state["windows_available_memory_bytes"]
+            if free is None or host is None or not targets:
+                return False
+            required = min(max(self.estimate(phase,target) for phase in ("prepare","render"))
+                           for target in targets) + self.growth()
+            return host-self.WINDOWS_RESERVE < required <= free-self.LINUX_RESERVE
 
     def growth(self):
-        return sum(max(0,self.estimate(item["profile"][0],{"model":item["profile"][1]})-item["rss"])
-                   for item in self.tasks.values())
+        return sum(max(0,self.estimate(phase,{"model":model,"cycle":cycle,"hour":hour})-item["rss"])
+                   for (phase,model,cycle,hour),item in self.tasks.items())
 
     def observe(self, phase, target, pid):
         with self.lock:
@@ -165,14 +214,13 @@ class WorkerMemoryBudget:
                     item["rss"] = max(0,rss)
                     item["peak"] = max(item["peak"],item["rss"])
             estimate = self.estimate()
-            growth = self.growth()
-            rooms = [value-reserve for value,reserve in ((free,self.LINUX_RESERVE),(host,self.WINDOWS_RESERVE))
-                     if value is not None]
+            metrics = {"available_memory_bytes":free,"windows_available_memory_bytes":host}
+            room = self.spare_bytes(metrics)
             # Lease capacity advertises minimum-sized jobs; can_start enforces each actual profile.
-            spare = max(0,int((min(rooms)-growth)//self.GIB)) if rooms else self.workers
+            spare = max(0,room//self.GIB) if room is not None else self.workers
             active = len(self.tasks)
             heavy = sum(item["rss"] >= self.HEAVY_RSS for item in self.tasks.values())
-            self.values = {"capacity":min(self.workers,active+spare),
+            self.values = {**metrics,"capacity":min(self.workers,active+spare),
                            "active_workers":active,"heavy_workers":min(self.workers,heavy+spare),
                            "active_render_workers":sum(key[0] == "render" for key in self.tasks),
                            "active_prepare_workers":sum(key[0] == "prepare" for key in self.tasks),
@@ -186,12 +234,12 @@ class WorkerMemoryBudget:
     def can_start(self, phase="render", target=None):
         with self.lock:
             state = self.snapshot()
-            rooms = [value*1024**2-reserve for value,reserve in (
-                (state["available_memory_mib"],self.LINUX_RESERVE),
-                (state["windows_available_memory_mib"],self.WINDOWS_RESERVE)) if value is not None]
+            room = self.spare_bytes(state)
             slots = (len(self.tasks) < self.workers
                      and sum(key[0] == phase for key in self.tasks) < self.phase_limits.get(phase,0))
-            fits = not rooms or min(rooms)-self.growth() >= self.estimate(phase,target)
+            fits = room is None or room >= self.estimate(phase,target)
+            if self.laptop_profiles is not None and room is not None and room < self.GIB:
+                fits = fits and not self.tasks
             allowed = slots and fits
             pressured = slots and not fits
             now = self.clock()
@@ -202,7 +250,7 @@ class WorkerMemoryBudget:
                 self.pause_started = None
             return allowed
 
-    def finish(self, phase, target, pid=None):
+    def finish(self, phase, target, pid=None, *, successful=False):
         with self.lock:
             self.observe(phase,target,pid)
             self.snapshot(force=True)
@@ -210,6 +258,9 @@ class WorkerMemoryBudget:
             if item and item["peak"]:
                 self.recent_peaks.append(item["peak"])
                 self.profiles.setdefault(item["profile"],deque(maxlen=8)).append(item["peak"])
+                if self.laptop_profiles is not None and successful:
+                    key = self.profile_key(phase,target)
+                    self.laptop_profiles.setdefault(key,deque(maxlen=8)).append(item["peak"])
             self.checked = float("-inf")
             return {"worker_pid":item["pid"] if item else pid,
                     "worker_peak_rss_mib":round(item["peak"]/1024**2,1) if item else 0,

@@ -77,7 +77,7 @@ def save(root, signature, field, sources):
         temporary.unlink(missing_ok=True)
 
 
-def prune(work, *, now=None, max_bytes=MAX_BYTES):
+def prune(work, *, now=None, max_bytes=MAX_BYTES, verify_hash=True):
     from .input_cache import location, valid
     workspace = Path(work).resolve()
     root = workspace/"raw-cache"/"partial-fields"
@@ -106,11 +106,12 @@ def prune(work, *, now=None, max_bytes=MAX_BYTES):
             expected, _ = paths(root,signature)
             stamp = info["cached_at"]
             good = (expected == path and 0 <= now-stamp <= TTL_SECONDS
-                    and path.is_file() and info["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest())
+                    and path.is_file() and (not verify_hash or
+                                           info["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()))
             target = {"model":"icon","cycle":signature["cycle"],"hour":signature["hour"]}
             identity = target["cycle"],target["hour"]
             if good and identity not in completeness:
-                completeness[identity] = valid(location(work,target),target,now)
+                completeness[identity] = valid(location(work,target),target,now,verify_hash=verify_hash)
             complete = completeness.get(identity,False)
         except (OSError,ValueError,KeyError,TypeError):
             pass

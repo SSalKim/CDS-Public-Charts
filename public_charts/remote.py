@@ -147,6 +147,7 @@ class RemoteCoordinator:
         self.helper_id, self.last_heartbeat = None, None
         self.capacity, self.heavy_capacity, self.reported_active = 0, 0, set()
         self.reported_waiting = set()
+        self.trial_target = None
         self.next_poll, self.last_control, self.sequence, self.errors = 0, 0, 0, 0
         self.disabled, self.polling, self.smoke = False, False, smoke
         self.smoke_runner = smoke_runner
@@ -155,7 +156,8 @@ class RemoteCoordinator:
         now = self.clock()
         message = {"schema":SCHEMA,"session":self.session,"code_sha":self.code_sha,"kind":"control",
                    "generated_at":now,"valid_until":now+120,"deadline":self.deadline+480,
-                   "stop":stop,"leases":list(self.leases.values())}
+                   "stop":stop,"leases":list(self.leases.values()),
+                   "candidates":self.queue.helper_candidates() if not stop and self.can_assign() else []}
         self.transport.upload(f"chart-control-{self.session}-{self.sequence:06}",message)
         self.sequence += 1
         self.last_control = now
@@ -214,6 +216,10 @@ class RemoteCoordinator:
                         self.capacity = message["capacity"]
                         self.heavy_capacity = heavy_capacity
                         self.reported_active = set(active)
+                        trial = message.get("trial_target")
+                        if trial is not None:
+                            target_keys(trial)
+                        self.trial_target = trial if not self.capacity and not active and now-at <= 45 else None
                         waiting, released = message.get("waiting",[]), message.get("released",[])
                         for tokens in (waiting,released):
                             if (not isinstance(tokens,list) or len(tokens) > 6 or len(tokens) != len(set(tokens))
@@ -277,6 +283,13 @@ class RemoteCoordinator:
                                     lease["expires_at"]=min(max(lease["expires_at"],now+360),lease["hard_expires_at"])
                                     changed=True
                                     self.emit({"event":"helper_source_retry",**lease["target"],"lease":lease["id"]})
+                                elif error.get("pending") and error.get("reason") == "helper_memory_pressure":
+                                    self.queue.reclaim(lease["target"],unstarted=True)
+                                    self.queue.prefer_local_retry(lease["target"],seconds=120)
+                                    self.leases.pop(lease["id"])
+                                    self.capacity = min(self.capacity,len(self.leases))
+                                    self.emit({"event":"helper_memory_lease_returned",**lease["target"]})
+                                    changed = True
                                 else:
                                     self.queue.finished(lease["target"],staged["error"])
                                     self.leases.pop(lease["id"])
@@ -313,10 +326,15 @@ class RemoteCoordinator:
                     changed = True
                     excess -= 1
             orphaned = len(self.reported_active-set(self.leases))
+            use_trial = bool(self.trial_target and not self.leases and not orphaned and not self.capacity
+                             and self.last_heartbeat is not None and now-self.last_heartbeat <= 45)
             while (self.last_heartbeat is not None and self.can_assign() and now < self.deadline
-                   and len(self.leases)+orphaned < self.capacity):
+                   and (len(self.leases)+orphaned < self.capacity or use_trial)):
                 active = {identity(lease["target"]) for lease in self.leases.values()}
-                target = self.queue.next(active,preparing=True,remote=True)
+                target = self.queue.next(active,preparing=True,remote=True,only=self.trial_target if use_trial else None)
+                if use_trial:
+                    self.trial_target = None
+                    use_trial = False
                 if target is None:
                     break
                 token = uuid.uuid4().hex

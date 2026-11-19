@@ -619,6 +619,31 @@ class StagingTests(unittest.TestCase):
             self.assertEqual(starts, [])
             self.assertEqual(received, [])
 
+    def test_prepared_lead_returns_when_memory_never_admits_render(self):
+        class Budget(WorkerMemoryBudget):
+            def can_start(self,phase="render",target=None):
+                return phase == "prepare" and super().can_start(phase,target)
+        with tempfile.TemporaryDirectory() as directory:
+            work, starts, received = Path(directory), [], []
+            budget = Budget(1,memory_reader=lambda:12*1024**3,host_reader=lambda:None)
+            execute_leads(LeadQueue([target()],set(),1),work,1,
+                          lambda item,staged:received.append(staged["error"]),
+                          renderer=every_product_renderer,prefetch=True,prefetcher=prepare_then_stop,
+                          started=lambda *args:starts.append(args),memory_budget=budget,
+                          helper_memory_wait=0)
+            self.assertEqual(starts,[])
+            self.assertEqual([error["reason"] for error in received],["helper_memory_pressure"])
+
+    def test_unstarted_lead_returns_when_preparation_exceeds_memory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            received = []
+            budget = WorkerMemoryBudget(1,memory_reader=lambda:512*1024**2,host_reader=lambda:None)
+            execute_leads(LeadQueue([target()],set(),1),Path(directory),1,
+                          lambda item,staged:received.append(staged["error"]),
+                          renderer=every_product_renderer,prefetch=True,prefetcher=prepare_then_stop,
+                          memory_budget=budget,helper_memory_wait=0)
+            self.assertEqual([error["reason"] for error in received],["helper_memory_pressure"])
+
     def test_next_lead_renders_while_coordinator_uploads_previous_lead(self):
         with tempfile.TemporaryDirectory() as directory:
             work, parent, hours = Path(directory), threading.get_ident(), []

@@ -78,7 +78,7 @@ def initialize_renderer(events=None, cancelled=None, task_flags=None, work=None)
     for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
         os.environ[name] = "1"
     if work is not None:
-        os.environ["PUBLIC_CHARTS_FIELD_CACHE_DIR"] = str(child_path(work,"raw-cache","partial-fields"))
+        os.environ["PUBLIC_CHARTS_FIELD_CACHE_DIR"] = str(child_path(input_cache.storage_work(work),"raw-cache","partial-fields"))
     if os.environ.get("MPLCONFIGDIR"):
         os.environ["MPLCONFIGDIR"] = str(Path(os.environ["MPLCONFIGDIR"]) / str(os.getpid()))
 
@@ -176,7 +176,8 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
     model_root = model_workspace(work, model)
     workspace = lead_workspace(work, target) if not raw_override else model_root
     raw = Path(raw_override) if raw_override else child_path(workspace, "raw-cache")
-    checkpoints = Path(raw_override) / "checkpoints" if raw_override else child_path(work, "raw-cache", "checkpoints")
+    checkpoints = (Path(raw_override) / "checkpoints" if raw_override else
+                   child_path(input_cache.storage_work(work), "raw-cache", "checkpoints"))
     staged = child_path(model_root, "staged", cycle, f"{hour:03}")
     staged.mkdir(parents=True, exist_ok=True)
     artifacts = []
@@ -331,8 +332,11 @@ class LeadQueue:
                 yield self.priority(target),index,model,target
 
     @_queue_locked
-    def next(self, active, *, preparing=False,remote=False):
-        chosen = min(self._candidates(active,preparing,remote),key=lambda item:(item[0],item[1]),default=None)
+    def next(self, active, *, preparing=False,remote=False,only=None):
+        candidates = self._candidates(active,preparing,remote)
+        if only is not None:
+            candidates = (item for item in candidates if item[0][0] == 0 and item[-1] == only)
+        chosen = min(candidates,key=lambda item:(item[0],item[1]),default=None)
         if chosen is None:
             return None
         _,index,model,target = chosen
@@ -346,6 +350,11 @@ class LeadQueue:
     @_queue_locked
     def operational_waiting(self, active=()):
         return any(priority[0] == 0 for priority,_,_,_ in self._candidates(active,True))
+
+    @_queue_locked
+    def helper_candidates(self, limit=6):
+        candidates = (item for item in self._candidates((),True,True) if item[0][0] == 0)
+        return [dict(item[-1]) for item in sorted(candidates,key=lambda item:(item[0],item[1]))[:limit]]
 
     @_queue_locked
     def mark_published(self, keys):
@@ -379,9 +388,9 @@ class LeadQueue:
                 self.blocked.add(cycle_key)
 
     @_queue_locked
-    def prefer_local_retry(self,target):
-        if target["model"]=="icon":
-            self.local_retry_until[target["model"],target["cycle"],target["hour"]]=time.monotonic()+180
+    def prefer_local_retry(self,target,*,seconds=None):
+        if seconds is not None or target["model"]=="icon":
+            self.local_retry_until[target["model"],target["cycle"],target["hour"]]=time.monotonic()+(seconds or 180)
 
     @_queue_locked
     def monitor_targets(self, lookahead=4):
@@ -450,7 +459,8 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                   renderer=None, started=None, refresh=None, refresh_seconds=120,
                   can_schedule=None, idle_seconds=120, streaming=False, prefetch=False,
                   prefetcher=None, progress=None, on_idle=None, cleanup_staged=True, keep_alive=None,
-                  memory_budget=None, can_prepare=None, target_valid=None, prepare_workers=2):
+                  memory_budget=None, can_prepare=None, target_valid=None, prepare_workers=2,
+                  helper_memory_wait=None):
     """consume runs only on the main process, including after renderer failures."""
     if workers not in (1, 2, 3, 4) or workers > 1 and raw_override:
         raise ValueError("Use one to four workers; a local cache override requires one")
@@ -502,6 +512,7 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                             if prefetch else None)
                     pending, active, prepared, announced, finished = {}, set(), deque(), set(), set()
                     task_slots={}
+                    prepare_memory_wait = {}
                     next_refresh = time.monotonic() + refresh_seconds
                     last_progress = time.monotonic()
                     memory_paused = False
@@ -561,6 +572,13 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                         if started:
                             started(target, sum(phase == "render" for phase,_ in pending.values()))
 
+                    def return_for_memory(target):
+                        error = {"type":"SourceDeferred","pending":True,"phase":"surface",
+                                 "reason":"helper_memory_pressure"}
+                        queue.finished(target,error)
+                        deliver(("lead",target,{"artifacts":[],"result":{},"error":error,
+                                                 "partial":False,"pid":None,"render_seconds":0}))
+
                     try:
                         while not stop.is_set():
                             if target_valid:
@@ -588,12 +606,20 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                     any(kind == "prepare" and queue.priority(item)[0] == 0 for kind,item in pending.values())
                                     or any(queue.priority(item)[0] == 0 for item,_ in prepared)
                                     or queue.operational_waiting(active))
-                                if (not refresh_waits and scheduling and (can_schedule is None or can_schedule())
-                                        and sum(kind == "render" for kind,_ in pending.values()) < workers
-                                        and memory_budget.can_start("render",target)):
+                                slot_open = (not refresh_waits and scheduling and (can_schedule is None or can_schedule())
+                                             and sum(kind == "render" for kind,_ in pending.values()) < workers)
+                                if slot_open and memory_budget.can_start("render",target):
                                     submit_render(target, preparation)
+                                    continue
+                                if slot_open and helper_memory_wait is not None:
+                                    now = time.monotonic()
+                                    if now-preparation.setdefault("memory_wait_since",now) >= helper_memory_wait:
+                                        active.remove(identity(target))
+                                        return_for_memory(target)
+                                        continue
                                 else:
-                                    prepared.append((target, preparation))
+                                    preparation.pop("memory_wait_since",None)
+                                prepared.append((target, preparation))
                             phase = "prepare" if prefetch else "render"
                             phase_limit = prepare_workers if prefetch else workers
                             while (preparation_allowed and (can_schedule is None or can_schedule())
@@ -602,8 +628,16 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                         or queue.operational_waiting(active) and len(prepared) < workers+prepare_workers)
                                    and (target := queue.next(active, preparing=prefetch)) is not None):
                                 if not memory_budget.can_start(phase,target):
+                                    if helper_memory_wait is not None:
+                                        key = identity(target)
+                                        now = time.monotonic()
+                                        if now-prepare_memory_wait.setdefault(key,now) >= helper_memory_wait:
+                                            prepare_memory_wait.pop(key)
+                                            return_for_memory(target)
+                                            break
                                     queue.reclaim(target,unstarted=True)
                                     break
+                                prepare_memory_wait.pop(identity(target),None)
                                 active.add(identity(target))
                                 finished.discard(identity(target))
                                 if prefetch:
@@ -654,7 +688,13 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 try:
                                     result = future.result()
                                 finally:
-                                    usage = memory_budget.finish(kind,target,result.get("pid") if result else None)
+                                    calibrated = bool(result and not result["error"] and (
+                                        result.get("requests",0) and not result.get("reused_prepared")
+                                        if kind == "prepare" else result["result"].get("complete") and
+                                        len(result["artifacts"]) >= len(policy.expected_keys(
+                                            target["model"],target["cycle"],target["hour"]))))
+                                    usage = memory_budget.finish(kind,target,result.get("pid") if result else None,
+                                                                 successful=calibrated)
                                 if renderer is None and usage["worker_peak_rss_mib"]:
                                     deliver(("progress",target,{"event":"worker_memory",**target,"phase":kind,**usage}))
                                 result.update(usage)

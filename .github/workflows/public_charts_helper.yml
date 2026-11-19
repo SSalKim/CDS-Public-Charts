@@ -58,14 +58,27 @@ jobs:
       - name: Configure isolated compute paths
         shell: bash
         run: |
+          cache_work="$RUNNER_TEMP/cds-chart-helper"
+          laptop_cache=false
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted && -f public_charts/laptop.py ]]; then
+            cache_work="$RUNNER_TOOL_CACHE/cds-public-charts/laptop-cache-v1"
+            laptop_cache=true
+          fi
           printf '%s\n' \
             "CHART_WORK=$RUNNER_TEMP/cds-chart-helper" \
+            "CHART_CACHE_WORK=$cache_work" \
+            "LAPTOP_CACHE_ENABLED=$laptop_cache" \
             "PUBLIC_CHARTS_MAP_DIR=$RUNNER_TOOL_CACHE/cds-public-charts/maps-v1" \
             "PUBLIC_CHARTS_ICON_GRID_DIR=$RUNNER_TOOL_CACHE/cds-public-charts/icon-grid-v1" \
             "MPLCONFIGDIR=$RUNNER_TEMP/chart-helper-mpl" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12.15'
+      - name: Clean up verified cache savers from completed laptop jobs
+        if: env.LAPTOP_CACHE_ENABLED == 'true'
+        timeout-minutes: 1
+        continue-on-error: true
+        run: python -m public_charts.laptop
       - name: Install isolated calculation runtime
         run: python public_charts_runtime.py --install-runtime "$RUNNER_TOOL_CACHE/cds-public-charts"
       - uses: actions/setup-node@v4
@@ -73,8 +86,31 @@ jobs:
           node-version: '24'
       - name: Install artifact transport
         run: python public_charts_runtime.py --install-transport "$RUNNER_TOOL_CACHE/cds-public-charts"
+      - name: Check persistent laptop caches
+        id: local-cache
+        if: env.LAPTOP_CACHE_ENABLED == 'true'
+        shell: bash
+        env:
+          CHECKPOINT_REVISION: ${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py', 'public_charts/ukmo.py') }}
+        run: |
+          python public_charts_runtime.py --prepare-laptop-checkpoints "$CHART_CACHE_WORK" "$CHECKPOINT_REVISION"
+          cold() {
+            local name="$1" pattern="$2"
+            shift 2
+            for dir in "$@"; do
+              if [[ -d "$dir" && -n "$(find "$dir" -type f -name "$pattern" -print -quit)" ]]; then
+                return 0
+              fi
+            done
+            printf '%s=true\n' "$name" >> "$GITHUB_OUTPUT"
+          }
+          cold maps '*.shp' "$PUBLIC_CHARTS_MAP_DIR"
+          cold grid '*.npz' "$PUBLIC_CHARTS_ICON_GRID_DIR"
+          cold prefix '*.npz' "$CHART_CACHE_WORK/raw-cache/checkpoints"
+          cold inputs '*.npz' "$CHART_CACHE_WORK/raw-cache/prepared" "$CHART_CACHE_WORK/raw-cache/partial-fields"
       - uses: actions/cache/restore@v4
         id: map-cache
+        if: env.LAPTOP_CACHE_ENABLED != 'true' || steps.local-cache.outputs.maps == 'true'
         timeout-minutes: 2
         continue-on-error: true
         with:
@@ -82,6 +118,7 @@ jobs:
           key: public-charts-maps-v1
       - uses: actions/cache/restore@v4
         id: grid-cache
+        if: env.LAPTOP_CACHE_ENABLED != 'true' || steps.local-cache.outputs.grid == 'true'
         timeout-minutes: 2
         continue-on-error: true
         with:
@@ -89,10 +126,11 @@ jobs:
           key: public-charts-icon-grid-v1
       - uses: actions/cache/restore@v4
         id: prefix-cache
+        if: env.LAPTOP_CACHE_ENABLED != 'true' || steps.local-cache.outputs.prefix == 'true'
         timeout-minutes: 2
         continue-on-error: true
         with:
-          path: ${{ env.CHART_WORK }}/raw-cache/checkpoints
+          path: ${{ env.CHART_CACHE_WORK }}/raw-cache/checkpoints
           key: public-charts-helper-prefix-v1-${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             public-charts-helper-prefix-v1-${{ hashFiles('public_charts/diagnostics.py', 'public_charts/extended_sources.py') }}-
@@ -101,16 +139,23 @@ jobs:
         run: python public_charts_runtime.py --prepare-maps
       - uses: actions/cache/restore@v4
         id: input-cache
+        if: env.LAPTOP_CACHE_ENABLED != 'true' || steps.local-cache.outputs.inputs == 'true'
         timeout-minutes: 2
         continue-on-error: true
         with:
           path: |
-            ${{ env.CHART_WORK }}/raw-cache/prepared
-            ${{ env.CHART_WORK }}/raw-cache/partial-fields
+            ${{ env.CHART_CACHE_WORK }}/raw-cache/prepared
+            ${{ env.CHART_CACHE_WORK }}/raw-cache/partial-fields
           key: public-charts-input-v2-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: public-charts-input-v2-
       - name: Limit restored input cache
-        run: python public_charts_runtime.py --prune-inputs "$CHART_WORK"
+        shell: bash
+        run: |
+          args=(--prune-inputs "$CHART_CACHE_WORK")
+          if [[ "$LAPTOP_CACHE_ENABLED" == true ]]; then
+            args+=(--prune-without-rehashing)
+          fi
+          python public_charts_runtime.py "${args[@]}"
       - name: Compute leased forecast leads
         id: compute
         uses: actions/github-script@v8
@@ -124,33 +169,45 @@ jobs:
             });
       - name: Limit reusable regional inputs
         id: input-prune
-        if: always()
-        run: python public_charts_runtime.py --prune-inputs "$CHART_WORK"
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          args=(--prune-inputs "$CHART_CACHE_WORK")
+          if [[ "$LAPTOP_CACHE_ENABLED" == true ]]; then
+            args+=(--prune-without-rehashing)
+          fi
+          python public_charts_runtime.py "${args[@]}"
       - uses: actions/cache/save@v4
         timeout-minutes: 2
         continue-on-error: true
-        if: always() && steps.input-prune.outcome == 'success' && steps.input-cache.outputs.cache-primary-key != ''
+        if: ${{ !cancelled() && env.LAPTOP_CACHE_ENABLED != 'true' && steps.input-prune.outcome == 'success' && steps.input-cache.outputs.cache-primary-key != '' }}
         with:
           path: |
-            ${{ env.CHART_WORK }}/raw-cache/prepared
-            ${{ env.CHART_WORK }}/raw-cache/partial-fields
+            ${{ env.CHART_CACHE_WORK }}/raw-cache/prepared
+            ${{ env.CHART_CACHE_WORK }}/raw-cache/partial-fields
           key: ${{ steps.input-cache.outputs.cache-primary-key }}
       - name: Prune verified calculation checkpoints
         id: prune
-        if: always()
-        run: python public_charts_runtime.py --prune-checkpoints "$CHART_WORK/raw-cache/checkpoints"
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          args=(--prune-checkpoints "$CHART_CACHE_WORK/raw-cache/checkpoints")
+          if [[ "$LAPTOP_CACHE_ENABLED" == true ]]; then
+            args+=(--checkpoint-max-mib 2048)
+          fi
+          python public_charts_runtime.py "${args[@]}"
       - uses: actions/cache/save@v4
         timeout-minutes: 2
         continue-on-error: true
-        if: always() && steps.prune.outcome == 'success' && steps.prefix-cache.outputs.cache-primary-key != ''
+        if: ${{ !cancelled() && env.LAPTOP_CACHE_ENABLED != 'true' && steps.prune.outcome == 'success' && steps.prefix-cache.outputs.cache-primary-key != '' }}
         with:
-          path: ${{ env.CHART_WORK }}/raw-cache/checkpoints
+          path: ${{ env.CHART_CACHE_WORK }}/raw-cache/checkpoints
           key: ${{ steps.prefix-cache.outputs.cache-primary-key }}
       - name: Save initialized maps without holding the next batch
         uses: actions/cache/save@v4
         timeout-minutes: 1
         continue-on-error: true
-        if: always() && steps.map-cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && env.LAPTOP_CACHE_ENABLED != 'true' && steps.map-cache.outputs.cache-hit != 'true' }}
         with:
           path: ${{ env.PUBLIC_CHARTS_MAP_DIR }}
           key: public-charts-maps-v1
@@ -158,7 +215,7 @@ jobs:
         uses: actions/cache/save@v4
         timeout-minutes: 1
         continue-on-error: true
-        if: always() && steps.grid-cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && env.LAPTOP_CACHE_ENABLED != 'true' && steps.grid-cache.outputs.cache-hit != 'true' }}
         with:
           path: ${{ env.PUBLIC_CHARTS_ICON_GRID_DIR }}
           key: public-charts-icon-grid-v1

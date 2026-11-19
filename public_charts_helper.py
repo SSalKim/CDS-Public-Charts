@@ -9,6 +9,7 @@ import time
 from threading import RLock
 
 from public_charts.artifacts import ArtifactError, GitHubArtifacts, validate_session
+from public_charts import input_cache, laptop
 from public_charts.parallel import LeadQueue, execute_leads
 from public_charts.remote import (HEARTBEAT_SECONDS, POLL_SECONDS, SCHEMA, identity,
                                   image_size, pack_bundle, target_keys, validate_message)
@@ -67,7 +68,13 @@ class ComputeHelper:
         self.queue = HelperQueue(self)
         self.sequence, self.next_poll, self.last_heartbeat = 0, 0, 0
         self.started, self.latest_control = time.time(), ""
-        self.memory_budget = WorkerMemoryBudget(workers)
+        use_laptop = (not smoke and os.environ.get("RUNNER_ENVIRONMENT")=="self-hosted"
+                      and os.environ.get("CHART_CACHE_WORK")
+                      and Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe").is_file())
+        self.profile_path = laptop.profile_file(input_cache.storage_work(work)) if use_laptop else None
+        profiles = laptop.load_profiles(self.profile_path) if self.profile_path else None
+        self.memory_budget = WorkerMemoryBudget(workers,laptop_profiles=profiles)
+        self.reclaim = laptop.LaptopReclaim(input_cache.storage_work(work),self.memory_budget) if use_laptop else None
         self.transport_failures = 0
 
     def valid_lease(self, lease):
@@ -95,10 +102,14 @@ class ComputeHelper:
             waiting = [lease["id"] for lease in self.control.get("leases",[])
                        if lease["id"] not in active and not lease.get("revoke_requested") and self.valid_lease(lease)]
             released = list(self.released)
+        candidates = self.control.get("candidates",[])
+        trial = None
+        if self.reclaim and not stopped and self.can_schedule() and not capacity and not self.control.get("leases"):
+            trial = next((target for target in candidates if self.memory_budget.trial_fits(target)),None)
         self.upload({"kind":"heartbeat","generated_at":time.time(),"capacity":capacity,
                      "heavy_capacity":min(capacity,budget["heavy_workers"]),
                      "heavy_active_workers":budget["heavy_active_workers"],
-                     "active":active,"waiting":waiting,"released":released,"stopped":stopped,
+                     "active":active,"waiting":waiting,"released":released,"stopped":stopped,"trial_target":trial,
                      "progress":{token:item for token,item in self.progress_records.items() if token in active}})
         self.last_heartbeat = time.time()
 
@@ -121,6 +132,11 @@ class ComputeHelper:
         validate_message(message,self.session,self.code_sha)
         if files or message.get("kind") != "control" or not isinstance(message.get("leases"),list) or len(message["leases"]) > 6:
             raise ValueError("Invalid coordinator control")
+        candidates = message.get("candidates",[])
+        if not isinstance(candidates,list) or len(candidates) > 6:
+            raise ValueError("Invalid helper candidates")
+        for candidate in candidates:
+            target_keys(candidate)
         times = [message.get(key) for key in ("generated_at","valid_until","deadline")]
         if (type(message.get("stop")) is not bool
                 or any(type(value) not in (int,float) or not math.isfinite(value) for value in times)
@@ -186,6 +202,11 @@ class ComputeHelper:
             self.poll_control()
             if not self.control:
                 return
+            if self.reclaim and self.can_schedule():
+                candidates = self.control.get("candidates",[])
+                leases = self.targets()
+                waiting = [target for target in leases if not self.memory_budget.running(target)]
+                self.reclaim.maybe_start(candidates+waiting,[target["cycle"] for target in candidates+leases])
             for key, (_,_,at) in list(self.waiting.items()):
                 if now-at >= 10:
                     self.flush(key)
@@ -208,20 +229,29 @@ class ComputeHelper:
             self.tick()
             print(json.dumps({"event":"helper_runtime","workers":self.workers,"session":self.session,"smoke":self.smoke,
                               "heavy_workers":self.memory_budget.snapshot()["heavy_workers"],
-                              "resource_policy":"measured_worker_memory","idle_policy":"coordinator_lifetime"}),flush=True)
+                              "resource_policy":"laptop_learned_headroom" if self.reclaim else "measured_worker_memory",
+                              "loaded_memory_profiles":len(self.memory_budget.laptop_profiles or {}),
+                              "idle_policy":"coordinator_lifetime"}),flush=True)
             # Missing inputs are normal; healthy coordinator control keeps the helper waiting.
             execute_leads(self.queue,self.work,self.workers,self.consume,streaming=True,
                           prefetch=not self.smoke, renderer=smoke_renderer if self.smoke else None,
                           refresh=self.targets,refresh_seconds=5,keep_alive=self.can_schedule,
                           can_schedule=self.can_schedule,on_idle=self.tick,
                           target_valid=self.target_valid,
-                          progress=self.progress,memory_budget=self.memory_budget)
+                          progress=self.progress,memory_budget=self.memory_budget,
+                          helper_memory_wait=30 if self.reclaim else None)
             for key in list(self.waiting):
                 self.flush(key)
             if self.control:
                 self.heartbeat(stopped=True)
         finally:
             lease.close()
+            if self.profile_path:
+                try:
+                    laptop.save_profiles(self.profile_path,self.memory_budget.laptop_profiles)
+                except OSError as error:
+                    print(json.dumps({"event":"laptop_memory_profile_save_skipped",
+                                      "error":type(error).__name__}),flush=True)
             print(json.dumps({"event":"helper_resources",**sampler.finish(),**self.memory_budget.summary()}),flush=True)
         return 0
 

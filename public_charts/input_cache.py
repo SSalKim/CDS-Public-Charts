@@ -11,24 +11,30 @@ TTL_SECONDS = 24*3600
 MAX_BYTES = 512*1024**2
 
 
+def storage_work(work):
+    return Path(os.environ.get("CHART_CACHE_WORK") or work)
+
+
 def location(work, target):
     from . import policy
     policy.expected_keys(target["model"], target["cycle"], target["hour"])
-    root=Path(work).resolve()
+    root=storage_work(work).resolve()
     result=root/"raw-cache"/"prepared"/target["model"]/target["cycle"]/f'{target["hour"]:03}'
     if not result.resolve().is_relative_to(root) or any(path.is_symlink() for path in (result,*result.parents) if path != root and root in path.parents):
         raise ValueError("Unsafe prepared input path")
     return result
 
 
-def valid(directory, target, now=None):
+def valid(directory, target, now=None, *, verify_hash=True):
     try:
         if directory.is_symlink() or any((directory/name).is_symlink() for name in ("fields.npz", "metadata.json")):
             return False
         meta = json.loads((directory/"metadata.json").read_text(encoding="utf-8"))
         return (all(meta.get(name) == target[name] for name in ("model", "cycle", "hour"))
                 and 0 <= (now if now is not None else time.time())-meta["cached_at"] <= TTL_SECONDS
-                and meta["prepared_sha256"] == hashlib.sha256((directory/"fields.npz").read_bytes()).hexdigest())
+                and (directory/"fields.npz").is_file()
+                and (not verify_hash or
+                     meta["prepared_sha256"] == hashlib.sha256((directory/"fields.npz").read_bytes()).hexdigest()))
     except (OSError, ValueError, KeyError, TypeError):
         return False
 
@@ -63,9 +69,10 @@ def save(work, target, raw):
     temporary.replace(destination/"metadata.json")
 
 
-def prune(work, *, now=None, max_bytes=MAX_BYTES):
+def prune(work, *, now=None, max_bytes=MAX_BYTES, verify_hash=True):
     from . import field_cache
-    partial_bytes = field_cache.prune(work,now=now,max_bytes=min(max_bytes,field_cache.MAX_BYTES))
+    work = storage_work(work)
+    partial_bytes = field_cache.prune(work,now=now,max_bytes=min(max_bytes,field_cache.MAX_BYTES),verify_hash=verify_hash)
     max_bytes = max(0,max_bytes-partial_bytes)
     workspace=Path(work).resolve()
     root=workspace/"raw-cache"/"prepared"
@@ -84,7 +91,7 @@ def prune(work, *, now=None, max_bytes=MAX_BYTES):
             target = dict(zip(("model", "cycle", "hour"), directory.relative_to(root).parts))
             target["hour"] = int(target["hour"])
             location(work, target)
-            good = valid(directory, target, now)
+            good = valid(directory, target, now, verify_hash=verify_hash)
         except (ValueError, TypeError):
             raise ValueError("Unexpected prepared input identity") from None
         if not good:
