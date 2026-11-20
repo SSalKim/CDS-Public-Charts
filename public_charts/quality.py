@@ -16,30 +16,76 @@ TIBET_BOUNDS = (25, 40, 70, 105)
 # plateau and is never smoothed, so its mountain isobars stay exactly as published.
 TERRAIN_SMOOTH_LOW, TERRAIN_SMOOTH_HIGH, TERRAIN_SMOOTH_KM = 700., 2000., 250.
 
+# From the smoothing cutover the extra width depends on the model. KMA draws KIM with ~30 km
+# overall smoothing plus ~75 km over high terrain (line positions fitted on 12 cases, pixel-aligned).
+# Each model gets the width that leaves the same small-scale roughness over Tibet as KMA's KIM
+# (0.51 hPa after the 30 km contour smoothing; 2 cycles x 6 leads per model, 2026-11-19/20).
+MODEL_TERRAIN_KM = {"ukmo": 75, "ecmwf": 100, "aifs": 100, "icon": 100, "gfs": 175, "aigfs": 175, "cmc": 175}
+# Low levels extrapolated below the terrain get the same width, fading in from 300 m above the
+# level's height to 1 km below it.
+BELOW_GROUND_LEVELS = (925, 850, 700)
+BELOW_GROUND_MARGIN, BELOW_GROUND_RAMP = 300., 1000.
 
-def terrain_weighted_pressure(pressure, terrain, latitude, longitude):
+
+def _grid_steps(latitude, longitude):
+    dy = float(np.median(np.abs(np.diff(latitude)))) * 111
+    dx = float(np.median(np.abs(np.diff(longitude)))) * 111 * np.cos(np.deg2rad(35))
+    return dy, dx
+
+
+def _smooth_finite(value, km, latitude, longitude):
+    dy, dx = _grid_steps(latitude, longitude)
+    value = np.asarray(value, dtype=float)
+    finite = np.isfinite(value)
+    filled = np.where(finite, value, np.nanmean(value) if finite.any() else 0.)
+    return gaussian_filter(filled, (km / dy, km / dx), mode="nearest"), finite
+
+
+def terrain_weighted_pressure(pressure, terrain, latitude, longitude, km=TERRAIN_SMOOTH_KM):
     weight = np.clip((terrain - TERRAIN_SMOOTH_LOW) / (TERRAIN_SMOOTH_HIGH - TERRAIN_SMOOTH_LOW), 0, 1)
     if not np.any(weight):
         return pressure
-    dy = float(np.median(np.abs(np.diff(latitude)))) * 111
-    dx = float(np.median(np.abs(np.diff(longitude)))) * 111 * np.cos(np.deg2rad(35))
-    finite = np.isfinite(pressure)
-    filled = np.where(finite, pressure, np.nanmean(pressure))
-    smooth = gaussian_filter(filled, (TERRAIN_SMOOTH_KM / dy, TERRAIN_SMOOTH_KM / dx), mode="nearest")
+    smooth, finite = _smooth_finite(pressure, km, latitude, longitude)
     return np.where(finite, (1 - weight) * pressure + weight * smooth, pressure)
 
 
-def display_fields(arrays, cycle, domain="asia"):
-    """Fields as drawn: from the KMA-style cutover, Asia MSLP is terrain-smoothed for every model."""
-    if (domain != "asia" or not policy.kma_style(cycle) or "pressure_msl" not in arrays or "terrain_height" not in arrays
-            or np.shape(arrays["pressure_msl"]) != np.shape(arrays["terrain_height"])):
+def below_ground_levels(arrays, km):
+    """Smooth every 925-700 hPa field where its level lies below the terrain."""
+    terrain = arrays.get("terrain_height")
+    out = arrays
+    for level in BELOW_GROUND_LEVELS:
+        height_key = f"geopotential_{level}"
+        if terrain is None or height_key not in arrays or np.shape(arrays[height_key]) != np.shape(terrain):
+            continue
+        weight = np.clip((terrain - np.asarray(arrays[height_key]) / GRAVITY + BELOW_GROUND_MARGIN) / BELOW_GROUND_RAMP, 0, 1)
+        if not np.any(weight):
+            continue
+        out = dict(out) if out is arrays else out
+        for key in arrays:
+            if key.endswith(f"_{level}") and np.shape(arrays[key]) == np.shape(terrain):
+                smooth, finite = _smooth_finite(arrays[key], km, arrays["latitude"], arrays["longitude"])
+                out[key] = np.where(finite, (1 - weight) * np.asarray(arrays[key], dtype=float) + weight * smooth, arrays[key])
+    return out
+
+
+def display_fields(arrays, cycle, domain="asia", model_id=None):
+    """Fields as drawn: from the KMA-style cutover, Asia MSLP is terrain-smoothed for every model.
+
+    From the smoothing cutover the width is per model and the 925-700 hPa fields are also smoothed
+    below ground. The Korea map is never smoothed here.
+    """
+    if domain != "asia" or not policy.kma_style(cycle) or "terrain_height" not in arrays:
         return arrays
-    smoothed = terrain_weighted_pressure(arrays["pressure_msl"], arrays["terrain_height"],
-                                         arrays["latitude"], arrays["longitude"])
-    if smoothed is arrays["pressure_msl"]:
-        return arrays
-    # The published field is kept for centre detection over lowlands, where both are identical.
-    return {**arrays, "pressure_msl": smoothed, "pressure_msl_published": arrays["pressure_msl"]}
+    per_model = policy.model_smoothing(cycle) and model_id in MODEL_TERRAIN_KM
+    km = MODEL_TERRAIN_KM[model_id] if per_model else TERRAIN_SMOOTH_KM
+    out = arrays
+    if "pressure_msl" in arrays and np.shape(arrays["pressure_msl"]) == np.shape(arrays["terrain_height"]):
+        smoothed = terrain_weighted_pressure(arrays["pressure_msl"], arrays["terrain_height"],
+                                             arrays["latitude"], arrays["longitude"], km)
+        if smoothed is not arrays["pressure_msl"]:
+            # The published field is kept for centre detection over lowlands, where both are identical.
+            out = {**arrays, "pressure_msl": smoothed, "pressure_msl_published": arrays["pressure_msl"]}
+    return below_ground_levels(out, km) if per_model else out
 
 
 def terrain_masks(arrays):
@@ -52,7 +98,10 @@ def mask_statistics(masks):
             for key,value in masks.items()}
 
 
-def closed_contour_predicate(arrays):
+def closed_contour_predicate(arrays, cycle=None):
+    # From the smoothing cutover the smoothed fields are drawn whole, like KMA's plateau rings and centres.
+    if cycle is not None and policy.model_smoothing(cycle):
+        return None
     latitude,longitude=arrays["latitude"],arrays["longitude"]
     terrain=arrays["terrain_height"]
     gradients={}
