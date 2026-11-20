@@ -251,6 +251,8 @@ def public_manifest(rows,*,now=None):
         if source["model"]=="ukmo":
             for name in ("kma_confirmed_at","kma_reference_hour"):
                 if name in source: target[name]=source[name]
+        if source.get("r2"):
+            target["r2"]=source["r2"]
     return {"schema_version": 1, "pipeline_version": PIPELINE_VERSION,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "models": {model: {"title": TITLES[model], "published": any(r["model"] == model for r in public),

@@ -67,6 +67,7 @@ jobs:
       PUBLIC_CHARTS_STORAGE_LAYOUT: balanced-v1
       # R2 manifest dual-write: off until secrets exist, then shadow by default.
       PUBLIC_CHARTS_R2_MODE: ${{ vars.PUBLIC_CHARTS_R2_MODE }}
+      PUBLIC_CHARTS_R2_IMAGES: ${{ vars.PUBLIC_CHARTS_R2_IMAGES }}
       PUBLIC_CHARTS_R2_ACCOUNT_ID: ${{ secrets.PUBLIC_CHARTS_R2_ACCOUNT_ID }}
       PUBLIC_CHARTS_R2_ACCESS_KEY_ID: ${{ secrets.PUBLIC_CHARTS_R2_ACCESS_KEY_ID }}
       PUBLIC_CHARTS_R2_SECRET_ACCESS_KEY: ${{ secrets.PUBLIC_CHARTS_R2_SECRET_ACCESS_KEY }}

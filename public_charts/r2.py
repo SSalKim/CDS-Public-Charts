@@ -13,6 +13,7 @@ import hmac
 import json
 import os
 import re
+import threading
 import time
 from urllib.parse import quote
 
@@ -32,9 +33,13 @@ MODES = ("off", "shadow", "required")
 ENV_PREFIX = "PUBLIC_CHARTS_R2_"
 IMAGE_STORE = "drive"
 DRIVE_URL = "https://drive.usercontent.google.com/download?id={}&export=view&authuser=0"
-EXTRA_FIELDS = ("kma_confirmed_at", "kma_reference_hour")
+EXTRA_FIELDS = ("kma_confirmed_at", "kma_reference_hour", "r2")
 RUN_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/\d{10}\Z")
-KEY_PATTERN = re.compile(r"manifest/(?:index|runs/[a-z]+/\d{10}\.[a-f0-9]{16})\.json\Z")
+# charts/{model}/{cycle}/{model}_{domain}_{product}_s{HHH}_{cycle}_{digest}.webp, immutable.
+IMAGE_NAME = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)_(asia|hkor)_([a-z0-9]+)_s(\d{3})_(\d{10})_([a-f0-9]{16})\.webp\Z")
+KEY_PATTERN = re.compile(r"manifest/(?:index|runs/[a-z]+/\d{10}\.[a-f0-9]{16})\.json\Z"
+                         r"|charts/[a-z]+/\d{10}/[a-z0-9_]+\.webp\Z")
+IMAGE_MODES = ("off", "dual")
 
 
 class R2Error(RuntimeError):
@@ -149,6 +154,70 @@ def client_from_env(env=None):
                     env[ENV_PREFIX + "SECRET_ACCESS_KEY"].strip(), env[ENV_PREFIX + "BUCKET"].strip())
 
 
+def images_mode(env=None):
+    """``dual`` also stores every new chart image in R2; Drive stays the fallback store."""
+    env = os.environ if env is None else env
+    value = (env.get(ENV_PREFIX + "IMAGES") or "off").strip().lower()
+    if value not in IMAGE_MODES:
+        raise ValueError("PUBLIC_CHARTS_R2_IMAGES must be off or dual")
+    return value
+
+
+def image_name(model, cycle, hour, product, domain, sha256):
+    name = f"{model}_{domain}_{product}_s{int(hour):03}_{cycle}_{sha256[:16]}.webp"
+    if not IMAGE_NAME.fullmatch(name) or not re.fullmatch(r"[a-f0-9]{64}", sha256 or ""):
+        raise ValueError("Invalid chart image identity")
+    return name
+
+
+def image_key(model, cycle, name):
+    return f"charts/{model}/{cycle}/{name}"
+
+
+class ImageMirror:
+    """Copy each uploaded chart to R2 from the upload threads.
+
+    A failed copy is reported and returns ``None``: the row then keeps only its Drive URL,
+    so readers never get an R2 address for an object that was not stored.
+    """
+
+    def __init__(self, client_factory, *, emit=None):
+        self.client_factory = client_factory
+        self.emit = emit or (lambda item: print(json.dumps(item), flush=True))
+        self.local = threading.local()
+        self.lock = threading.Lock()
+        self.writes = self.failures = self.bytes = 0
+
+    def _client(self):
+        if not hasattr(self.local, "client"):
+            self.local.client = self.client_factory()
+        return self.local.client
+
+    def mirror(self, path, chart_key, sha256):
+        match = policy.KEY_PATTERN.fullmatch(chart_key or "")
+        try:
+            if not match:
+                raise ValueError("Invalid chart identity")
+            model, cycle, hour, product, domain = match.groups()
+            name = image_name(model, cycle, hour, product, domain, sha256)
+            with open(path, "rb") as handle:
+                body = handle.read()
+            if hashlib.sha256(body).hexdigest() != sha256:
+                raise ValueError("Chart image changed after its Drive upload")
+            self._client().put(image_key(model, cycle, name), body, cache_control=IMMUTABLE_CACHE,
+                               content_type="image/webp")
+        except (R2Error, ValueError, OSError) as error:
+            with self.lock:
+                self.failures += 1
+            self.emit({"event": "r2_image_failed", "key": chart_key, "error": type(error).__name__,
+                       "message": str(error)[:200], **(error.details if isinstance(error, R2Error) else {})})
+            return None
+        with self.lock:
+            self.writes += 1
+            self.bytes += len(body)
+        return name
+
+
 def encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
 
@@ -167,6 +236,11 @@ def split_manifest(manifest):
             raise ValueError("Manifest row cannot be represented in an R2 fragment")
         item = [int(row["hour"]), row["domain"], row["product"], row["file_id"]]
         extra = {name: row[name] for name in EXTRA_FIELDS if name in row}
+        if "r2" in extra:
+            name = IMAGE_NAME.fullmatch(str(extra["r2"]))
+            # Aliases reuse another product's image, but always within the same model and cycle.
+            if not name or (name.group(1), name.group(5)) != (row["model"], row["cycle"]):
+                raise ValueError("Manifest row has an invalid R2 image name")
         if extra:
             item.append(extra)
         runs.setdefault(run, []).append(item)

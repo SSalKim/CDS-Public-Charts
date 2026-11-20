@@ -71,6 +71,26 @@ run 조각:
 
 R2 자격증명은 GitHub-hosted coordinator에만 있다. 노트북 helper는 `PUBLIC_CHARTS_R2_*` 환경변수를 받으면 시작하지 않는다.
 
+## 이미지 (2단계: 이중 쓰기)
+
+저장소 변수 `PUBLIC_CHARTS_R2_IMAGES`:
+
+| 값 | 동작 |
+| --- | --- |
+| 비어 있음, `off` | 이미지는 Drive에만 올린다 |
+| `dual` | Drive 업로드가 끝난 같은 업로드 스레드에서 R2에도 PUT한다(R2 모드가 `off`가 아닐 때만) |
+
+- 키: `charts/{model}/{cycle}/{model}_{domain}_{product}_s{HHH}_{cycle}_{sha256 앞 16자}.webp`,
+  `Cache-Control: public, max-age=31536000, immutable`, `Content-Type: image/webp`.
+- PUT이 성공한 이미지만 행에 `r2`(객체 이름)가 붙는다. Git manifest 행과 run 조각의 다섯 번째 원소(`{"r2": ...}`)에 들어간다.
+  alias 행(예: `surfce` → `acptot`)은 원본 이미지의 이름을 그대로 쓴다. 이름의 model·cycle은 행과 같아야 한다.
+- PUT이 실패하면 `r2_image_failed`를 남기고 그 행은 Drive 주소만 가진다. 생산은 멈추지 않는다.
+- 뷰어는 R2 조각에서 `r2`가 있으면 커스텀 도메인 주소를 쓰고, 로드에 실패하면 같은 이미지의 Drive 주소로 넘어간다.
+  R2 index를 못 읽어 Git manifest로 내려간 경우에는 Drive 주소만 쓴다.
+- 런 끝 요약 줄에 `r2_image_writes`, `r2_image_failures`, `r2_image_bytes`가 남는다.
+- R2 이미지 삭제는 Lifecycle 규칙(`charts/` 4일)에 맡긴다. 보존 기간(최대 9 cycle, 54시간)보다 길다.
+- 하루 이중 쓰기를 관찰한 뒤 Drive 업로드를 끄는 것은 다음 작업이다.
+
 ## Cloudflare 설정 (사용자가 대시보드에서 할 일)
 
 1. **버킷**: R2 → Create bucket. 이름 예: `cds-public-charts`. Location은 Automatic, 등급은 Standard.
