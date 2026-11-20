@@ -487,7 +487,7 @@ class ProductionTests(unittest.TestCase):
         outside.write_text("untouched")
         prune_checkpoints(root)
         self.assertEqual(len(list(root.iterdir())), 6)
-        self.assertEqual(outside.read_text(), "untouched")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "untouched")
 
 
 class CleanupTests(unittest.TestCase):

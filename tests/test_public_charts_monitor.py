@@ -187,7 +187,7 @@ class MonitorTests(unittest.TestCase):
     def test_all_explicit_cache_actions_have_short_bounds(self):
         root=Path(__file__).resolve().parents[1]
         for name in ("public_charts.yml","public_charts_helper.yml"):
-            source=(root/".github/workflows"/name).read_text()
+            source=(root/".github/workflows"/name).read_text(encoding="utf-8")
             self.assertNotIn("uses: actions/cache@",source)
             import re
             for block in re.split(r"\n      - ",source):

@@ -556,7 +556,7 @@ class ActionRoleTests(unittest.TestCase):
         args = action_args("helper",{"CHART_WORK":"/tmp/helper","HELPER_SESSION":SESSION,"HELPER_CODE_SHA":SHA})
         self.assertEqual(args[0],"public_charts_helper.py")
         self.assertNotIn("--publish-incremental",args)
-        workflow = (Path(__file__).resolve().parents[1]/".github/workflows/public_charts_helper.yml").read_text()
+        workflow = (Path(__file__).resolve().parents[1]/".github/workflows/public_charts_helper.yml").read_text(encoding="utf-8")
         self.assertNotIn("secrets.",workflow)
         self.assertNotIn("public_charts_run.py",workflow)
         self.assertIn("sparse-checkout-cone-mode: false",workflow)

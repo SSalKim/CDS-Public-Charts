@@ -106,7 +106,7 @@ def concurrent_cmc_renderer(model, cycle, hour, root, existing, emit, *, checkpo
     (work / f"cmc-started-{hour}").touch()
     deadline = time.monotonic() + 30
     expected_file=work / "expected-renderers"
-    expected=int(expected_file.read_text()) if expected_file.exists() else 3
+    expected=int(expected_file.read_text(encoding="utf-8")) if expected_file.exists() else 3
     while len(list(work.glob("cmc-started-*"))) < expected:
         if time.monotonic() > deadline:
             raise TimeoutError("CMC leads did not start concurrently")
@@ -855,7 +855,7 @@ class CoordinatorTests(unittest.TestCase):
             def execute(*positional,**kwargs):
                 return execute_leads(*positional,**kwargs,renderer=streaming_renderer)
             def publish(_):
-                value=json.loads(args.manifest.read_text())
+                value=json.loads(args.manifest.read_text(encoding="utf-8"))
                 if not published:
                     self.assertFalse((args.workdir/"lead-finished").exists())
                     self.assertGreater(len(value["charts"]),0)
@@ -897,7 +897,7 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(len(store.uploads), 2)
             self.assertEqual(verify.call_count, 2)
             self.assertEqual(len({row["file_id"] for row in store.data["state.json"]["rows"]}), 2)
-            self.assertEqual(json.loads((args.workdir / "cleanup-plan.json").read_text())["delete_ids"], [])
+            self.assertEqual(json.loads((args.workdir / "cleanup-plan.json").read_text(encoding="utf-8"))["delete_ids"], [])
 
     def test_drive_state_is_written_once_per_interval_and_always_at_the_end(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -984,7 +984,7 @@ class CoordinatorTests(unittest.TestCase):
                     run(args, store)
             self.assertEqual({row["model"] for row in store.data["manifest.json"]["charts"]}, {"aifs"})
             self.assertEqual(len(store.data["state.json"]["rows"]), 2)
-            self.assertEqual(json.loads((args.workdir / "cleanup-plan.json").read_text())["delete_ids"], [])
+            self.assertEqual(json.loads((args.workdir / "cleanup-plan.json").read_text(encoding="utf-8"))["delete_ids"], [])
 
 
 if __name__ == "__main__":
