@@ -12,19 +12,27 @@ class UploadBudgetExceeded(OverflowError):
 
 
 class UploadPool:
-    def __init__(self, store, workers=1):
+    def __init__(self, store, workers=1, *, mirror=None):
         if workers not in (1, 2, 3, 4):
             raise ValueError("Use one to four upload workers")
         self.store, self.workers = store, workers
+        # Optional R2 copy made on the same IO thread, after the Drive upload succeeded.
+        self.mirror = mirror
         self.local = local()
         self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chart-upload") if workers > 1 else None
 
     def upload(self, item):
         if self.executor is None:
-            return self.store.upload_image(item["path"], item["key"])
-        if not hasattr(self.local, "store"):
-            self.local.store = self.store.new_upload_worker()
-        return self.local.store.upload_image(item["path"], item["key"])
+            info = self.store.upload_image(item["path"], item["key"])
+        else:
+            if not hasattr(self.local, "store"):
+                self.local.store = self.store.new_upload_worker()
+            info = self.local.store.upload_image(item["path"], item["key"])
+        if self.mirror is not None:
+            name = self.mirror.mirror(item["path"], item["key"], info["sha256"])
+            if name:
+                info = {**info, "r2": name}
+        return info
 
     def run(self, items, reserve, release, record):
         """Drain successful in-flight uploads even when another image fails."""

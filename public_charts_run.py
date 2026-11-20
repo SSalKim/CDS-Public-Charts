@@ -312,6 +312,14 @@ def run(args, store=None):
             print(json.dumps({"event": "r2_disabled", "reason": str(error)}), flush=True)
         else:
             print(json.dumps({"event": "r2_publication", "mode": r2_mode}), flush=True)
+            try:
+                images = r2_publication.images_mode() if r2 else "off"
+            except ValueError as error:
+                images = "off"
+                print(json.dumps({"event": "r2_images_disabled", "reason": str(error)}), flush=True)
+            if images == "dual" and uploader is not None:
+                uploader.mirror = r2_publication.ImageMirror(r2_publication.client_from_env)
+            print(json.dumps({"event": "r2_images", "mode": images}), flush=True)
 
     def save_state():
         if local:
@@ -412,7 +420,8 @@ def run(args, store=None):
                              "product": item["product"], "domain": item["domain"],
                              "render_version": policy.render_version(cycle,model,item["product"],item["domain"]),
                              **{key: info[key] for key in ("file_id", "url", "size", "sha256")},
-                             **({"storage_account": info["storage_account"]} if "storage_account" in info else {})}
+                             **({"storage_account": info["storage_account"]} if "storage_account" in info else {}),
+                             **({"r2": info["r2"]} if info.get("r2") else {})}
         fresh.add(item["key"])
         uploading_keys.discard(item["key"])
         publication_metrics[item["key"]] = item
@@ -663,6 +672,8 @@ def run(args, store=None):
                           if row.get("storage_account", "primary") == account) for account in accounts},
                       "pending_delete_files": len(delete_ids), "budget_wait": budget_blocked,
                       "stop_reason": stop_reason,"batch_extra_seconds":batch_window.extra_seconds,
+                      **({"r2_image_writes": uploader.mirror.writes, "r2_image_failures": uploader.mirror.failures,
+                          "r2_image_bytes": uploader.mirror.bytes} if uploader and uploader.mirror else {}),
                       **resource_usage, "errors": errors[-40:]}))
     return int(any(row["status"] == "error" for row in errors))
 
