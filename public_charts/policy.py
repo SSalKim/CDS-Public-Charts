@@ -28,6 +28,10 @@ PALETTE_RENDER_STEP = 100
 # model. Earlier cycles keep their images and versions.
 KMA_STYLE_CUTOVER = "2026111912"
 KMA_STYLE_RENDER_STEP = 200
+# Model-calibrated display smoothing (see quality.MODEL_TERRAIN_KM): km-based contour smoothing,
+# per-model high-terrain MSLP smoothing, below-ground smoothing of 925-700 hPa, no plateau ring pruning.
+SMOOTHING_CUTOVER = "2026112018"
+SMOOTHING_RENDER_STEP = 400
 KEY_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/(\d{10})/(\d{3})/([a-z0-9_]+)/(asia|hkor)")
 
 
@@ -44,10 +48,15 @@ def kma_style(cycle):
     return cycle>=KMA_STYLE_CUTOVER
 
 
+def model_smoothing(cycle):
+    return cycle>=SMOOTHING_CUTOVER
+
+
 def render_version(cycle,model=None,product=None,domain=None):
     base=_layout_render_version(cycle,model,product,domain)
     return (base+(PALETTE_RENDER_STEP if palette_enabled(cycle) else 0)
-            +(KMA_STYLE_RENDER_STEP if kma_style(cycle) else 0))
+            +(KMA_STYLE_RENDER_STEP if kma_style(cycle) else 0)
+            +(SMOOTHING_RENDER_STEP if model_smoothing(cycle) else 0))
 
 
 def _layout_render_version(cycle,model=None,product=None,domain=None):

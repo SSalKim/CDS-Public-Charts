@@ -471,12 +471,12 @@ def produce_ukmo(cycle,hour,root,existing,publish,*,force=False,checkpoint_root=
     def draw(arrays,product,domain,*,accumulation=None,masks=None):
         from .quality import closed_contour_predicate,display_fields
         began=time.monotonic()
-        arrays=display_fields(arrays,cycle,domain)
+        arrays=display_fields(arrays,cycle,domain,model_id="ukmo")
         if progress: progress("product_started",{"product":product,"domain":domain})
         frame=render(arrays,cycle,hour,product,domain,None,accumulation=accumulation,
                      model_name=policy.TITLES["ukmo"],precipitation_hours=interval,precipitation_field="precipitation",
                      source_note="Data sourced from UK Met Office",profile=PUBLIC_PROFILE,physical_barb_spacing=True,
-                     model_id="ukmo",field_masks=masks,contour_filter=closed_contour_predicate(arrays),
+                     model_id="ukmo",field_masks=masks,contour_filter=closed_contour_predicate(arrays,cycle),
                      diagnostic_snowfall=True,diagnostic_label="Diagnostic",return_frame=True)
         timings["plot_seconds"]+=time.monotonic()-began
         if progress: progress("product_finished",{"product":product,"domain":domain,"seconds":time.monotonic()-began})

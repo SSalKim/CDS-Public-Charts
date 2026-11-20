@@ -40,7 +40,7 @@ from .chart_style import (map_spec, heading_style, source_note_alpha, STYLE_VERS
                          PUBLIC_MAP_AXES, precipitation_edge_levels,precipitation_threshold,
                          PUBLIC_SNOW_LEVELS,PUBLIC_SNOW_COLORS,PUBLIC_SNOW_OVER,SNOW_THRESHOLD,WINTER_HATCH_COLOR)
 from .dates import parse_cycle
-from .policy import WINTER_REGION_CUTOVER, kma_style
+from .policy import WINTER_REGION_CUTOVER, kma_style, model_smoothing
 from .streamlines import streamlines as fast_streamlines
 from .chart_titles import product_title
 
@@ -200,6 +200,18 @@ def equivalent_potential_temperature(arrays, level):
 
 # How far past the frame (fraction of the map) a KMA-style centre may sit and still show its cut label.
 FRAME_SPILL = .02
+
+
+# Contour pre-smoothing in kilometres, so fine grids (KIM-like UKMO, ICON, CMC) are drawn as smoothly
+# as 0.25-degree ones; KMA's KIM charts fit ~30 km. The old cell-based widths were 1.1 / 0.7 cells.
+CONTOUR_SMOOTH_KM = {"asia": 30., "hkor": 20.}
+
+
+def contour_sigma(latitude, longitude, km, center_latitude):
+    """Gaussian sigma in grid cells (rows, columns) for a width in kilometres."""
+    dy = float(np.median(np.abs(np.diff(latitude)))) * 111
+    dx = float(np.median(np.abs(np.diff(longitude)))) * 111 * np.cos(np.deg2rad(center_latitude))
+    return km / dy, km / dx
 
 
 def smooth_valid(value, sigma, valid_mask=None):
@@ -386,7 +398,10 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
         figure.canvas.draw()
         pos = ax.get_position()
         cax = figure.add_axes([pos.x1 + (.004 if public and korea else .012), pos.y0, .013, pos.height])
-        sigma = .7 if korea else 1.1
+        if public and model_smoothing(cycle):
+            sigma = contour_sigma(arrays["latitude"], arrays["longitude"], CONTOUR_SMOOTH_KM[domain], spec["center"][1])
+        else:
+            sigma = .7 if korea else 1.1
         border = .04 if public and korea else .006
         def map_grid(latitude,longitude):
             gx,gy=np.meshgrid(longitude,latitude)

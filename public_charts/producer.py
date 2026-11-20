@@ -180,7 +180,7 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
 
     def draw(arrays, product, domain, *, accumulation=None, pressure_only=False):
         started = time.monotonic()
-        arrays = display_fields(arrays, cycle, domain)
+        arrays = display_fields(arrays, cycle, domain, model_id=model)
         if progress:
             progress("product_started", {"product": product, "domain": domain})
         frame = render(arrays, cycle, hour, product, domain, None, accumulation,
@@ -188,7 +188,7 @@ def produce_lead(model, cycle, hour, root, existing, publish, *, force=False, ch
                       precipitation_field="precipitation", source_note=MODELS[model]["attribution"],
                       pressure_only=pressure_only, upper_level_override=200 if product == "gph200" else None,
                       physical_barb_spacing=True, profile=PUBLIC_PROFILE, model_id=model,
-                      contour_filter=closed_contour_predicate(arrays), diagnostic_snowfall=model == "gfs",
+                      contour_filter=closed_contour_predicate(arrays, cycle), diagnostic_snowfall=model == "gfs",
                       diagnostic_label="Diagnostic" if model=="gfs" else None,
                       return_frame=True)
         gc.collect()
