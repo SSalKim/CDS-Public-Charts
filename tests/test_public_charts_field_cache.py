@@ -28,7 +28,7 @@ class FieldCacheTests(unittest.TestCase):
         np.testing.assert_array_equal(cached[0],self.field.values)
         self.assertEqual(cached[4],[{"last_modified":"source-time"}])
         path,meta=field_cache.paths(self.root,self.signature)
-        info=json.loads(meta.read_text())
+        info=json.loads(meta.read_text(encoding="utf-8"))
         self.assertIsNone(field_cache.read(self.root,self.signature,now=info["cached_at"]+86401))
         self.assertIsNone(field_cache.read(self.root,{**self.signature,"hour":6}))
         path.write_bytes(b"corrupt")
@@ -40,7 +40,7 @@ class FieldCacheTests(unittest.TestCase):
         unrelated.write_text("keep")
         self.assertEqual(field_cache.prune(self.work,max_bytes=0),0)
         self.assertFalse(field_cache.paths(self.root,self.signature)[0].exists())
-        self.assertEqual(unrelated.read_text(),"keep")
+        self.assertEqual(unrelated.read_text(encoding="utf-8"),"keep")
 
     def test_interrupted_atomic_writes_do_not_escape_the_cache_budget(self):
         path,meta=field_cache.paths(self.root,self.signature)

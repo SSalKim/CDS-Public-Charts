@@ -187,7 +187,7 @@ class RuntimeReuseTests(unittest.TestCase):
             version[0]="v24.1.0"
             self.assertNotEqual(install_transport(root),first)
             self.assertEqual(sum(c[0]=="npm" for c in calls),2)
-            self.assertIn("PUBLIC_CHARTS_TRANSPORT_SCRIPT=",(Path(root)/"github-env").read_text())
+            self.assertIn("PUBLIC_CHARTS_TRANSPORT_SCRIPT=",(Path(root)/"github-env").read_text(encoding="utf-8"))
             self.assertEqual((first/"upload.cjs").read_bytes(),
                              (Path(__file__).resolve().parents[1]/"public_charts/transport/upload.cjs").read_bytes())
 
