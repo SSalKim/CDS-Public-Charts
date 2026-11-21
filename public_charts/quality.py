@@ -33,12 +33,18 @@ def _grid_steps(latitude, longitude):
     return dy, dx
 
 
+def _working_dtype(value):
+    # Keep float32 model fields in float32: UKMO's fine grid made float64 copies cost ~250 MiB per renderer.
+    value = np.asarray(value)
+    return value.dtype if value.dtype in (np.float32, np.float64) else np.float64
+
+
 def _smooth_finite(value, km, latitude, longitude):
     dy, dx = _grid_steps(latitude, longitude)
-    value = np.asarray(value, dtype=float)
+    value = np.asarray(value, dtype=_working_dtype(value))
     finite = np.isfinite(value)
-    filled = np.where(finite, value, np.nanmean(value) if finite.any() else 0.)
-    return gaussian_filter(filled, (km / dy, km / dx), mode="nearest"), finite
+    filled = np.where(finite, value, np.nanmean(value) if finite.any() else 0).astype(value.dtype, copy=False)
+    return gaussian_filter(filled, (km / dy, km / dx), mode="nearest", output=value.dtype), finite
 
 
 def terrain_weighted_pressure(pressure, terrain, latitude, longitude, km=TERRAIN_SMOOTH_KM):
@@ -57,14 +63,17 @@ def below_ground_levels(arrays, km):
         height_key = f"geopotential_{level}"
         if terrain is None or height_key not in arrays or np.shape(arrays[height_key]) != np.shape(terrain):
             continue
-        weight = np.clip((terrain - np.asarray(arrays[height_key]) / GRAVITY + BELOW_GROUND_MARGIN) / BELOW_GROUND_RAMP, 0, 1)
+        weight = np.clip((np.asarray(terrain, dtype=np.float32) - np.asarray(arrays[height_key], dtype=np.float32) / GRAVITY
+                          + BELOW_GROUND_MARGIN) / BELOW_GROUND_RAMP, 0, 1)
         if not np.any(weight):
             continue
         out = dict(out) if out is arrays else out
         for key in arrays:
             if key.endswith(f"_{level}") and np.shape(arrays[key]) == np.shape(terrain):
-                smooth, finite = _smooth_finite(arrays[key], km, arrays["latitude"], arrays["longitude"])
-                out[key] = np.where(finite, (1 - weight) * np.asarray(arrays[key], dtype=float) + weight * smooth, arrays[key])
+                value = np.asarray(arrays[key], dtype=_working_dtype(arrays[key]))
+                smooth, finite = _smooth_finite(value, km, arrays["latitude"], arrays["longitude"])
+                mix = weight.astype(value.dtype, copy=False)
+                out[key] = np.where(finite, value + mix * (smooth - value), value)
     return out
 
 
