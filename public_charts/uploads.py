@@ -11,27 +11,53 @@ class UploadBudgetExceeded(OverflowError):
         self.size = size
 
 
+def _hash_file(path):
+    import hashlib
+    digest, size = hashlib.sha256(), 0
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk); size += len(chunk)
+    return digest.hexdigest(), size
+
+
 class UploadPool:
-    def __init__(self, store, workers=1, *, mirror=None):
+    def __init__(self, store, workers=1, *, mirror=None, r2_only=False):
         if workers not in (1, 2, 3, 4):
             raise ValueError("Use one to four upload workers")
         self.store, self.workers = store, workers
         # Optional R2 copy made on the same IO thread, after the Drive upload succeeded.
         self.mirror = mirror
+        # With r2_only the image goes to R2 alone; Drive is used only if that upload fails.
+        self.r2_only = r2_only
+        self.drive_fallbacks = 0
         self.local = local()
         self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chart-upload") if workers > 1 else None
 
     def upload(self, item):
+        if self.r2_only and self.mirror is not None:
+            from . import r2, policy
+            sha256, size = _hash_file(item["path"])
+            name = self.mirror.mirror(item["path"], item["key"], sha256)
+            if name:
+                model, cycle = policy.KEY_PATTERN.fullmatch(item["key"]).groups()[:2]
+                return {"file_id": r2.r2_file_id(name), "url": r2.public_url(model, cycle, name), "size": size,
+                        "sha256": sha256, "key": item["key"], "r2": name, "storage_account": r2.R2_ACCOUNT}
+            self.drive_fallbacks += 1
+            return self._drive(item)
+        info = self._drive(item)
+        if self.mirror is not None:
+            name = self.mirror.mirror(item["path"], item["key"], info["sha256"])
+            if name:
+                info = {**info, "r2": name}
+        return info
+
+    def _drive(self, item):
         if self.executor is None:
             info = self.store.upload_image(item["path"], item["key"])
         else:
             if not hasattr(self.local, "store"):
                 self.local.store = self.store.new_upload_worker()
             info = self.local.store.upload_image(item["path"], item["key"])
-        if self.mirror is not None:
-            name = self.mirror.mirror(item["path"], item["key"], info["sha256"])
-            if name:
-                info = {**info, "r2": name}
         return info
 
     def run(self, items, reserve, release, record):

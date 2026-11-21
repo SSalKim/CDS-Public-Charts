@@ -90,8 +90,9 @@ class ImageMirrorTests(unittest.TestCase):
     def test_modes(self):
         self.assertEqual(r2.images_mode({}), "off")
         self.assertEqual(r2.images_mode({"PUBLIC_CHARTS_R2_IMAGES": " Dual "}), "dual")
+        self.assertEqual(r2.images_mode({"PUBLIC_CHARTS_R2_IMAGES": "only"}), "only")
         with self.assertRaises(ValueError):
-            r2.images_mode({"PUBLIC_CHARTS_R2_IMAGES": "only"})
+            r2.images_mode({"PUBLIC_CHARTS_R2_IMAGES": "both"})
 
 
 class ManifestFieldTests(unittest.TestCase):

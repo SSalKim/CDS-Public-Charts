@@ -104,13 +104,15 @@ def recover_rows(inventory):
 
 
 def plan_cleanup(rows, inventory, budget, reserve_bytes=0, *, account_budgets=None):
+    from public_charts.r2 import R2_ID_PREFIX
     if reserve_bytes >= budget:
         raise ValueError("One incoming image exceeds the image budget")
     kept, _ = policy.retain(rows, budget - reserve_bytes, account_budgets=account_budgets)
     retained = {row["file_id"] for row in kept}
     candidates = {item["id"] for item in inventory if item.get("appProperties", {}).get("kind") == "image"}
     candidates.update(row["file_id"] for row in rows)
-    return kept, sorted(candidates - retained)
+    # R2-only images are never Drive files; the bucket's lifecycle rule removes them.
+    return kept, sorted(file_id for file_id in candidates - retained if not str(file_id).startswith(R2_ID_PREFIX))
 
 
 def finalize_cleanup(store, manifest, plan, published_payload, *, grace_seconds=600, now=None,
@@ -249,13 +251,17 @@ def run(args, store=None):
         inventory = store.inventory()
         if hasattr(store, "prime_inventory"):
             store.prime_inventory(inventory)
+    from public_charts.r2 import R2_ACCOUNT, R2_MAX_BYTES, is_r2_row
     rows = {policy.row_key(row): row for row in state.get("rows", state.get("charts", []))}
     if not local:
         recover_rows(inventory)
         valid_ids = {item["id"] for item in inventory}
-        rows = {key: row for key, row in rows.items() if row.get("file_id") in valid_ids}
-        if hasattr(store, "storage_folders"):
-            for row in rows.values():
+        # R2-only images are absent from the Drive inventory by design.
+        rows = {key: row for key, row in rows.items() if is_r2_row(row) or row.get("file_id") in valid_ids}
+        for row in rows.values():
+            if is_r2_row(row):
+                row["storage_account"] = R2_ACCOUNT
+            elif hasattr(store, "storage_folders"):
                 row["storage_account"] = store.account_for_file(row["file_id"])
         # Uncommitted uploads are not public state. A retry reuses and verifies
         # them through upload_image rather than trusting their metadata alone.
@@ -273,6 +279,20 @@ def run(args, store=None):
                                  if item.get("appProperties", {}).get("kind") == "image"
                                  and item.get("storage_account", "primary") == account) for account in accounts}
     pending_by_account, reserve_by_account = dict.fromkeys(accounts, 0), dict.fromkeys(accounts, 0)
+    drive_accounts = accounts
+
+    def use_r2_account():
+        nonlocal accounts
+        if R2_ACCOUNT not in accounts:
+            accounts = accounts + (R2_ACCOUNT,)
+            account_bytes[R2_ACCOUNT] = policy.unique_bytes(row for row in rows.values() if is_r2_row(row))
+            pending_by_account[R2_ACCOUNT] = reserve_by_account[R2_ACCOUNT] = 0
+
+    def account_limit(account):
+        return R2_MAX_BYTES if account == R2_ACCOUNT else args.max_bytes
+
+    if not local and any(is_r2_row(row) for row in rows.values()):
+        use_r2_account()
     minutes = getattr(args, "time_budget_minutes", 0)
     cap = max(len(policy.hours(model))*policy.RETENTION[model] for model in args.models) if minutes else args.max_leads
     public_before = (state if local else store.read_json("manifest.json", {}))
@@ -317,8 +337,11 @@ def run(args, store=None):
             except ValueError as error:
                 images = "off"
                 print(json.dumps({"event": "r2_images_disabled", "reason": str(error)}), flush=True)
-            if images == "dual" and uploader is not None:
+            if images in ("dual", "only") and uploader is not None:
                 uploader.mirror = r2_publication.ImageMirror(r2_publication.client_from_env)
+                uploader.r2_only = images == "only"
+                if images == "only":
+                    use_r2_account()
             print(json.dumps({"event": "r2_images", "mode": images}), flush=True)
 
     def save_state():
@@ -329,7 +352,7 @@ def run(args, store=None):
                              "rows": list(rows.values()), "errors": errors[-40:],
                              "verified_cycles": sorted(verified_cycles),
                              **({"storage_layout": "balanced-v1", "storage_folders": store.storage_folders}
-                                if len(accounts) > 1 else {}),
+                                if len(drive_accounts) > 1 else {}),
                              "pending_delete_after": state.get("pending_delete_after", {})})
 
     def snapshot(final=False):
@@ -349,7 +372,7 @@ def run(args, store=None):
                 drive_failed = True
                 print(json.dumps({"event": "drive_state_deferred", "reason": error.reason,
                                   "http_status": error.http_status}), flush=True)
-        account_budgets = {account: args.max_bytes - reserve_by_account[account] for account in accounts}
+        account_budgets = {account: account_limit(account) - reserve_by_account[account] for account in accounts}
         kept, delete_ids = plan_cleanup(list(rows.values()), inventory, args.max_bytes, reserve_bytes,
                                        account_budgets=account_budgets if len(accounts) > 1 else None)
         manifest = policy.public_manifest(kept)
@@ -371,7 +394,7 @@ def run(args, store=None):
         write_json(args.manifest, manifest)
         write_json(work / "cleanup-plan.json", {"namespace": "cds-public-charts-v1", "folder_id": store.folder_id,
                    "manifest_sha256": hashlib.sha256(manifest_bytes(manifest)).hexdigest(), "delete_ids": delete_ids,
-                   **({"storage_folders": store.storage_folders} if len(accounts) > 1 else {})})
+                   **({"storage_folders": store.storage_folders} if len(drive_accounts) > 1 else {})})
         if args.publish_incremental:
             publish_manifest(ROOT)
         if r2:
@@ -408,7 +431,7 @@ def run(args, store=None):
         if not local:
             verification_key = f"{model}/{cycle}"
             if len(accounts) > 1:
-                verification_key += "/" + info["storage_account"]
+                verification_key += "/" + info.get("storage_account", "primary")
             if verification_key not in verified_cycles:
                 verify_public_url(info["url"])
                 verified_cycles.add(verification_key)
@@ -427,10 +450,15 @@ def run(args, store=None):
         publication_metrics[item["key"]] = item
         publication_dirty = True
 
+    def upload_account(item):
+        if uploader is not None and uploader.r2_only:
+            return R2_ACCOUNT
+        return store.account_for_key(item["key"]) if len(drive_accounts) > 1 else "primary"
+
     def reserve(item):
         nonlocal pending_bytes
-        account = store.account_for_key(item["key"]) if len(accounts) > 1 else "primary"
-        if account_bytes[account] + pending_by_account[account] + item["size"] > args.max_bytes:
+        account = upload_account(item)
+        if account_bytes[account] + pending_by_account[account] + item["size"] > account_limit(account):
             exception = UploadBudgetExceeded(item["size"])
             exception.storage_account = account
             raise exception
@@ -440,8 +468,7 @@ def run(args, store=None):
     def release(item):
         nonlocal pending_bytes
         pending_bytes -= item["size"]
-        account = store.account_for_key(item["key"]) if len(accounts) > 1 else "primary"
-        pending_by_account[account] -= item["size"]
+        pending_by_account[upload_account(item)] -= item["size"]
 
     stream = StreamingUploads(uploader, reserve, release, record) if uploader else None
 
@@ -673,7 +700,8 @@ def run(args, store=None):
                       "pending_delete_files": len(delete_ids), "budget_wait": budget_blocked,
                       "stop_reason": stop_reason,"batch_extra_seconds":batch_window.extra_seconds,
                       **({"r2_image_writes": uploader.mirror.writes, "r2_image_failures": uploader.mirror.failures,
-                          "r2_image_bytes": uploader.mirror.bytes} if uploader and uploader.mirror else {}),
+                          "r2_image_bytes": uploader.mirror.bytes, "r2_only": uploader.r2_only,
+                          "drive_fallbacks": uploader.drive_fallbacks} if uploader and uploader.mirror else {}),
                       **resource_usage, "errors": errors[-40:]}))
     return int(any(row["status"] == "error" for row in errors))
 
