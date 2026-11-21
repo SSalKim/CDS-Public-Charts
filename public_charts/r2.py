@@ -39,7 +39,13 @@ RUN_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/\d{10}\Z")
 IMAGE_NAME = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)_(asia|hkor)_([a-z0-9]+)_s(\d{3})_(\d{10})_([a-f0-9]{16})\.webp\Z")
 KEY_PATTERN = re.compile(r"manifest/(?:index|runs/[a-z]+/\d{10}\.[a-f0-9]{16})\.json\Z"
                          r"|charts/[a-z]+/\d{10}/[a-z0-9_]+\.webp\Z")
-IMAGE_MODES = ("off", "dual")
+IMAGE_MODES = ("off", "dual", "only")
+# R2-only images: rows use this storage account and a synthetic file ID; the object is served from
+# the bucket's custom domain. Drive receives an image only when its R2 upload failed.
+R2_ACCOUNT = "r2"
+R2_ID_PREFIX = "r2_"
+R2_MAX_BYTES = 60 * 1024 ** 3
+PUBLIC_BASE = "https://cds4.uzo1o1.party/"
 
 
 class R2Error(RuntimeError):
@@ -155,12 +161,24 @@ def client_from_env(env=None):
 
 
 def images_mode(env=None):
-    """``dual`` also stores every new chart image in R2; Drive stays the fallback store."""
+    """``dual`` also stores every new chart image in R2; ``only`` stores it in R2 alone."""
     env = os.environ if env is None else env
     value = (env.get(ENV_PREFIX + "IMAGES") or "off").strip().lower()
     if value not in IMAGE_MODES:
-        raise ValueError("PUBLIC_CHARTS_R2_IMAGES must be off or dual")
+        raise ValueError("PUBLIC_CHARTS_R2_IMAGES must be off, dual or only")
     return value
+
+
+def public_url(model, cycle, name):
+    return PUBLIC_BASE + image_key(model, cycle, name)
+
+
+def r2_file_id(name):
+    return R2_ID_PREFIX + name[:-len(".webp")]
+
+
+def is_r2_row(row):
+    return str(row.get("file_id", "")).startswith(R2_ID_PREFIX)
 
 
 def image_name(model, cycle, hour, product, domain, sha256):
@@ -232,7 +250,7 @@ def split_manifest(manifest):
     runs = {}
     for row in manifest.get("charts", []):
         run = f"{row['model']}/{row['cycle']}"
-        if not RUN_PATTERN.fullmatch(run) or row.get("url") != DRIVE_URL.format(row["file_id"]):
+        if not RUN_PATTERN.fullmatch(run) or not is_r2_row(row) and row.get("url") != DRIVE_URL.format(row["file_id"]):
             raise ValueError("Manifest row cannot be represented in an R2 fragment")
         item = [int(row["hour"]), row["domain"], row["product"], row["file_id"]]
         extra = {name: row[name] for name in EXTRA_FIELDS if name in row}
@@ -241,6 +259,9 @@ def split_manifest(manifest):
             # Aliases reuse another product's image, but always within the same model and cycle.
             if not name or (name.group(1), name.group(5)) != (row["model"], row["cycle"]):
                 raise ValueError("Manifest row has an invalid R2 image name")
+        if is_r2_row(row) and (row.get("r2") is None or row["file_id"] != r2_file_id(row["r2"])
+                               or row.get("url") != public_url(row["model"], row["cycle"], row["r2"])):
+            raise ValueError("R2-only manifest row is inconsistent")
         if extra:
             item.append(extra)
         runs.setdefault(run, []).append(item)

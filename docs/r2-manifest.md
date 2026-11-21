@@ -89,7 +89,17 @@ R2 자격증명은 GitHub-hosted coordinator에만 있다. 노트북 helper는 `
   R2 index를 못 읽어 Git manifest로 내려간 경우에는 Drive 주소만 쓴다.
 - 런 끝 요약 줄에 `r2_image_writes`, `r2_image_failures`, `r2_image_bytes`가 남는다.
 - R2 이미지 삭제는 Lifecycle 규칙(`charts/` 4일)에 맡긴다. 보존 기간(최대 9 cycle, 54시간)보다 길다.
-- 하루 이중 쓰기를 관찰한 뒤 Drive 업로드를 끄는 것은 다음 작업이다.
+
+### `only`: R2 단일 이미지 (2026-11-21~)
+
+- `PUBLIC_CHARTS_R2_IMAGES=only`이면 업로드 스레드는 R2에만 PUT한다. R2 PUT이 실패한 이미지만 Drive로 올린다(런 요약의 `drive_fallbacks`).
+- R2 전용 행: `storage_account="r2"`, `file_id="r2_<객체 이름에서 .webp를 뺀 것>"`, `url`은 커스텀 도메인 주소, `r2`는 객체 이름.
+  `split_manifest`는 세 값이 서로 맞는지 확인한다.
+- 시작 시 Drive inventory에 없는 행은 버리지만, R2 전용 행은 남긴다. 보존·용량 계산에서 R2는 한 계정(`r2`, 상한 60 GiB)으로 다룬다.
+- Drive 정리 계획(`delete_ids`)에는 R2 전용 행이 들어가지 않는다. R2 객체는 Lifecycle 규칙(`charts/` 4일)이 지운다.
+- 뷰어는 `r2_` id 항목을 R2 주소로만 읽는다(Drive 대체 없음).
+- 되돌리기: 변수를 `dual`로 바꾸면 새 이미지는 다시 Drive와 R2에 함께 올라간다. 이미 R2에만 있는 행은 만료될 때까지 그대로 유지된다.
+- `state.json`·`manifest.json` 같은 비공개 파일은 아직 Drive에 있다.
 
 ## Cloudflare 설정 (사용자가 대시보드에서 할 일)
 
