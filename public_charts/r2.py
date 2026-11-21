@@ -38,7 +38,8 @@ RUN_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/\d{10}\Z")
 # charts/{model}/{cycle}/{model}_{domain}_{product}_s{HHH}_{cycle}_{digest}.webp, immutable.
 IMAGE_NAME = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)_(asia|hkor)_([a-z0-9]+)_s(\d{3})_(\d{10})_([a-f0-9]{16})\.webp\Z")
 KEY_PATTERN = re.compile(r"manifest/(?:index|runs/[a-z]+/\d{10}\.[a-f0-9]{16})\.json\Z"
-                         r"|charts/[a-z]+/\d{10}/[a-z0-9_]+\.webp\Z")
+                         r"|charts/[a-z]+/\d{10}/[a-z0-9_]+\.webp\Z"
+                         r"|state/(?:state|manifest)\.json\.gz\Z")
 IMAGE_MODES = ("off", "dual", "only")
 # R2-only images: rows use this storage account and a synthetic file ID; the object is served from
 # the bucket's custom domain. Drive receives an image only when its R2 upload failed.
@@ -129,16 +130,16 @@ class R2Client:
                 self.sleep(2 ** attempt)
         raise last
 
-    def put(self, key, body, *, cache_control, content_type="application/json"):
-        if len(body) > MAX_OBJECT_BYTES:
+    def put(self, key, body, *, cache_control, content_type="application/json", max_bytes=MAX_OBJECT_BYTES):
+        if len(body) > max_bytes:
             raise R2Error("R2 object exceeds its byte limit", operation="put")
         self._request("PUT", key, body, {"cache-control": cache_control, "content-type": content_type})
 
-    def get(self, key):
+    def get(self, key, *, max_bytes=MAX_OBJECT_BYTES):
         response = self._request("GET", key)
         if response.status_code == 404:
             return None
-        if len(response.content) > MAX_OBJECT_BYTES:
+        if len(response.content) > max_bytes:
             raise R2Error("R2 object exceeds its byte limit", operation="get")
         return response.content
 
@@ -234,6 +235,110 @@ class ImageMirror:
             self.writes += 1
             self.bytes += len(body)
         return name
+
+
+# Private production state (state.json, the Drive manifest copy) lives in a second bucket that has
+# no custom domain and no r2.dev URL, with its own token. PUBLIC_CHARTS_R2_STATE: off, dual, only.
+STATE_MODES = ("off", "dual", "only")
+STATE_PREFIX = ENV_PREFIX + "STATE_"
+STATE_MAX_BYTES = 64 * 1024 * 1024
+STATE_NAMES = ("state.json", "manifest.json")
+
+
+def state_mode(env=None):
+    env = os.environ if env is None else env
+    value = (env.get(STATE_PREFIX[:-1]) or "off").strip().lower()
+    if value not in STATE_MODES:
+        raise ValueError("PUBLIC_CHARTS_R2_STATE must be off, dual or only")
+    configured = all(env.get(name) for name in (ENV_PREFIX + "ACCOUNT_ID", STATE_PREFIX + "ACCESS_KEY_ID",
+                                                STATE_PREFIX + "SECRET_ACCESS_KEY", STATE_PREFIX + "BUCKET"))
+    if value != "off" and not configured:
+        raise ValueError("R2 state storage is enabled but its credentials are incomplete")
+    return value
+
+
+def state_client_from_env(env=None):
+    env = os.environ if env is None else env
+    return R2Client(env[ENV_PREFIX + "ACCOUNT_ID"].strip(), env[STATE_PREFIX + "ACCESS_KEY_ID"].strip(),
+                    env[STATE_PREFIX + "SECRET_ACCESS_KEY"].strip(), env[STATE_PREFIX + "BUCKET"].strip())
+
+
+def state_key(name):
+    if name not in STATE_NAMES:
+        raise ValueError("Only state.json and manifest.json are private state")
+    return f"state/{name}.gz"
+
+
+class StateMirroredStore:
+    """The chart store with its private JSON files kept in the private R2 bucket.
+
+    ``dual`` writes Drive then R2 and reads R2 first; ``only`` uses R2 alone, reading Drive just once
+    when R2 has no copy yet. Every other method is the wrapped store's.
+    """
+
+    def __init__(self, inner, client, mode, *, emit=None, anonymous_get=None):
+        self.inner, self.client, self.mode = inner, client, mode
+        self.emit = emit or (lambda item: print(json.dumps(item), flush=True))
+        self.anonymous_get = anonymous_get
+        self.privacy_checked = False
+        for name in ("storage_folders", "folder_id", "account_email"):
+            if name in vars(inner) or hasattr(type(inner), name):
+                setattr(self, name, getattr(inner, name))
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def read_json(self, name, default=None):
+        import gzip
+        try:
+            payload = self.client.get(state_key(name), max_bytes=STATE_MAX_BYTES)
+        except R2Error as error:
+            if self.mode == "only":
+                raise _transient(error) from None
+            self.emit({"event": "r2_state_read_failed", "name": name, **error.details})
+            payload = None
+        if payload is not None:
+            return json.loads(gzip.decompress(payload))
+        return self.inner.read_json(name, default)
+
+    def write_json(self, name, payload):
+        import gzip
+        if self.mode == "dual":
+            self.inner.write_json(name, payload)
+        body = gzip.compress(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), 6)
+        try:
+            self.client.put(state_key(name), body, cache_control="private, no-store",
+                            content_type="application/gzip", max_bytes=STATE_MAX_BYTES)
+        except R2Error as error:
+            if self.mode == "only":
+                raise _transient(error) from None
+            self.emit({"event": "r2_state_write_failed", "name": name, **error.details})
+            return
+        if not self.privacy_checked and self.anonymous_get is not None:
+            self.privacy_checked = True
+            status = self.anonymous_get(state_key(name))
+            self.emit({"event": "r2_state_private", "anonymous_status": status, "private": status not in (200, 206)})
+
+
+def _transient(error):
+    from public_charts_drive import ChartDriveError
+    return ChartDriveError("R2 state storage failed", http_status=error.details.get("http_status"),
+                           transient=True, reason="r2_state")
+
+
+def wrap_state_store(store, env=None):
+    env = os.environ if env is None else env
+    mode = state_mode(env)
+    if mode == "off":
+        return store
+    client = state_client_from_env(env)
+    def anonymous_get(key):
+        try:
+            return requests.get(f"https://{client.host}/{quote(client.bucket)}/{key}", timeout=20).status_code
+        except requests.RequestException:
+            return None
+    print(json.dumps({"event": "r2_state", "mode": mode}), flush=True)
+    return StateMirroredStore(store, client, mode, anonymous_get=anonymous_get)
 
 
 def encode(value):

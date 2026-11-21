@@ -766,10 +766,15 @@ def main():
             if hasattr(store, "quota_summary"):
                 print(json.dumps({"storage_quota": store.quota_summary()}))
             return 0
-        published = subprocess.check_output(["git", "-c", f"safe.directory={ROOT.as_posix()}", "show",
-                                             "origin/main:data/public_charts_manifest.json"], cwd=ROOT)
+        from public_charts_publish import git_manifest_enabled
+        if git_manifest_enabled():
+            published = json.loads(subprocess.check_output(["git", "-c", f"safe.directory={ROOT.as_posix()}", "show",
+                                                            "origin/main:data/public_charts_manifest.json"], cwd=ROOT))
+        else:
+            # The publish step ran with a required R2 publication of exactly this manifest.
+            published = read_json(args.manifest, {})
         count = finalize_cleanup(store, read_json(args.manifest, {}),
-                                 read_json(args.workdir / "cleanup-plan.json", {}), json.loads(published))
+                                 read_json(args.workdir / "cleanup-plan.json", {}), published)
         print(f"Permanently removed {count} superseded managed images after publication.")
         return 0
     return run(args)

@@ -120,14 +120,15 @@ def run_checks(base, origin, history, *, session=None, now=None, max_age_minutes
             warnings.append(f"Index is {age:.0f} minutes old; is a coordinator running with R2 enabled?")
     except (KeyError, TypeError, ValueError):
         problems.append("Index has no valid generated_at")
-    history = list(history)
-    facts["git_manifests_checked"] = len(history)
-    matched = match_history(index, history)
+    # history=None: Git manifest publication is off, so R2 is checked on its own.
+    history = None if history is None else list(history)
+    facts["git_manifests_checked"] = "off" if history is None else len(history)
+    matched = (0, "", None) if history is None else match_history(index, history)
     if matched is None:
         problems.append(f"R2 index matches none of the last {len(history)} Git manifests")
         if history:
             facts["difference_from_latest_git"] = describe_difference(index, history[0][2])
-    else:
+    elif history is not None:
         position, sha, committed = matched
         facts.update(matched_git_commit=sha[:12], matched_git_committed_at=committed, commits_behind=position)
         if position > 3:
@@ -163,7 +164,9 @@ def main():
                         help="Between production runs the index is only rewritten when a run ends")
     args = parser.parse_args()
     base = args.base if args.base.endswith("/") else args.base + "/"
-    report = run_checks(base, args.origin, git_history(args.depth, args.fetch), max_age_minutes=args.max_age_minutes)
+    from public_charts_publish import git_manifest_enabled
+    history = git_history(args.depth, args.fetch) if git_manifest_enabled() else None
+    report = run_checks(base, args.origin, history, max_age_minutes=args.max_age_minutes)
     print(json.dumps({"event": "r2_compare", **report}, ensure_ascii=False), flush=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
