@@ -16,9 +16,10 @@ def balanced_enabled():
 
 
 def production_store():
-    if not balanced_enabled():
-        return ChartDriveStore.from_environment()
-    return ChartDrivePool.from_environment()
+    from public_charts.r2 import wrap_state_store
+    store = ChartDriveStore.from_environment() if not balanced_enabled() else ChartDrivePool.from_environment()
+    # Private state.json/manifest.json may live in the private R2 state bucket (PUBLIC_CHARTS_R2_STATE).
+    return wrap_state_store(store)
 
 
 class ChartDrivePool:

@@ -14,7 +14,16 @@ class PublicationError(RuntimeError):
     pass
 
 
+def git_manifest_enabled(env=None):
+    """PUBLIC_CHARTS_GIT_MANIFEST=off stops the Git manifest commits; R2 then is the only publication."""
+    import os
+    env = os.environ if env is None else env
+    return (env.get("PUBLIC_CHARTS_GIT_MANIFEST") or "on").strip().lower() != "off"
+
+
 def publish_manifest(root):
+    if not git_manifest_enabled():
+        return None
     root = Path(root).resolve()
     path = root / MANIFEST
     if path.is_symlink() or not path.resolve().is_relative_to(root):
@@ -100,5 +109,10 @@ def publish_r2(root, env=None, publisher=None):
 
 if __name__ == "__main__":
     ROOT = Path(__file__).resolve().parent
+    if not git_manifest_enabled():
+        from public_charts import r2
+        # Without Git, only a required R2 publication may unlock Drive cleanup.
+        if r2.mode() != "required":
+            raise PublicationError("Git manifest publication is off, so PUBLIC_CHARTS_R2_MODE must be required")
     publish_manifest(ROOT)
     publish_r2(ROOT)

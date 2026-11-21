@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
+      PUBLIC_CHARTS_GIT_MANIFEST: ${{ vars.PUBLIC_CHARTS_GIT_MANIFEST }}
       PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +30,7 @@ jobs:
           sparse-checkout: |
             /public_charts/
             /public_charts_r2_compare.py
+            /public_charts_publish.py
             /data/public_charts_manifest.json
       - uses: actions/setup-python@v5
         with:
