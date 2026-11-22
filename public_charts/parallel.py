@@ -1,6 +1,7 @@
 """Bounded renderer processes; only the caller owns Drive and Git publication."""
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -11,6 +12,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import shutil
+import signal
 import time
 import traceback
 from queue import Queue, Empty, Full
@@ -24,6 +26,11 @@ from . import input_cache
 _EVENTS = _CANCELLED = None
 _TASK_FLAGS = None
 _TASK_SLOT = None
+# A task running this long is reported by the coordinator. Workers no longer dump their own
+# stacks from a watchdog thread: walking a busy renderer's frames crashed it (runs 355, 415).
+SLOW_TASK_SECONDS = 180
+# A worker that dies takes its pool down; rebuild the pool this many times per run.
+MAX_POOL_RESTARTS = 2
 
 
 def child_path(root, *parts):
@@ -72,6 +79,8 @@ def initialize_renderer(events=None, cancelled=None, task_flags=None, work=None)
     sources.check_cancelled=check_task_cancelled
     if events is not None:
         events.cancel_join_thread()
+    # Print the crashing thread's stack if a native library kills the worker.
+    faulthandler.enable(all_threads=False)
     for name in list(os.environ):
         if name.startswith(("PUBLIC_CHARTS_DRIVE_", "PUBLIC_CHARTS_DRIVE2_", "PUBLIC_CHARTS_ICON_DRIVE_")) or name in {"GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN"}:
             os.environ.pop(name, None)
@@ -141,9 +150,6 @@ def prepare_lead(target, work):
     root = child_path(lead_workspace(work, target), "raw-cache")
     report_worker("prepare",target)
     started = time.monotonic()
-    watch = _EVENTS is not None
-    if watch:
-        faulthandler.dump_traceback_later(180,repeat=True)
     try:
         restored=input_cache.restore(work,target,root)
         arrays, metadata, statistics = collect(target["model"], target["cycle"], target["hour"], root,
@@ -161,8 +167,6 @@ def prepare_lead(target, work):
     except Exception as exception:
         return {"error": error_record(exception),"pid":os.getpid()}
     finally:
-        if watch:
-            faulthandler.cancel_dump_traceback_later()
         gc.collect()
 
 
@@ -226,9 +230,6 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
         send("artifact", artifact)
 
     result, error = {}, None
-    watch = renderer is None and _EVENTS is not None
-    if watch:
-        faulthandler.dump_traceback_later(180,repeat=True)
     try:
         kwargs = {"force": force, "checkpoint_root": checkpoints}
         if renderer is None:
@@ -241,8 +242,6 @@ def stage_lead(target, work, existing, force=False, raw_override=None, renderer=
     except Exception as exception:
         error = error_record(exception)
     finally:
-        if watch:
-            faulthandler.cancel_dump_traceback_later()
         if not raw_override:
             input_cache.save(work,target,raw)
             if error is None:
@@ -455,6 +454,29 @@ class LeadQueue:
         return sorted(self.expected(target) & self.existing)
 
 
+def oom_kills():
+    """Kernel OOM-killer count, so a pool failure can say whether memory ran out."""
+    try:
+        for line in Path("/proc/vmstat").read_text().splitlines():
+            if line.startswith("oom_kill "):
+                return int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def exit_record(pid, process):
+    process.join(timeout=5)
+    code = process.exitcode
+    record = {"pid": pid, "exitcode": code}
+    if isinstance(code, int) and code < 0:
+        try:
+            record["signal"] = signal.Signals(-code).name
+        except ValueError:
+            pass
+    return record
+
+
 def execute_leads(queue, work, workers, consume, *, force=False, raw_override=None,
                   renderer=None, started=None, refresh=None, refresh_seconds=120,
                   can_schedule=None, idle_seconds=120, streaming=False, prefetch=False,
@@ -509,11 +531,52 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                 with ExitStack() as pools:
                     pool_options = {"mp_context":context,"initializer":initialize_renderer,
                                     "initargs":(events,cancelled,task_flags,work)}
-                    executor = pools.enter_context(ProcessPoolExecutor(max_workers=workers,**pool_options))
-                    preparation_executor = (pools.enter_context(ProcessPoolExecutor(max_workers=prepare_workers,**pool_options))
-                                            if prefetch else None)
+                    sizes = {"render": workers, "prepare": prepare_workers if prefetch else 0}
+                    executors = {kind: pools.enter_context(ProcessPoolExecutor(max_workers=size,**pool_options))
+                                 for kind,size in sizes.items() if size}
+                    processes = {kind: {} for kind in executors}
+                    restarts = {kind: 0 for kind in executors}
+                    oom_baseline = oom_kills()
                     pending, active, prepared, announced, finished = {}, set(), deque(), set(), set()
                     task_slots={}
+                    owners, submitted_at, slow_after = {}, {}, {}
+
+                    def track(kind, future):
+                        executor = executors[kind]
+                        owners[future] = executor
+                        submitted_at[future] = time.monotonic()
+                        slow_after[future] = SLOW_TASK_SECONDS
+                        for pid, process in dict(getattr(executor, "_processes", None) or {}).items():
+                            processes[kind].setdefault(pid, process)
+
+                    def report_slow():
+                        now = time.monotonic()
+                        for future,(kind,target) in pending.items():
+                            elapsed = now-submitted_at.get(future,now)
+                            if elapsed >= slow_after.get(future,float("inf")):
+                                slow_after[future] += SLOW_TASK_SECONDS
+                                deliver(("progress", target, {"event": "task_slow", **target, "phase": kind,
+                                                              "seconds": round(elapsed, 1)}))
+
+                    def rebuild(kind, target):
+                        """Replace a pool whose worker died; its unfinished leads go back to the queue."""
+                        broken = executors[kind]
+                        restarts[kind] += 1
+                        affected = [dict(item) for future,(phase,item) in pending.items()
+                                    if owners.get(future) is broken]
+                        current = oom_kills()
+                        deliver(("progress", {}, {"event": "worker_pool_broken", "pool": kind,
+                                                  "restart": restarts[kind], "max_restarts": MAX_POOL_RESTARTS,
+                                                  "trigger": dict(target), "requeued": [dict(target), *affected],
+                                                  "workers": [exit_record(pid, process)
+                                                              for pid, process in sorted(processes[kind].items())],
+                                                  "oom_kills": (current-oom_baseline
+                                                                if current is not None and oom_baseline is not None else None)}))
+                        if restarts[kind] > MAX_POOL_RESTARTS:
+                            raise BrokenProcessPool(f"The {kind} pool broke {restarts[kind]} times")
+                        broken.shutdown(wait=False, cancel_futures=True)
+                        processes[kind] = {}
+                        executors[kind] = pools.enter_context(ProcessPoolExecutor(max_workers=sizes[kind],**pool_options))
                     prepare_memory_wait = {}
                     next_refresh = time.monotonic() + refresh_seconds
                     last_progress = time.monotonic()
@@ -565,8 +628,9 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                         try:
                             slot=next(index for index in range(workers) if index not in task_slots.values())
                             task_flags[slot]=0
-                            future = executor.submit(invoke_task,slot,stage_lead, target, work, known, force, None, renderer, preparation)
+                            future = executors["render"].submit(invoke_task,slot,stage_lead, target, work, known, force, None, renderer, preparation)
                             task_slots[future]=slot
+                            track("render", future)
                         except BaseException:
                             memory_budget.finish("render",target)
                             raise
@@ -648,8 +712,9 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                         slot=next(index for index in range(workers,workers+prepare_workers)
                                                   if index not in task_slots.values())
                                         task_flags[slot]=0
-                                        future = preparation_executor.submit(invoke_task,slot,prefetcher or prepare_lead, target, work)
+                                        future = executors["prepare"].submit(invoke_task,slot,prefetcher or prepare_lead, target, work)
                                         task_slots[future]=slot
+                                        track("prepare", future)
                                     except BaseException:
                                         memory_budget.finish("prepare",target)
                                         raise
@@ -683,9 +748,20 @@ def execute_leads(queue, work, workers, consume, *, force=False, raw_override=No
                                 continue
                             completed, _ = wait(pending, timeout=.2, return_when=FIRST_COMPLETED)
                             drain_events()
+                            report_slow()
                             for future in completed:
                                 kind, target = pending.pop(future)
                                 task_flags[task_slots.pop(future)]=0
+                                submitted_at.pop(future,None)
+                                slow_after.pop(future,None)
+                                owner = owners.pop(future,None)
+                                if not future.cancelled() and isinstance(future.exception(), BrokenProcessPool):
+                                    memory_budget.finish(kind,target)
+                                    if owner is executors[kind]:
+                                        rebuild(kind,target)
+                                    active.discard(identity(target))
+                                    queue.reclaim(target)
+                                    continue
                                 result = None
                                 try:
                                     result = future.result()
