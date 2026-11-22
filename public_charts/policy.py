@@ -5,7 +5,7 @@ import re
 from .dates import parse_cycle
 from .chart_style import ASIA_LAYOUT_CUTOVER
 
-# ECMWF keeps 9 cycles since 00/12Z extension runs joined 06/18Z (about 54 h, as before with 5 x 12 h).
+# ECMWF keeps up to 9 six-hourly cycles, and retention_current removes any older than 48 h.
 RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 9, "icon": 9, "ukmo": 9}
 CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 6, "icon": 6, "ukmo": 6}
 # From this cycle GFS, AIFS and AIGFS run to 360 h, and ECMWF 00/12Z adds its own 252-360 h charts after the
@@ -147,9 +147,15 @@ def hourly_gfs_snow(cycle):
     return cycle >= WINTER_DIAGNOSTIC_CUTOVER
 
 
+# UKMO and ECMWF charts (ECMWF 06/18Z and 00/12Z 252-360 h) are shown for 48 h after the cycle, then removed;
+# the viewer falls back to KMA's own images (UKMO to 144 h, ECMWF 00/12Z to 240 h).
+PUBLIC_WINDOW_MODELS = frozenset({"ukmo", "ecmwf"})
+PUBLIC_WINDOW = timedelta(hours=48)
+
+
 def retention_current(model,cycle,now=None):
     now=now or datetime.now(timezone.utc)
-    return model!="ukmo" or timedelta(0)<=now-parse_cycle(cycle)<=timedelta(hours=48)
+    return model not in PUBLIC_WINDOW_MODELS or timedelta(0)<=now-parse_cycle(cycle)<=PUBLIC_WINDOW
 
 
 def source_check_delay(model=None):
@@ -272,7 +278,7 @@ def retain(rows, max_bytes=MAX_IMAGE_BYTES, *, account_budgets=None,now=None):
 
 
 def public_manifest(rows,*,now=None):
-    rows = [row for row in rows if row["model"]!="ukmo" or ukmo_public(row) and retention_current("ukmo",row["cycle"],now)]
+    rows = [row for row in rows if retention_current(row["model"],row["cycle"],now) and (row["model"]!="ukmo" or ukmo_public(row))]
     public = [{k: row[k] for k in ("model", "cycle", "hour", "product", "domain", "url", "size", "sha256", "file_id")}
               for row in rows]
     for source, target in zip(rows, public):

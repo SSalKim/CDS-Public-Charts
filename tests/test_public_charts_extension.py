@@ -35,9 +35,23 @@ class ExtensionScheduleTest(unittest.TestCase):
         self.assertEqual(policy.cycle_candidates("cmc", datetime(2026, 11, 23, 8, tzinfo=timezone.utc)),
                          ["2026112300", "2026112212"])
 
-    def test_ecmwf_cycles_every_six_hours_with_a_similar_retention(self):
+    def test_ecmwf_cycles_every_six_hours_and_expire_after_48_h_like_ukmo(self):
         self.assertEqual(policy.CYCLE_STEP["ecmwf"], 6)
-        self.assertEqual(policy.RETENTION["ecmwf"] * policy.CYCLE_STEP["ecmwf"], 54)
+        now = datetime(2026, 11, 25, 12, tzinfo=timezone.utc)
+        for model in ("ecmwf", "ukmo"):
+            self.assertTrue(policy.retention_current(model, "2026112312", now))
+            self.assertFalse(policy.retention_current(model, "2026112306", now), model)
+        self.assertTrue(policy.retention_current("gfs", "2026112306", now))
+
+    def test_expired_ecmwf_cycles_leave_the_kept_rows_and_public_manifest(self):
+        now = datetime(2026, 11, 25, 12, tzinfo=timezone.utc)
+        rows = [{"model": "ecmwf", "cycle": cycle, "hour": hour, "product": "surfce", "domain": "asia",
+                 "url": f"https://example.invalid/{cycle}", "size": 10, "sha256": "0" * 64, "file_id": f"r2_{cycle}"}
+                for cycle, hour in (("2026112312", 252), ("2026112306", 0), ("2026112300", 252))]
+        kept, deleted = policy.retain(rows, now=now)
+        self.assertEqual([row["cycle"] for row in kept], ["2026112312"])
+        self.assertEqual(deleted, ["r2_2026112300", "r2_2026112306"])
+        self.assertEqual([row["cycle"] for row in policy.public_manifest(rows, now=now)["charts"]], ["2026112312"])
 
     def test_native_steps_follow_the_ecmwf_six_hour_output_after_144_h(self):
         steps = native_steps("ecmwf", 252)
