@@ -11,7 +11,7 @@ import numpy as np
 import metpy.calc as mpcalc
 from metpy.units import units
 
-from .sources import Decoded,HttpCache,Provider,NotReady,MODELS,atomic_json,collect_rainfall,rainfall_interval
+from .sources import Decoded,HttpCache,Provider,NotReady,MODELS,atomic_json,collect_rainfall,native_steps,rainfall_interval
 from .diagnostics import interpolate,snow_ratio,wet_bulb_psychrometric
 from .chart_style import precipitation_threshold,SNOW_THRESHOLD
 from . import policy
@@ -162,7 +162,6 @@ class ExtraFields:
     def total_rain(self,hour):
         if hour<=0:
             raise ValueError("No total precipitation interval exists at +000h")
-        cadence=MODELS[self.model]["rain"]
         legacy=self.root/f"{hour:03}"/"total_precipitation.npz"
         if self.checkpoint(f"rain/{hour:03}.npz") is None and legacy.exists() and legacy.with_suffix(".json").exists():
             info=json.loads(legacy.with_suffix(".json").read_text(encoding="utf-8"))
@@ -172,15 +171,20 @@ class ExtraFields:
                 self.save_checkpoint(f"rain/{hour:03}.npz",{"values":field.values,"latitude":field.latitude,"longitude":field.longitude})
         start=0
         total=None
-        for end in range(hour,0,-cadence):
+        steps=native_steps(self.model,hour)
+        if steps[-1]!=hour:
+            raise ValueError("Total precipitation lead is not on the source's native cadence")
+        for end in reversed(steps[1:]):
             self.check_budget()
             total=self.checkpoint(f"rain/{end:03}.npz")
             if total is not None:
                 start=end
                 break
-        for end in range(start+cadence,hour+1,cadence):
+        for previous_end,end in zip(steps,steps[1:]):
+            if end<=start:
+                continue
             self.check_budget()
-            rain,reference,_=collect_rainfall(self.provider,self.cycle,end,cadence)
+            rain,reference,_=collect_rainfall(self.provider,self.cycle,end,end-previous_end)
             field=regional(Decoded(rain,reference.latitude,reference.longitude,{}))
             if total is not None:
                 if not np.array_equal(total["latitude"],field.latitude) or not np.array_equal(total["longitude"],field.longitude):
@@ -376,10 +380,10 @@ def winter_fields(extra,base,hour,interval,*,cumulative=True):
                 cached={key:archive[key] for key in archive.files}
             cached["snow_expected"]=(cached["snowfall_water_equivalent"]>SNOW_THRESHOLD).astype(float)
             return cached,metadata
-    cadence=MODELS[extra.model]["rain"]
     total_snow=total_depth=window_snow=window_depth=None
     start=0 if cumulative else max(0,hour-interval)
-    for previous_end in (range(hour-interval,0,-cadence) if cumulative else ()):
+    steps=native_steps(extra.model,hour)
+    for previous_end in ([step for step in reversed(steps[1:]) if step<=hour-interval] if cumulative else ()):
         extra.check_budget()
         previous=extra.checkpoint(snow_checkpoint_name(extra,f"snow/{previous_end:03}.npz"))
         if previous is not None:
@@ -394,11 +398,13 @@ def winter_fields(extra,base,hour,interval,*,cumulative=True):
         last.update({key:empty.copy() for key in ("snow_ratio","snow_expected",
                     "snowfall_water_equivalent","snowfall_depth_diagnostic",
                     "total_snowfall_water_equivalent","total_snowfall_depth_diagnostic")})
-    for end in range(start+cadence,hour+1,cadence):
+    for step_start,end in zip(steps,steps[1:]):
+        if end<=start:
+            continue
         extra.check_budget()
         current=extra.checkpoint(snow_checkpoint_name(extra,f"snow/{end:03}.npz")) if cumulative else None
         if current is None:
-            current=dict(cached_snow_step(extra,end,cadence))
+            current=dict(cached_snow_step(extra,end,end-step_start))
             snow=current["snowfall_water_equivalent"]
             depth=current["snowfall_depth_diagnostic"]
             if total_snow is None:
@@ -437,7 +443,7 @@ def winter_fields(extra,base,hour,interval,*,cumulative=True):
     last["precipitation"]=interpolate(Decoded(rain,rain_lat,rain_lon,{}),lat,lon)
     dew=mpcalc.dewpoint_from_relative_humidity(last["temperature_2m"]*units.K,np.clip(last["relative_humidity_2m"],.01,100)/100).to("K").m
     last["wet_bulb_2m"]=wet_bulb_psychrometric(last["temperature_2m"],dew,last["surface_pressure"])
-    metadata={"model":extra.model,"cycle":extra.cycle,"hour":hour,"interval":interval,"native_interval":cadence,
+    metadata={"model":extra.model,"cycle":extra.cycle,"hour":hour,"interval":interval,"native_interval":steps[-1]-steps[-2] if len(steps)>1 else MODELS[extra.model]["rain"],
               "snowfall_source":("zero-length display window; no accumulation queried" if hour==0 else
                                  ("native endpoint GFS CSNOW: hourly through f120, 3h thereafter; not native snowfall mass"
                                   if policy.hourly_gfs_snow(extra.cycle) else "endpoint GFS CSNOW categorical diagnostic, not native snowfall mass") if extra.model=="gfs" else

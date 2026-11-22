@@ -5,8 +5,13 @@ import re
 from .dates import parse_cycle
 from .chart_style import ASIA_LAYOUT_CUTOVER
 
-RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 5, "icon": 9, "ukmo": 9}
-CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 12, "icon": 6, "ukmo": 6}
+# ECMWF keeps 9 cycles since 00/12Z extension runs joined 06/18Z (about 54 h, as before with 5 x 12 h).
+RETENTION = {"aifs": 9, "gfs": 9, "aigfs": 9, "cmc": 5, "ecmwf": 9, "icon": 9, "ukmo": 9}
+CYCLE_STEP = {"aifs": 6, "gfs": 6, "aigfs": 6, "cmc": 12, "ecmwf": 6, "icon": 6, "ukmo": 6}
+# From this cycle GFS, AIFS and AIGFS run to 360 h, and ECMWF 00/12Z adds its own 252-360 h charts after the
+# KMA ECMWF images, which stop at 240 h.
+EXTENSION_CUTOVER = "2026112212"
+ECMWF_EXTENSION_HOURS = tuple(range(252, 361, 12))
 SOURCE_CHECK_DELAY = timedelta(hours=3)
 MODEL_SOURCE_CHECK_DELAY = {"icon": timedelta(hours=2, minutes=30)}
 ZERO_ACRAIN_CUTOVER = "2026111612"
@@ -99,11 +104,19 @@ def ukmo_public(row):
     return reference is None or bool(row.get("kma_confirmed_at")) and (row["hour"]<=144 or row.get("kma_reference_hour")==144)
 
 
+def extended(cycle):
+    return bool(cycle) and cycle >= EXTENSION_CUTOVER
+
+
 def hours(model, cycle=None):
     step = 6 if model in {"aifs", "aigfs"} else 3
     if model not in RETENTION and model != "icon":
         raise ValueError("Unknown model")
     maximum = 144 if model in {"ecmwf","ukmo"} else 240
+    if model in {"aifs", "aigfs", "gfs"} and extended(cycle):
+        maximum = 360
+    if model == "ecmwf" and cycle and parse_cycle(cycle).hour in (0, 12):
+        return ECMWF_EXTENSION_HOURS
     if model=="ukmo":
         if cycle and parse_cycle(cycle).hour in (6,18):
             return tuple(range(0,70,3))
@@ -121,7 +134,9 @@ def supports_cycle(model, cycle):
         return hour in (0,6,12,18)
     if model == "icon":
         return hour in (0, 6, 12, 18)
-    return hour in ((6, 18) if model == "ecmwf" else range(0, 24, CYCLE_STEP[model]))
+    if model == "ecmwf":
+        return hour in (6, 18) or hour in (0, 12) and extended(cycle)
+    return hour in range(0, 24, CYCLE_STEP[model])
 
 
 def start_cycle(model, configured=None):
@@ -153,11 +168,16 @@ def cycle_candidates(model, now=None, depth=2):
     if now.tzinfo is None:
         raise ValueError("Timezone-aware time required")
     now = now.astimezone(timezone.utc)
-    step = CYCLE_STEP[model]
-    offset = 6 if model == "ecmwf" else 0
-    latest = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(
-        hours=(now.hour - offset) // step * step + offset)
-    return [(latest - timedelta(hours=step * n)).strftime("%Y%m%d%H") for n in range(depth)]
+    # Walk back six-hourly and keep only cycles the model produces (ECMWF 00/12Z join at the extension cutover).
+    latest = now.replace(hour=now.hour // 6 * 6, minute=0, second=0, microsecond=0)
+    result = []
+    for n in range(4 * depth + 8):
+        cycle = (latest - timedelta(hours=6 * n)).strftime("%Y%m%d%H")
+        if supports_cycle(model, cycle):
+            result.append(cycle)
+            if len(result) == depth:
+                break
+    return result
 
 
 def products(cycle):

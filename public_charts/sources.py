@@ -28,16 +28,16 @@ AIGFS_BASES = ("https://nomads.ncep.noaa.gov/pub/data/nccf/com/aigfs/prod",
                "https://noaa-nws-graphcastgfs-pds.s3.amazonaws.com")
 CANADA_BASES = ("https://dd.weather.gc.ca", "https://hpfx.collab.science.gc.ca")
 MODELS = {
-    "aifs": {"name": "ECMWF AIFS-Single (N320)", "grid": .25, "interval": 6, "rain": 6,
+    "aifs": {"name": "ECMWF AIFS-Single (N320)", "grid": .25, "interval": 6, "rain": 6, "max_hour": 360,
              "attribution":"Data Sourced from ECMWF (CC BY 4.0)"},
-    "gfs": {"name": "NCEP GFS (C768 L127)", "grid": .25, "interval": 3, "rain": 3,
+    "gfs": {"name": "NCEP GFS (C768 L127)", "grid": .25, "interval": 3, "rain": 3, "max_hour": 360,
             "attribution":"Data Sourced from NOAA NCEP","thermal_merge_version":3,"precipitation_source":"sflux"},
-    "aigfs": {"name": "NCEP AIGFS (0.25\u00b0)", "grid": .25, "interval": 6, "rain": 6,
+    "aigfs": {"name": "NCEP AIGFS (0.25\u00b0)", "grid": .25, "interval": 6, "rain": 6, "max_hour": 360,
               "attribution":"Data Sourced from NOAA NCEP","thermal_merge_version":3},
     "cmc": {"name": "CMC GDPS (GEM 0.135\u02da L84)", "grid": .15, "interval": 3, "rain": 3,
             "attribution":"Data Sourced from ECCC MSC"},
     "ecmwf": {"name": "ECMWF IFS (TCo1279 L137)", "grid": .25, "interval": 3, "rain": 3,
-              "max_hour": 144, "attribution": "Data Sourced from ECMWF (CC BY 4.0)"},
+              "max_hour": 360, "attribution": "Data Sourced from ECMWF (CC BY 4.0)"},
     "icon": {"name": "DWD ICON (R03B07 L120)", "grid": .125, "interval": 3, "rain": 3,
              "max_hour": 180, "attribution": "Data sourced from DWD (CC BY 4.0)"},
     "ukmo": {"name":"UKMO (UM N1280 L70)","grid":.140625,"interval":3,"rain":3,
@@ -62,6 +62,15 @@ class SourceDeferred(NotReady):
 def forecast_hours(model):
     interval = MODELS[model]["interval"]
     return tuple(range(0, 85, interval)) + (90, 96) + tuple(range(108, MODELS[model].get("max_hour",240)+1, 12))
+
+
+def native_steps(model, upto):
+    """Accumulation boundaries the source publishes, 0..upto (ECMWF IFS is 6-hourly after 144 h)."""
+    if model == "ecmwf":
+        steps = list(range(0, 145, 3)) + list(range(150, 361, 6))
+    else:
+        steps = list(range(0, upto + 1, MODELS[model]["rain"]))
+    return [step for step in steps if step <= upto]
 
 
 def accumulation_hours(model,hour):
