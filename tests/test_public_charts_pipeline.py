@@ -219,15 +219,20 @@ class PolicyTests(unittest.TestCase):
 
     def test_retention_9_and_5_not_dates_only(self):
         rows = []
+        expected = {}
         now = datetime(2026, 11, 18, tzinfo=timezone.utc)
         for model, count in policy.RETENTION.items():
             cycles = policy.cycle_candidates(model, now, count + 3)
             options = {"product":"acptot","domain":"hkor"} if model=="ukmo" else {}
             rows.extend(row(model=model, cycle=cycle, **options) for cycle in cycles)
+            # UKMO/ECMWF also drop cycles older than 48 h (ECMWF was still 12-hourly on 11-18).
+            expected[model] = min(count, sum(policy.retention_current(model, cycle, now) for cycle in cycles))
         kept, delete = policy.retain(rows, now=now)
-        for model, count in policy.RETENTION.items():
-            self.assertEqual(sum(r["model"] == model for r in kept), count)
-        self.assertEqual(len(delete), 3*len(policy.RETENTION))
+        for model in policy.RETENTION:
+            self.assertEqual(sum(r["model"] == model for r in kept), expected[model], model)
+        self.assertEqual(expected["ecmwf"], 4)
+        self.assertEqual(expected["ukmo"], policy.RETENTION["ukmo"])
+        self.assertEqual(len(delete), len(rows) - len(kept))
 
     def test_aliases_share_bytes_and_do_not_delete_shared_id(self):
         rows = [row(product="surfce", file_id="same", size=100), row(product="acptot", file_id="same", size=100)]
