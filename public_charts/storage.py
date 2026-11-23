@@ -15,8 +15,39 @@ def balanced_enabled():
     return os.environ.get("PUBLIC_CHARTS_STORAGE_LAYOUT") == LAYOUT
 
 
+def drive_detached(env=None):
+    """Images and private state both live in R2 alone, so Drive is never contacted."""
+    from public_charts.r2 import images_mode, state_mode
+    env = os.environ if env is None else env
+    return images_mode(env) == "only" and state_mode(env) == "only"
+
+
+class DetachedDriveStore:
+    """Stand-in for the retired chart Drives: no inventory, no uploads, no deletions.
+
+    Private JSON goes through the R2 state wrapper; anything that would reach Drive fails loudly.
+    """
+    detached = True
+
+    def __init__(self):
+        self.folder_id, self.account_email = "r2-only", None
+
+    def verify_account_and_folder(self):
+        return None
+
+    def inventory(self):
+        return []
+
+    def _refuse(self, *_args, **_kwargs):
+        raise ChartDriveError("Google Drive is detached; this operation requires R2.")
+
+    read_json = write_json = upload_image = new_upload_worker = delete_managed = account_for_key = _refuse
+
+
 def production_store():
     from public_charts.r2 import wrap_state_store
+    if drive_detached():
+        return wrap_state_store(DetachedDriveStore())
     store = ChartDriveStore.from_environment() if not balanced_enabled() else ChartDrivePool.from_environment()
     # Private state.json/manifest.json may live in the private R2 state bucket (PUBLIC_CHARTS_R2_STATE).
     return wrap_state_store(store)

@@ -244,9 +244,16 @@ def run(args, store=None):
         state = store.read_json("state.json", {"schema_version": 1, "rows": []})
         if state.get("schema_version") != 1:
             raise ValueError("Unknown private production state version")
-        if state.get("storage_layout") == "balanced-v1" and not hasattr(store, "storage_folders"):
+        detached = getattr(store, "detached", False)
+        if detached:
+            from public_charts.r2 import R2_ID_PREFIX
+            print(json.dumps({"event": "drive_detached", "drive_rows_dropped":
+                              sum(not str(row.get("file_id", "")).startswith(R2_ID_PREFIX)
+                                  for row in state.get("rows", []))}), flush=True)
+        elif state.get("storage_layout") == "balanced-v1" and not hasattr(store, "storage_folders"):
             raise ValueError("Balanced chart state requires the two-account coordinator")
-        if state.get("storage_layout") == "balanced-v1" and state.get("storage_folders") != store.storage_folders:
+        if (not detached and state.get("storage_layout") == "balanced-v1"
+                and state.get("storage_folders") != store.storage_folders):
             raise ValueError("Stored account targets differ from the configured chart folders")
         inventory = store.inventory()
         if hasattr(store, "prime_inventory"):
@@ -762,6 +769,9 @@ def main():
         store = production_store()
         if args.check_drive:
             store.verify_account_and_folder()
+            if getattr(store, "detached", False):
+                print("Drive is detached: images and private state are R2-only; no Drive access.")
+                return 0
             print("Dedicated Drive account and owned folder verified; no files changed.")
             if hasattr(store, "quota_summary"):
                 print(json.dumps({"storage_quota": store.quota_summary()}))
