@@ -350,6 +350,14 @@ def run(args, store=None):
                 if images == "only":
                     use_r2_account()
             print(json.dumps({"event": "r2_images", "mode": images}), flush=True)
+    # KMA release times for the viewer's timetable, kept current in the background on R2.
+    release_status = None
+    if r2:
+        from public_charts.release_status import ReleaseStatus
+        try:
+            release_status = ReleaseStatus.from_env().start()
+        except (KeyError, ValueError) as error:
+            print(json.dumps({"event": "kma_release_status_disabled", "reason": type(error).__name__}), flush=True)
 
     def save_state():
         if local:
@@ -675,6 +683,8 @@ def run(args, store=None):
         if kma_gate:
             kma_gate.close()
             kma_gate.poll(rows)
+        if release_status:
+            release_status.close()
         cleanup_staging(work, args.models)
         resolve_aliases()
         lease.close()

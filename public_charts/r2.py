@@ -39,7 +39,8 @@ RUN_PATTERN = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)/\d{10}\Z")
 IMAGE_NAME = re.compile(r"(aifs|gfs|aigfs|cmc|ecmwf|icon|ukmo)_(asia|hkor)_([a-z0-9]+)_s(\d{3})_(\d{10})_([a-f0-9]{16})\.webp\Z")
 KEY_PATTERN = re.compile(r"manifest/(?:index|runs/[a-z]+/\d{10}\.[a-f0-9]{16})\.json\Z"
                          r"|charts/[a-z]+/\d{10}/[a-z0-9_]+\.webp\Z"
-                         r"|state/(?:state|manifest)\.json\.gz\Z")
+                         r"|state/(?:state|manifest)\.json\.gz\Z"
+                         r"|status/releases\.json\Z")
 IMAGE_MODES = ("off", "dual", "only")
 # R2-only images: rows use this storage account and a synthetic file ID; the object is served from
 # the bucket's custom domain. Drive receives an image only when its R2 upload failed.
