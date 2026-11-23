@@ -99,9 +99,27 @@ def ukmo_gate_hour(cycle,hour):
     return None if parse_cycle(cycle).hour in (6,18) else min(hour,144)
 
 
+# Computed charts that extend KMA's own leads wait for the KMA image they continue: UKMO 00/12Z
+# for the same lead (156/168 h wait for 144 h) and ECMWF 00/12Z 252-360 h for KMA's 240 h.
+KMA_GATED_MODELS = frozenset({"ukmo", "ecmwf"})
+
+
+def kma_gate_hour(model, cycle, hour):
+    if model == "ukmo":
+        return ukmo_gate_hour(cycle, hour)
+    if model == "ecmwf" and parse_cycle(cycle).hour in (0, 12) and hour > 240:
+        return 240
+    return None
+
+
+def kma_public(row):
+    reference = kma_gate_hour(row["model"], row["cycle"], row["hour"])
+    return reference is None or bool(row.get("kma_confirmed_at")) and (
+        row["hour"] == reference or row.get("kma_reference_hour") == reference)
+
+
 def ukmo_public(row):
-    reference=ukmo_gate_hour(row["cycle"],row["hour"])
-    return reference is None or bool(row.get("kma_confirmed_at")) and (row["hour"]<=144 or row.get("kma_reference_hour")==144)
+    return kma_public(row)
 
 
 def extended(cycle):
@@ -278,12 +296,12 @@ def retain(rows, max_bytes=MAX_IMAGE_BYTES, *, account_budgets=None,now=None):
 
 
 def public_manifest(rows,*,now=None):
-    rows = [row for row in rows if retention_current(row["model"],row["cycle"],now) and (row["model"]!="ukmo" or ukmo_public(row))]
+    rows = [row for row in rows if retention_current(row["model"],row["cycle"],now) and kma_public(row)]
     public = [{k: row[k] for k in ("model", "cycle", "hour", "product", "domain", "url", "size", "sha256", "file_id")}
               for row in rows]
     for source, target in zip(rows, public):
         target["render_version"] = source.get("render_version", 0)
-        if source["model"]=="ukmo":
+        if source["model"] in KMA_GATED_MODELS:
             for name in ("kma_confirmed_at","kma_reference_hour"):
                 if name in source: target[name]=source[name]
         if source.get("r2"):

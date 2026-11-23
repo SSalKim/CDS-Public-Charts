@@ -72,11 +72,11 @@ class UkmoExtensionPolicyTests(unittest.TestCase):
         self.assertEqual(policy.public_manifest([off],now=NOW+timedelta(days=3))["charts"],[])
 
     def test_gate_reuses_144_per_product_and_area_for_both_extensions(self):
-        self.assertEqual(gate_key(row()),("2026111800",144,"gph500","asia"))
+        self.assertEqual(gate_key(row()),("ukmo","2026111800",144,"gph500","asia"))
         self.assertEqual(gate_key(row(168)),gate_key(row()))
         self.assertNotEqual(gate_key(row(domain="hkor")),gate_key(row()))
-        self.assertEqual(gate_key(row(product="gph300")),("2026111800",144,"gph200","asia"))
-        self.assertEqual(gate_key(row(product="acptot1",domain="hkor")),("2026111800",144,"acptot"))
+        self.assertEqual(gate_key(row(product="gph300")),("ukmo","2026111800",144,"gph200","asia"))
+        self.assertEqual(gate_key(row(product="acptot1",domain="hkor")),("ukmo","2026111800",144,"acptot","hkor"))
         gate=KmaReleaseGate()
         gate.confirmed[gate_key(row())]=NOW.isoformat()
         rows={i:row(h) for i,h in enumerate((156,168))}

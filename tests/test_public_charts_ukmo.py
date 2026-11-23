@@ -122,7 +122,7 @@ class GateTests(unittest.TestCase):
         rows={i:managed(p) for i,p in enumerate(("acptot","acptot1","acrain","acrain1"))}
         self.assertFalse(gate.poll(rows))
         self.assertEqual(len(gate.pool.jobs),2)
-        for key,future in gate.pool.jobs: future.set_result(NOW.isoformat() if key[2]=="acptot" else None)
+        for key,future in gate.pool.jobs: future.set_result(NOW.isoformat() if key[3]=="acptot" else None)
         self.assertTrue(gate.poll(rows))
         self.assertTrue(rows[0].get("kma_confirmed_at"))
         self.assertTrue(rows[1].get("kma_confirmed_at"))

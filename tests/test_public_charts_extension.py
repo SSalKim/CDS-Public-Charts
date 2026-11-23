@@ -46,7 +46,8 @@ class ExtensionScheduleTest(unittest.TestCase):
     def test_expired_ecmwf_cycles_leave_the_kept_rows_and_public_manifest(self):
         now = datetime(2026, 11, 25, 12, tzinfo=timezone.utc)
         rows = [{"model": "ecmwf", "cycle": cycle, "hour": hour, "product": "surfce", "domain": "asia",
-                 "url": f"https://example.invalid/{cycle}", "size": 10, "sha256": "0" * 64, "file_id": f"r2_{cycle}"}
+                 "url": f"https://example.invalid/{cycle}", "size": 10, "sha256": "0" * 64, "file_id": f"r2_{cycle}",
+                 "kma_confirmed_at": "2026-11-23T20:00:00+00:00", "kma_reference_hour": 240}
                 for cycle, hour in (("2026112312", 252), ("2026112306", 0), ("2026112300", 252))]
         kept, deleted = policy.retain(rows, now=now)
         self.assertEqual([row["cycle"] for row in kept], ["2026112312"])
