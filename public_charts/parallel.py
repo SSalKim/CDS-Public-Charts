@@ -465,9 +465,15 @@ def oom_kills():
     return None
 
 
-def exit_record(pid, process):
-    process.join(timeout=5)
-    code = process.exitcode
+def exit_record(pid, process, timeout=5):
+    # The pool's manager thread reaps the same children; while it holds the wait, exitcode
+    # can read None for a process that is already dead, so read again until it settles.
+    deadline = time.monotonic() + timeout
+    while True:
+        process.join(timeout=.1)
+        code = process.exitcode
+        if code is not None or time.monotonic() >= deadline:
+            break
     record = {"pid": pid, "exitcode": code}
     if isinstance(code, int) and code < 0:
         try:
