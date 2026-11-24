@@ -3,6 +3,9 @@
 The viewer's timetable cannot read KMA response headers from the browser, so a background
 thread reads the Last-Modified time of each recent run's first and last lead image and keeps
 ``status/releases.json`` on R2 current. Runs already known to be complete are not asked again.
+While a run is being published, ``latest`` holds the furthest lead out so far, found by a binary
+search over leads every model publishes (12-hourly, 6-hourly for KIM LDAPS); KMA publishes leads
+in order, so a few image requests per run and check are enough.
 """
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -27,17 +30,18 @@ LOOKBACK_HOURS = 36
 # KMA's earliest chart arrives about 3 h after the cycle time.
 MIN_AGE_HOURS = 2
 PROBE_WORKERS = 4
-# model: (KMA folder, file name, {cycle hour: (first lead, last lead)}). The leads are the ones the
-# viewer shows from KMA: UKUM 156/168 h and ECMWF 252-360 h come from R2 instead.
+# model: (KMA folder, file name, {cycle hour: (first lead, last lead)}, progress step). The leads
+# are the ones the viewer shows from KMA: UKUM 156/168 h and ECMWF 252-360 h come from R2 instead.
+# The progress step divides every lead KMA publishes for that chart, so each probed lead exists.
 STREAMS = {
     "kim_gdps": ("KIMG", "kim_gdps_erly_asia_gph500_ft06_pa4_s{hour:03}_{cycle}.png",
-                 {0: (0, 288), 6: (0, 84), 12: (0, 288), 18: (0, 84)}),
+                 {0: (0, 288), 6: (0, 84), 12: (0, 288), 18: (0, 84)}, 12),
     "kim_rdps": ("KIMR1", "kim_rdps_erly_asia_gph500_s{hour:03}_{cycle}.png",
-                 {0: (0, 120), 6: (0, 72), 12: (0, 120), 18: (0, 72)}),
+                 {0: (0, 120), 6: (0, 72), 12: (0, 120), 18: (0, 72)}, 12),
     "kim_ldps": ("KIML", "kim_ldps_erly_hkor_gph500_s{hour:03}_{cycle}.png",
-                 {0: (0, 48), 6: (0, 48), 12: (0, 48), 18: (0, 48)}),
-    "ukmo": ("GDPS", "ukum_erly_asia_gph500_s{hour:03}_{cycle}.png", {0: (0, 144), 12: (0, 144)}),
-    "ecmwf": ("ECMW", "ecmw_lc40_asia_gph500_s{hour:03}_{cycle}.gif", {0: (0, 240), 12: (0, 240)}),
+                 {0: (0, 48), 6: (0, 48), 12: (0, 48), 18: (0, 48)}, 6),
+    "ukmo": ("GDPS", "ukum_erly_asia_gph500_s{hour:03}_{cycle}.png", {0: (0, 144), 12: (0, 144)}, 12),
+    "ecmwf": ("ECMW", "ecmw_lc40_asia_gph500_s{hour:03}_{cycle}.gif", {0: (0, 240), 12: (0, 240)}, 12),
 }
 
 
@@ -46,7 +50,7 @@ def utcnow():
 
 
 def image_url(model, cycle, hour):
-    folder, template, _ = STREAMS[model]
+    folder, template, *_ = STREAMS[model]
     return f"{BASE}/{folder}/{cycle[:6]}/{cycle[6:8]}/{template.format(hour=hour, cycle=cycle)}"
 
 
@@ -71,7 +75,7 @@ def recent_runs(now, *, lookback_hours=LOOKBACK_HOURS, min_age_hours=MIN_AGE_HOU
     """(run key, model, cycle, first, last) for each stream's cycles old enough to have started."""
     start = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=lookback_hours)
     result = []
-    for model, (_, _, cycles) in STREAMS.items():
+    for model, (_, _, cycles, _) in STREAMS.items():
         moment = start
         while moment <= now - timedelta(hours=min_age_hours):
             if moment.hour in cycles:
@@ -109,7 +113,7 @@ class ReleaseStatus:
         known = {key for key, *_ in recent_runs(self.wall())}
         for key, entry in status["runs"].items():
             if key in known and isinstance(entry, dict):
-                self.runs[key] = {name: entry[name] for name in ("first", "last", "leads") if name in entry}
+                self.runs[key] = {name: entry[name] for name in ("first", "last", "latest", "leads") if name in entry}
 
     def check(self):
         """Ask KMA about every unfinished recent run; return True when anything changed."""
@@ -125,10 +129,13 @@ class ReleaseStatus:
             finished = self.probe(image_url(model, cycle, last))
             if finished:
                 entry["last"] = finished
+                entry.pop("latest", None)
             if not entry.get("first"):
                 started = self.probe(image_url(model, cycle, first))
                 if started:
                     entry["first"] = started
+            if entry.get("first") and not entry.get("last"):
+                entry["latest"] = self.latest_lead(model, cycle, first, last, entry.get("latest", first))
             if entry:
                 entry["leads"] = [first, last]
             return key, entry
@@ -139,6 +146,19 @@ class ReleaseStatus:
                     self.runs[key] = entry
                     changed = True
         return changed
+
+    def latest_lead(self, model, cycle, first, last, known):
+        """The furthest lead out that exists, searching only above ``known`` (already seen)."""
+        step = STREAMS[model][3]
+        rungs = sorted({known} | {hour for hour in range(first, last, step) if hour > known})
+        low, high = 0, len(rungs) - 1
+        while low < high:
+            middle = (low + high + 1) // 2
+            if self.probe(image_url(model, cycle, rungs[middle])):
+                low = middle
+            else:
+                high = middle - 1
+        return rungs[low]
 
     def write(self):
         body = json.dumps({"schema": SCHEMA, "generated_at": self.wall().isoformat(),
