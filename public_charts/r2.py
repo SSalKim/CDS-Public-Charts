@@ -416,7 +416,14 @@ class R2Publisher:
         return elapsed >= self.refresh_seconds or self.dirty and elapsed >= self.min_seconds
 
     def load(self):
-        """Learn which fragments already exist from the live index (one Class B read)."""
+        """Read the live index once (one Class B read) to know what is already published.
+
+        Its fragments are not trusted to exist: the bucket's lifecycle rule deletes
+        ``manifest/runs/`` objects two days after upload, while a run whose charts do not change
+        keeps the same revision for as long as it is retained (CMC: five 12-hourly cycles). So each
+        process uploads every fragment again on its first publish, which also restores any that
+        were removed; within the process unchanged fragments are not uploaded twice.
+        """
         payload = self.client.get(INDEX_KEY)
         self.loaded = True
         if payload is None:
@@ -424,9 +431,6 @@ class R2Publisher:
         index = json.loads(payload)
         if index.get("schema") != SCHEMA or not isinstance(index.get("runs"), dict):
             return
-        for run, item in index["runs"].items():
-            if RUN_PATTERN.fullmatch(run) and isinstance(item, dict) and re.fullmatch(r"[a-f0-9]{16}", str(item.get("rev"))):
-                self.uploaded.add(fragment_key(run, item["rev"]))
         self.published = {key: index.get(key) for key in ("models", "runs", "pipeline_version")}
 
     def publish(self, manifest, *, force=False):
