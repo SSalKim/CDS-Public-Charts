@@ -353,15 +353,82 @@ class LaptopLease:
             self.handle.close()
 
 
+def cpu_identity(text=None):
+    """CPU model and core layout, so render speed can be compared across hosted machines."""
+    try:
+        text = Path("/proc/cpuinfo").read_text() if text is None else text
+    except OSError:
+        return {}
+    blocks = [dict((key.strip(), value.strip()) for key, _, value in
+                   (line.partition(":") for line in block.splitlines()) if _)
+              for block in text.strip().split("\n\n") if block.strip()]
+    if not blocks:
+        return {}
+    first = blocks[0]
+    result = {"cpu_model": first.get("model name") or first.get("Model") or None, "cpu_logical": len(blocks)}
+    try:
+        siblings, cores = int(first["siblings"]), int(first["cpu cores"])
+        result["cpu_threads_per_core"] = siblings // cores if cores else None
+    except (KeyError, ValueError):
+        pass
+    return result
+
+
+def cpu_times(text=None):
+    """(total, idle, steal) jiffies from the aggregate line of /proc/stat, or None."""
+    try:
+        line = (Path("/proc/stat").read_text() if text is None else text).splitlines()[0]
+        fields = [int(value) for value in line.split()[1:]]
+    except (OSError, IndexError, ValueError):
+        return None
+    if len(fields) < 8:
+        return None
+    # user nice system idle iowait irq softirq steal [guest guest_nice, already in user/nice]
+    return sum(fields[:8]), fields[3] + fields[4], fields[7]
+
+
+def cpu_share(before, after):
+    """(busy %, steal %) between two cpu_times readings."""
+    if not before or not after or after[0] <= before[0]:
+        return None
+    total = after[0] - before[0]
+    return (round(100 * (total - (after[1] - before[1])) / total, 1),
+            round(100 * (after[2] - before[2]) / total, 1))
+
+
 class ResourceSampler:
-    def __init__(self):
+    # Steal is also tracked over windows of this length, since a noisy neighbour can be brief.
+    STEAL_WINDOW_SECONDS = 30
+
+    def __init__(self, *, times=cpu_times, clock=time.monotonic):
         self.stop = Event()
         self.thread = None
         self.peak_rss = 0
         self.lowest_free = available_memory()
         self.lowest_windows_free = windows_available_memory()
+        self.times, self.clock = times, clock
+        self.first_cpu = self.window_cpu = times()
+        self.window_at = clock()
+        self.peak_steal = None
+
+    def sample_cpu(self):
+        now = self.clock()
+        if now - self.window_at < self.STEAL_WINDOW_SECONDS:
+            return
+        current = self.times()
+        share = cpu_share(self.window_cpu, current)
+        if share is not None:
+            self.peak_steal = share[1] if self.peak_steal is None else max(self.peak_steal, share[1])
+        self.window_cpu, self.window_at = current, now
+
+    def cpu_usage(self):
+        share = cpu_share(self.first_cpu, self.times())
+        return {"cpu_busy_percent": share[0] if share else None,
+                "cpu_steal_percent": share[1] if share else None,
+                "cpu_peak_steal_percent": self.peak_steal}
 
     def sample(self):
+        self.sample_cpu()
         free = available_memory()
         if free is not None:
             self.lowest_free = free if self.lowest_free is None else min(self.lowest_free, free)
@@ -399,7 +466,7 @@ class ResourceSampler:
         self.stop.set()
         if self.thread:
             self.thread.join()
-        return {"peak_process_tree_rss_mib": round(self.peak_rss/1024**2, 1),
+        return {**self.cpu_usage(), "peak_process_tree_rss_mib": round(self.peak_rss/1024**2, 1),
                 "lowest_available_memory_mib": round(self.lowest_free/1024**2, 1) if self.lowest_free is not None else None,
                 "lowest_windows_available_memory_mib": round(self.lowest_windows_free/1024**2, 1)
                                                        if self.lowest_windows_free is not None else None}
