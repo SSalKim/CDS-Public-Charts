@@ -205,13 +205,18 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(self.publisher.publish(self.publisher.latest), "published")
         self.assertEqual(self.client.writes, before + 1, "Only the index is rewritten")
 
-    def test_existing_fragments_are_not_uploaded_again_by_a_new_process(self):
+    def test_a_new_process_uploads_every_fragment_once_so_none_outlives_the_lifecycle_rule(self):
         self.publisher.publish(manifest(*self.base))
+        runs = len(self.index()["runs"])
         fresh = r2.R2Publisher(self.client, clock=self.clock, emit=self.events.append)
         before = self.client.writes
         self.assertEqual(fresh.publish(manifest(*self.base)), "published")
-        self.assertEqual(self.client.writes, before + 1)
+        self.assertEqual(self.client.writes, before + runs + 1, "every fragment, then the index")
         self.assertEqual(self.client.puts[-1][0], r2.INDEX_KEY)
+        self.clock.now += r2.INDEX_REFRESH_SECONDS
+        before = self.client.writes
+        self.assertEqual(fresh.publish(manifest(*self.base)), "published")
+        self.assertEqual(self.client.writes, before + 1, "later publishes rewrite only the index")
 
     def test_expired_runs_leave_the_index(self):
         self.publisher.publish(manifest(*self.base))
