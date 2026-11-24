@@ -42,6 +42,46 @@ for (const status of ["in_progress", "queued", "waiting", "pending", "requested"
   });
 }
 
+const NOW = Date.UTC(2026, 10, 24, 8, 30);
+function handoffFixture(runs) {
+  const calls = [];
+  const dispatcher = createDispatcher(async (url, options) => {
+    calls.push({ url, ...options });
+    if (options.method === "POST") return new Response(null, { status: 204 });
+    const status = new URL(url).searchParams.get("status");
+    return Response.json({ workflow_runs: runs[status] ? [runs[status]] : [] });
+  }, () => NOW);
+  return { dispatcher, calls };
+}
+const startedMinutesAgo = minutes => new Date(NOW - minutes * 60000).toISOString();
+
+test("a run going for fifteen minutes gets the next run queued behind it", async () => {
+  const { dispatcher, calls } = handoffFixture({
+    in_progress: { id: 42, status: "in_progress", run_started_at: startedMinutesAgo(16) } });
+  const result = await dispatcher.runTarget("charts", env);
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, false);
+  assert.equal(result.behind_run_id, 42);
+  assert.equal(calls.filter(call => call.method === "GET").length, 5);
+  assert.equal(calls.filter(call => call.method === "POST").length, 1);
+});
+
+test("a young run, an unreadable start time or an already waiting run prevents the handoff", async () => {
+  for (const runs of [
+    { in_progress: { id: 42, status: "in_progress", run_started_at: startedMinutesAgo(14) } },
+    { in_progress: { id: 42, status: "in_progress" } },
+    { in_progress: { id: 42, status: "in_progress", run_started_at: "not a time" } },
+    { in_progress: { id: 42, status: "in_progress", run_started_at: startedMinutesAgo(30) },
+      pending: { id: 43, status: "pending" } },
+    { in_progress: { id: 42, status: "in_progress", run_started_at: startedMinutesAgo(30) },
+      queued: { id: 44, status: "queued" } }]) {
+    const { dispatcher, calls } = handoffFixture(runs);
+    const result = await dispatcher.runTarget("charts", env);
+    assert.equal(result.skipped, true, JSON.stringify(runs));
+    assert(!calls.some(call => call.method === "POST"));
+  }
+});
+
 for (const code of [401, 403, 404, 429, 500, 503]) {
   test(`status HTTP ${code} fails closed`, async () => {
     const { dispatcher, calls } = fixture(() => new Response("private upstream error", { status: code }));
@@ -261,7 +301,7 @@ test("health endpoint and retired manual URLs never call GitHub", async () => {
   const health = await dispatcher.fetch(new Request("https://worker.example/"), env);
   assert.equal(health.status, 200);
   const status=await health.json();
-  assert.equal(status.version, "20261117-charts-1min-v2");
+  assert.equal(status.version, "20261124-charts-handoff-v1");
   assert.deepEqual(status.crons,{charts:"*/1 * * * *",vtg:"9,19,29,39,49,59 * * * *"});
   for (const target of ["gdm", "gdm-check", "dmdw"]) {
     assert.equal((await dispatcher.fetch(new Request(`https://worker.example/?target=${target}`), env)).status, 410);
