@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from public_charts.resources import worker_count, WorkerMemoryBudget, LaptopLease, ResourceSampler
+from public_charts.resources import (worker_count, WorkerMemoryBudget, LaptopLease, ResourceSampler,
+                                     cpu_identity, cpu_times, cpu_share)
 from public_charts_runner import choose
 
 
@@ -54,6 +55,38 @@ class ResourceTests(unittest.TestCase):
         values=sampler.finish()
         self.assertEqual(values["lowest_windows_available_memory_mib"],4096.)
         self.assertEqual(values["lowest_available_memory_mib"],9216.)
+
+
+CPUINFO = "\n\n".join(
+    f"processor\t: {index}\nmodel name\t: AMD EPYC 7763 64-Core Processor\nsiblings\t: 4\ncpu cores\t: 2"
+    for index in range(4)) + "\n"
+
+
+class CpuTests(unittest.TestCase):
+    def test_identity_reports_model_and_threads_per_core(self):
+        self.assertEqual(cpu_identity(CPUINFO), {"cpu_model": "AMD EPYC 7763 64-Core Processor",
+                                                 "cpu_logical": 4, "cpu_threads_per_core": 2})
+        self.assertEqual(cpu_identity(""), {})
+
+    def test_times_and_shares_count_iowait_as_idle_and_report_steal(self):
+        before = cpu_times("cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 2 3")
+        after = cpu_times("cpu  400 0 150 900 50 0 0 100 0 0")
+        self.assertEqual(before, (1000, 850, 0))
+        self.assertEqual(cpu_share(before, after), (83.3, 16.7))
+        self.assertIsNone(cpu_times("garbage"))
+        self.assertIsNone(cpu_share(None, after))
+        self.assertIsNone(cpu_share(after, after))
+
+    def test_sampler_keeps_the_worst_steal_window_and_the_run_average(self):
+        readings = iter([(0, 0, 0), (100, 50, 0), (200, 100, 40), (300, 150, 40), (400, 200, 40)])
+        clock = [0.]
+        sampler = ResourceSampler(times=lambda: next(readings), clock=lambda: clock[0])
+        for moment in (10, 30, 60, 90):
+            clock[0] = moment
+            sampler.sample_cpu()
+        self.assertEqual(sampler.peak_steal, 40.0)
+        self.assertEqual(sampler.cpu_usage(), {"cpu_busy_percent": 50.0, "cpu_steal_percent": 10.0,
+                                               "cpu_peak_steal_percent": 40.0})
 
 
 class MemoryBudgetTests(unittest.TestCase):

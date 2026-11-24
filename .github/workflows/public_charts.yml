@@ -51,7 +51,9 @@ jobs:
     permissions:
       contents: write
       actions: write
-    timeout-minutes: 45
+    # Up to 40 minutes of production (20, one 10-minute extension, one late intake for a new
+    # model cycle at rollover), plus setup, drain and publication.
+    timeout-minutes: 55
     env:
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
       PUBLIC_CHARTS_DRIVE_CLIENT_ID: ${{ secrets.PUBLIC_CHARTS_DRIVE_CLIENT_ID }}

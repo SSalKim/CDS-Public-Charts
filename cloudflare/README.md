@@ -44,6 +44,12 @@ See [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configu
   existing continuous time budget, not a new workflow or batch every minute.
 - Public charts are skipped if any run is in progress, queued, waiting, pending
   or requested. Each status is filtered server-side, avoiding history truncation.
+  The one exception is the handoff: once the run in progress has been going for
+  15 minutes (by its `run_started_at`) and nothing else is queued, waiting, pending
+  or requested, one more run is dispatched. It waits in the workflow's concurrency
+  group and GitHub starts it as soon as the active run ends, instead of at the next
+  minute tick. A missing or unreadable start time never triggers the handoff, and a
+  second waiting run is never created.
 - One verified empty benchmark record, run `43883299059` (#87), is ignored only
   while its reported status is `queued`: it has no jobs or artifacts, and GitHub
   rejects cancellation, force cancellation and deletion. Other queued runs still
@@ -51,13 +57,14 @@ See [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configu
   it also blocks dispatch normally. Remove this explicit exception after GitHub
   repairs the orphan record. Deploy the updated Worker JavaScript to apply it;
   this explicit exception remains in place when upgrading to one-minute checks.
-  The read-only `GET /` health response reports version `20261117-charts-1min-v2`
+  The read-only `GET /` health response reports version `20261124-charts-handoff-v1`
   for this replacement, allowing deployment verification without a dispatch.
-- An active production run normally costs one GitHub status GET per minute,
-  about 60 requests/hour. With no active run the five status checks and one
-  dispatch cost at most 360 requests/hour before retries. VTG is unchanged.
-  The minute trigger closes the idle gap between workflows; it does not create
-  a new rendering job when one is already active. Continuous production refreshes
+- An active production run costs one GitHub status GET per minute for its first
+  15 minutes, then up to five per minute (300 requests/hour) while the waiting
+  run is found among the other statuses. With no active run the five status checks
+  and one dispatch cost at most 360 requests/hour before retries. VTG is unchanged.
+  The minute trigger closes the idle gap between workflows; besides the single
+  waiting handoff run, it does not create a new rendering job when one is active. Continuous production refreshes
   its plan every 60 seconds and rechecks pending inputs after 60 seconds when
   renderer capacity is available. Startup, draining and busy workers can still
   delay discovery; this is not a guaranteed one-minute source monitor.

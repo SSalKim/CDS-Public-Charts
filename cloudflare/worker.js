@@ -2,8 +2,12 @@ const GITHUB_API = "https://api.github.com";
 const OWNER = "SSalKim";
 const REF = "main";
 const USER_AGENT = "cds-cloudflare-scheduler";
-const SCHEDULER_VERSION = "20261117-charts-1min-v2";
+const SCHEDULER_VERSION = "20261124-charts-handoff-v1";
 const ACTIVE_STATUSES = ["in_progress", "queued", "waiting", "pending", "requested"];
+// Once the production run has been going this long, one more run is dispatched to wait behind
+// it in the workflow's concurrency group, so GitHub starts it as soon as the slot frees instead
+// of at the next minute tick. Production lasts 20-40 minutes, so a run never waits long.
+const HANDOFF_AFTER_MS = 15 * 60 * 1000;
 // Verified empty benchmark record; GitHub rejects both cancel APIs for this run.
 const EMPTY_QUEUED_CHART_RUN_IDS = new Set(["43883299059"]);
 const RETIRED_TARGETS = new Set(["gdm", "gdm-check", "dmdw"]);
@@ -22,7 +26,7 @@ const CRONS = {
 const LEGACY_CHARTS_CRON = "3,13,23,33,43,53 * * * *";
 const MINUTE_CHART_CRONS = new Set([CRONS.charts, "* * * * *", "0-59 * * * *", "0-59/1 * * * *"]);
 
-export function createDispatcher(fetcher = fetch) {
+export function createDispatcher(fetcher = fetch, now = () => Date.now()) {
   async function githubRequest(path, token, method = "GET", body) {
     // A timed-out POST may already have been accepted: never retry dispatches.
     const attempts = method === "GET" ? 2 : 1;
@@ -63,6 +67,7 @@ export function createDispatcher(fetcher = fetch) {
       return { ok: false, target, skipped: true, reason: "Missing GITHUB_TOKEN secret" };
     }
     const base = `/repos/${OWNER}/${config.repo}/actions/workflows/${config.workflow}`;
+    let handoff = null;
     if (target === "charts") {
       // Filter server-side so long-queued runs cannot hide behind completed runs.
       for (const status of ACTIVE_STATUSES) {
@@ -74,16 +79,26 @@ export function createDispatcher(fetcher = fetch) {
         }
         const active = check.data.workflow_runs.find(run =>
           status !== "queued" || !EMPTY_QUEUED_CHART_RUN_IDS.has(String(run.id)));
+        if (active && status === "in_progress" && !handoff) {
+          // A missing or unreadable start time never counts as old.
+          const started = Date.parse(active.run_started_at ?? "");
+          if (Number.isFinite(started) && now() - started >= HANDOFF_AFTER_MS) {
+            handoff = active;
+            continue;
+          }
+        }
         if (active) {
           return { ok: true, target, skipped: true, run_id: active.id, run_status: active.status,
-            reason: "Chart production is already active" };
+            reason: handoff ? "The next chart run is already waiting" : "Chart production is already active" };
         }
       }
     }
     const response = await githubRequest(`${base}/dispatches`, env.GITHUB_TOKEN, "POST",
       { ref: REF, ...(config.inputs ? { inputs: config.inputs } : {}) });
     return { ok: response.ok, target, skipped: false, status: response.status,
-      reason: response.ok ? "Dispatch accepted" : "GitHub dispatch failed" };
+      ...(handoff ? { behind_run_id: handoff.id } : {}),
+      reason: response.ok ? (handoff ? "Dispatch accepted to wait behind the active run" : "Dispatch accepted")
+        : "GitHub dispatch failed" };
   }
 
   async function handleFetch(request, env) {

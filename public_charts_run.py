@@ -21,7 +21,8 @@ from public_charts_drive import ChartDriveError
 from public_charts_publish import publish_manifest
 from public_charts.uploads import UploadPool, UploadBudgetExceeded, StreamingUploads
 from public_charts.resources import (LaptopLease, ResourceSampler, available_memory, windows_available_memory,
-                                     cpu_capacity, worker_count, WorkerMemoryBudget, BatchWindow)
+                                     cpu_capacity, cpu_identity, worker_count, WorkerMemoryBudget,
+                                     BatchWindow, LATE_INTAKE_MAX_MINUTES)
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "data/public_charts_manifest.json"
@@ -600,6 +601,13 @@ def run(args, store=None):
                 remote.deadline+=extra
             print(json.dumps({"event":"batch_extended","reason":"ready_operational_backlog",
                               "extra_seconds":extra,"maximum_budget_minutes":30}),flush=True)
+        late=batch_window.admit(lambda:queue.fresh_cycle_waiting())
+        if late:
+            if remote and not remote.disabled:
+                remote.deadline+=late
+            print(json.dumps({"event":"batch_extended","reason":"fresh_cycle_at_rollover",
+                              "extra_seconds":round(late,1),
+                              "maximum_budget_minutes":LATE_INTAKE_MAX_MINUTES}),flush=True)
         if batch_window.deadline is not None and time.monotonic() >= batch_window.deadline+90:
             stop_reason = "time_budget"
             return False
@@ -630,7 +638,7 @@ def run(args, store=None):
                       "prepare_workers":0 if local else prepare_workers,"prepared_queue_limit":args.workers+(0 if local else prepare_workers),
                       "heavy_workers":memory_budget.snapshot()["heavy_workers"],
                       "resource_policy":"measured_worker_memory",
-                      "cpu_capacity": cpu_capacity(), "available_memory_mib": round(available_memory()/1024**2, 1) if available_memory() is not None else None,
+                      "cpu_capacity": cpu_capacity(), **cpu_identity(), "available_memory_mib": round(available_memory()/1024**2, 1) if available_memory() is not None else None,
                       "windows_available_memory_mib": round(windows_available_memory()/1024**2,1) if windows_available_memory() is not None else None,
                       "time_budget_minutes": minutes, "laptop_guard": lease.root is not None,
                       "same_model_parallelism": True, "source_refresh_seconds": getattr(args,"refresh_seconds",60),
@@ -647,7 +655,8 @@ def run(args, store=None):
                       "cleanup_workers":12,"cleanup_submission_budget_seconds":90,
                       "current_precipitation_first":True,"prepared_cache_max_mib":512,
                       "prepared_cache_ttl_hours":24,"batch_drain_seconds":90,
-                      "adaptive_batch_max_minutes":30 if batch_window.adaptive else minutes}), flush=True)
+                      "adaptive_batch_max_minutes":30 if batch_window.adaptive else minutes,
+                      "late_intake_max_minutes":LATE_INTAKE_MAX_MINUTES if batch_window.adaptive else minutes}), flush=True)
     sampler.start()
     failure = None
     try:
@@ -715,7 +724,7 @@ def run(args, store=None):
                       "retained_bytes_by_account": {account: policy.unique_bytes(row for row in kept
                           if row.get("storage_account", "primary") == account) for account in accounts},
                       "pending_delete_files": len(delete_ids), "budget_wait": budget_blocked,
-                      "stop_reason": stop_reason,"batch_extra_seconds":batch_window.extra_seconds,
+                      "stop_reason": stop_reason,"batch_extra_seconds":batch_window.extra_seconds,"batch_late_seconds":round(batch_window.late_seconds,1),
                       **({"r2_image_writes": uploader.mirror.writes, "r2_image_failures": uploader.mirror.failures,
                           "r2_image_bytes": uploader.mirror.bytes, "r2_only": uploader.r2_only,
                           "drive_fallbacks": uploader.drive_fallbacks} if uploader and uploader.mirror else {}),
