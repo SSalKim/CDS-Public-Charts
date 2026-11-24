@@ -79,13 +79,24 @@ def process_rss(pid):
         return None
 
 
+# A model cycle whose first leads become ready while a run winds down would otherwise wait
+# about five minutes for the next run (drain plus handoff). The window reopens once for it,
+# for up to ten minutes and never past forty minutes from the start of the run.
+LATE_INTAKE_SECONDS = 600
+LATE_INTAKE_MAX_MINUTES = 40
+# Reopening only pays off when there is still time to prepare and render a few leads.
+LATE_INTAKE_MIN_PREPARE_SECONDS = 180
+
+
 class BatchWindow:
     """Allow one bounded rollover deferral for already-ready operational work."""
 
     def __init__(self,minutes,*,adaptive=False,clock=None):
         self.clock=clock or time.monotonic
         self.minutes,self.adaptive,self.extra_seconds=minutes,adaptive,0
-        self.deadline=self.clock()+minutes*60 if minutes else None
+        self.started=self.clock()
+        self.deadline=self.started+minutes*60 if minutes else None
+        self.late_seconds=0
 
     def extend(self,ready):
         if (not ready or not self.adaptive or self.extra_seconds or not 10<=self.minutes<30
@@ -94,6 +105,24 @@ class BatchWindow:
         self.extra_seconds=min(600,(30-self.minutes)*60)
         self.deadline+=self.extra_seconds
         return self.extra_seconds
+
+    def admit(self,fresh):
+        """Reopen once, during the rollover, for a model cycle this run has not started.
+
+        ``fresh`` is a callable so the queue is only scanned inside the rollover window.
+        Returns the seconds added to the deadline.
+        """
+        if not self.adaptive or self.late_seconds or self.deadline is None or not 10<=self.minutes<30:
+            return 0
+        now=self.clock()
+        if not self.deadline-90<=now<self.deadline+90:
+            return 0
+        target=min(now+LATE_INTAKE_SECONDS,self.started+LATE_INTAKE_MAX_MINUTES*60)
+        if target-90-now<LATE_INTAKE_MIN_PREPARE_SECONDS or target<=self.deadline or not fresh():
+            return 0
+        self.late_seconds=target-self.deadline
+        self.deadline=target
+        return self.late_seconds
 
 
 class WorkerMemoryBudget:

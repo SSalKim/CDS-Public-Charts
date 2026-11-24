@@ -56,6 +56,70 @@ class BatchWindowTests(unittest.TestCase):
             self.assertEqual(window.extend(True),0)
 
 
+class LateIntakeTests(unittest.TestCase):
+    def window(self,clock,minutes=20,adaptive=True):
+        return BatchWindow(minutes,adaptive=adaptive,clock=lambda:clock[0])
+
+    def test_a_fresh_cycle_reopens_the_window_once_during_rollover(self):
+        clock=[0.]
+        window=self.window(clock)
+        calls=[]
+        fresh=lambda:calls.append(1) or True
+        clock[0]=1000
+        self.assertEqual(window.admit(fresh),0)
+        self.assertEqual(calls,[],"the queue is not scanned outside the rollover window")
+        clock[0]=1150
+        self.assertEqual(window.admit(fresh),550)
+        self.assertEqual(window.deadline,1750)
+        clock[0]=1700
+        self.assertEqual(window.admit(fresh),0)
+        self.assertEqual(window.deadline,1750)
+
+    def test_reopening_after_the_extension_is_capped_at_forty_minutes(self):
+        clock=[0.]
+        window=self.window(clock)
+        clock[0]=1150
+        self.assertEqual(window.extend(True),600)
+        clock[0]=1830
+        self.assertEqual(window.admit(lambda:True),600)
+        self.assertEqual(window.deadline,2400)
+        clock=[0.]
+        window=self.window(clock)
+        clock[0]=1150
+        window.extend(True)
+        clock[0]=2100
+        self.assertEqual(window.admit(lambda:True),0,"too little time left to prepare anything")
+
+    def test_no_reopening_without_fresh_work_after_the_stop_or_outside_automatic_runs(self):
+        clock=[1150.]
+        self.assertEqual(BatchWindow(20,adaptive=True,clock=lambda:0.).admit(lambda:False),0)
+        clock=[0.]
+        window=self.window(clock)
+        clock[0]=1290
+        self.assertEqual(window.admit(lambda:True),0,"the run has already stopped scheduling")
+        for minutes,adaptive in ((20,False),(30,True),(0,True)):
+            clock=[0.]
+            window=self.window(clock,minutes,adaptive)
+            clock[0]=max(0,minutes*60-30)
+            self.assertEqual(window.admit(lambda:True),0)
+
+    def test_only_cycles_without_published_or_started_work_are_fresh(self):
+        started={"model":"gfs","cycle":"2026112312","hour":42}
+        trickle={"model":"gfs","cycle":"2026112312","hour":45}
+        burst={"model":"aifs","cycle":"2026112312","hour":0}
+        queue=LeadQueue([started,trickle],set(),100)
+        self.assertTrue(queue.fresh_cycle_waiting())
+        self.assertEqual(queue.next(set()),started)
+        self.assertFalse(queue.fresh_cycle_waiting(),"later leads of a cycle this run started")
+        queue=LeadQueue([burst],{"aifs/2026112312/000/gph500/asia"},100)
+        self.assertFalse(queue.fresh_cycle_waiting(),"a cycle with published charts is not fresh")
+        queue=LeadQueue([burst],set(),100)
+        queue.source_monitor=True
+        self.assertFalse(queue.fresh_cycle_waiting(),"nothing counts before its source is seen")
+        queue.source_observed(burst)
+        self.assertTrue(queue.fresh_cycle_waiting())
+
+
 class RetryAffinityTests(unittest.TestCase):
     def test_icon_12z_repair_invalidates_only_total_precipitation_composites(self):
         for product in ("surfce","acptot","acptot1","acrain","acrain1","gph500"):

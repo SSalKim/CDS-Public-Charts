@@ -26,6 +26,15 @@ GitHub-hosted machines remain ephemeral and still install their isolated runtime
 Normal automatic production opts into one ready-operational-backlog extension
 near its preparation cutoff. A normal 20-minute dispatch can continue to at most
 30 minutes; explicit manual budgets and chosen-cycle jobs are not extended.
+
+Each rollover leaves about five minutes in which no run accepts new leads (about
+three minutes of drain, then about two of dispatch and setup). A model cycle that
+becomes ready in that window with nothing published and nothing started in the
+current run, such as AIFS's 39 leads arriving within three minutes, reopens the
+window once (`batch_extended`, reason `fresh_cycle_at_rollover`): for up to ten
+minutes, never past 40 minutes from the start of the run, and only if at least
+three minutes of preparation remain. Later leads of cycles already in progress
+never trigger it. The workflow timeout is 55 minutes to cover this.
 The helper admission deadline is updated with the coordinator; existing lease
 hard limits, the helper's 28-minute process limit and workflow timeouts still apply.
 

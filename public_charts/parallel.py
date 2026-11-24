@@ -286,6 +286,8 @@ class LeadQueue:
         self.retry_seconds = 600
         self.readiness_gate = False
         self.ready_cycles = {(key.split("/")[0], key.split("/")[1]) for key in existing}
+        # Model cycles this run has started work on.
+        self.run_cycles = set()
 
     def expected(self, target):
         identity = target["model"],target["cycle"],target["hour"]
@@ -344,11 +346,20 @@ class LeadQueue:
         self.attempts += 1
         self.model_attempts[model] += 1
         self.issued.add((model,target["cycle"],target["hour"]))
+        self.run_cycles.add((model,target["cycle"]))
         return target
 
     @_queue_locked
     def operational_waiting(self, active=()):
         return any(priority[0] == 0 for priority,_,_,_ in self._candidates(active,True))
+
+    @_queue_locked
+    def fresh_cycle_waiting(self, active=()):
+        """True when new work is ready for a model cycle that has nothing published and that
+        this run has not started, such as a model's first leads arriving together."""
+        return any(priority[0] == 0 and (model,target["cycle"]) not in self.ready_cycles
+                   and (model,target["cycle"]) not in self.run_cycles
+                   for priority,_,model,target in self._candidates(active,True))
 
     @_queue_locked
     def helper_candidates(self, limit=6):
