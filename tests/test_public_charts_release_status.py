@@ -89,8 +89,32 @@ class ReleaseStatusTest(unittest.TestCase):
         self.assertTrue(tracker.check())
         self.assertEqual(tracker.runs["kim_gdps/2026112300"],
                          {"first": "2026-11-23T03:20:54+00:00", "last": "2026-11-23T05:49:40+00:00", "leads": [0, 288]})
-        self.assertEqual(tracker.runs["kim_gdps/2026112306"], {"first": "2026-11-23T09:16:00+00:00", "leads": [0, 84]})
+        self.assertEqual(tracker.runs["kim_gdps/2026112306"],
+                         {"first": "2026-11-23T09:16:00+00:00", "latest": 0, "leads": [0, 84]})
         self.assertNotIn("kim_rdps/2026112306", tracker.runs)
+
+    def test_a_running_run_reports_its_furthest_lead_with_few_requests(self):
+        run = "2026112300"
+        times = {rs.image_url("kim_gdps", run, hour): f"2026-11-23T04:{hour % 60:02}:00+00:00"
+                 for hour in range(0, 151, 3)}
+        probe = FakeProbe(times)
+        tracker = status(probe)
+        tracker.check()
+        self.assertEqual(tracker.runs["kim_gdps/" + run]["latest"], 144)
+        asked = [url for url in probe.calls if f"_{run}." in url and "kim_gdps" in url]
+        self.assertLessEqual(len(asked), 2 + 5, "last, first and a binary search over 24 leads")
+        for hour in range(153, 241, 3):
+            times[rs.image_url("kim_gdps", run, hour)] = "2026-11-23T05:00:00+00:00"
+        probe.calls.clear()
+        tracker.check()
+        self.assertEqual(tracker.runs["kim_gdps/" + run]["latest"], 240)
+        searched = [url for url in probe.calls if f"_{run}." in url and "kim_gdps" in url]
+        self.assertFalse(any(f"_s{hour:03}_" in url for url in searched for hour in range(12, 144, 12)),
+                         "the search starts above the lead already seen")
+        times[rs.image_url("kim_gdps", run, 288)] = "2026-11-23T05:49:40+00:00"
+        tracker.check()
+        self.assertNotIn("latest", tracker.runs["kim_gdps/" + run])
+        self.assertEqual(tracker.runs["kim_gdps/" + run]["last"], "2026-11-23T05:49:40+00:00")
 
     def test_finished_runs_are_not_asked_again(self):
         probe = FakeProbe({rs.image_url("ecmwf", "2026112300", 240): "2026-11-23T06:58:22+00:00",
