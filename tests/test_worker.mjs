@@ -21,7 +21,7 @@ test("chart dispatch uses the new repo, real production and no fixed cycle", asy
   const { dispatcher, calls } = fixture();
   const result = await dispatcher.runTarget("charts", env);
   assert.equal(result.ok, true);
-  assert.equal(calls.filter(call => call.method === "GET").length, 5);
+  assert.equal(calls.filter(call => call.method === "GET").length, 6);
   const post = calls.at(-1);
   assert.match(post.url, /SSalKim\/CDS-Public-Charts\/actions\/workflows\/public_charts.yml\/dispatches$/);
   assert.deepEqual(JSON.parse(post.body), { ref: "main", inputs: {
@@ -43,12 +43,13 @@ for (const status of ["in_progress", "queued", "waiting", "pending", "requested"
 }
 
 const NOW = Date.UTC(2026, 10, 24, 8, 30);
-function handoffFixture(runs) {
+function handoffFixture(runs, recent = []) {
   const calls = [];
   const dispatcher = createDispatcher(async (url, options) => {
     calls.push({ url, ...options });
     if (options.method === "POST") return new Response(null, { status: 204 });
     const status = new URL(url).searchParams.get("status");
+    if (!status) return Response.json({ workflow_runs: recent });
     return Response.json({ workflow_runs: runs[status] ? [runs[status]] : [] });
   }, () => NOW);
   return { dispatcher, calls };
@@ -62,7 +63,7 @@ test("a run going for fifteen minutes gets the next run queued behind it", async
   assert.equal(result.ok, true);
   assert.equal(result.skipped, false);
   assert.equal(result.behind_run_id, 42);
-  assert.equal(calls.filter(call => call.method === "GET").length, 5);
+  assert.equal(calls.filter(call => call.method === "GET").length, 6);
   assert.equal(calls.filter(call => call.method === "POST").length, 1);
 });
 
@@ -80,6 +81,31 @@ test("a young run, an unreadable start time or an already waiting run prevents t
     assert.equal(result.skipped, true, JSON.stringify(runs));
     assert(!calls.some(call => call.method === "POST"));
   }
+});
+
+test("a run dispatched moments ago that the status lists do not show yet prevents another", async () => {
+  const active = { in_progress: { id: 42, status: "in_progress", run_started_at: startedMinutesAgo(30) } };
+  const created = minutes => new Date(NOW - minutes * 60000).toISOString();
+  for (const [recent, dispatched] of [
+    [[{ id: 43, status: "pending", created_at: created(1) }], false],
+    [[{ id: 43, status: "queued", created_at: created(2.5) }], false],
+    [[{ id: 43, status: "pending", created_at: created(4) }], true],
+    [[{ id: 41, status: "completed", created_at: created(1) }], true],
+    [[{ id: 42, status: "in_progress", created_at: created(1) }], true]]) {
+    const { dispatcher, calls } = handoffFixture(active, recent);
+    const result = await dispatcher.runTarget("charts", env);
+    assert.equal(calls.some(call => call.method === "POST"), dispatched, JSON.stringify(recent));
+    if (!dispatched) assert.equal(result.reason, "A chart run was dispatched moments ago");
+  }
+});
+
+test("an unreadable recent-run list fails closed", async () => {
+  const { dispatcher, calls } = fixture(url => new URL(url).searchParams.get("status") ? null
+    : new Response("private upstream error", { status: 500 }));
+  const result = await dispatcher.runTarget("charts", env);
+  assert.equal(result.skipped, true);
+  assert(!calls.some(call => call.method === "POST"));
+  assert(!JSON.stringify(result).includes("private"));
 });
 
 for (const code of [401, 403, 404, 429, 500, 503]) {
@@ -133,7 +159,7 @@ test("one transient GET failure can recover", async () => {
   const { dispatcher, calls } = fixture((url, options, count) => count === 1
     ? new Response("Unavailable", { status: 503 }) : null);
   assert.equal((await dispatcher.runTarget("charts", env)).ok, true);
-  assert.equal(calls.length, 7);
+  assert.equal(calls.length, 8);
 });
 
 test("VTG keeps original CDS dispatch without new busy filtering", async () => {
@@ -301,7 +327,7 @@ test("health endpoint and retired manual URLs never call GitHub", async () => {
   const health = await dispatcher.fetch(new Request("https://worker.example/"), env);
   assert.equal(health.status, 200);
   const status=await health.json();
-  assert.equal(status.version, "20261124-charts-handoff-v1");
+  assert.equal(status.version, "20261126-charts-handoff-v2");
   assert.deepEqual(status.crons,{charts:"*/1 * * * *",vtg:"9,19,29,39,49,59 * * * *"});
   for (const target of ["gdm", "gdm-check", "dmdw"]) {
     assert.equal((await dispatcher.fetch(new Request(`https://worker.example/?target=${target}`), env)).status, 410);

@@ -5,7 +5,9 @@ thread reads the Last-Modified time of each recent run's first and last lead ima
 ``status/releases.json`` on R2 current. Runs already known to be complete are not asked again.
 While a run is being published, ``latest`` holds the furthest lead out so far, found by a binary
 search over leads every model publishes (12-hourly, 6-hourly for KIM LDAPS); KMA publishes leads
-in order, so a few image requests per run and check are enough.
+in order, so a few image requests per run and check are enough. ``latest_at`` is when that lead
+appeared (its Last-Modified), so the viewer can tell a slow run that is still advancing from a
+stalled one.
 """
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -113,7 +115,7 @@ class ReleaseStatus:
         known = {key for key, *_ in recent_runs(self.wall())}
         for key, entry in status["runs"].items():
             if key in known and isinstance(entry, dict):
-                self.runs[key] = {name: entry[name] for name in ("first", "last", "latest", "leads") if name in entry}
+                self.runs[key] = {name: entry[name] for name in ("first", "last", "latest", "latest_at", "leads") if name in entry}
 
     def check(self):
         """Ask KMA about every unfinished recent run; return True when anything changed."""
@@ -130,12 +132,15 @@ class ReleaseStatus:
             if finished:
                 entry["last"] = finished
                 entry.pop("latest", None)
+                entry.pop("latest_at", None)
             if not entry.get("first"):
                 started = self.probe(image_url(model, cycle, first))
                 if started:
                     entry["first"] = started
             if entry.get("first") and not entry.get("last"):
-                entry["latest"] = self.latest_lead(model, cycle, first, last, entry.get("latest", first))
+                known = entry.get("latest", first)
+                known_at = entry.get("latest_at") if "latest" in entry else entry["first"]
+                entry["latest"], entry["latest_at"] = self.latest_lead(model, cycle, first, last, known, known_at)
             if entry:
                 entry["leads"] = [first, last]
             return key, entry
@@ -147,18 +152,20 @@ class ReleaseStatus:
                     changed = True
         return changed
 
-    def latest_lead(self, model, cycle, first, last, known):
-        """The furthest lead out that exists, searching only above ``known`` (already seen)."""
+    def latest_lead(self, model, cycle, first, last, known, known_at):
+        """(hour, time it appeared) of the furthest lead out, searching only above ``known``."""
         step = STREAMS[model][3]
         rungs = sorted({known} | {hour for hour in range(first, last, step) if hour > known})
-        low, high = 0, len(rungs) - 1
+        low, high, found_at = 0, len(rungs) - 1, known_at
         while low < high:
             middle = (low + high + 1) // 2
-            if self.probe(image_url(model, cycle, rungs[middle])):
-                low = middle
+            moment = self.probe(image_url(model, cycle, rungs[middle]))
+            if moment:
+                # low only ever moves to a lead that answered, so this is rungs[low]'s time.
+                low, found_at = middle, moment
             else:
                 high = middle - 1
-        return rungs[low]
+        return rungs[low], found_at
 
     def write(self):
         body = json.dumps({"schema": SCHEMA, "generated_at": self.wall().isoformat(),

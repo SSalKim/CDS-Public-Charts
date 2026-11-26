@@ -50,6 +50,10 @@ See [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configu
   group and GitHub starts it as soon as the active run ends, instead of at the next
   minute tick. A missing or unreadable start time never triggers the handoff, and a
   second waiting run is never created.
+- Before any chart dispatch the Worker also reads the unfiltered list of the latest
+  five runs: GitHub's status-filtered lists can lag a new run by about a minute, so a
+  run created in the last three minutes that has not completed counts as already
+  dispatched. An unreadable list skips the dispatch.
 - One verified empty benchmark record, run `43883299059` (#87), is ignored only
   while its reported status is `queued`: it has no jobs or artifacts, and GitHub
   rejects cancellation, force cancellation and deletion. Other queued runs still
@@ -57,7 +61,7 @@ See [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configu
   it also blocks dispatch normally. Remove this explicit exception after GitHub
   repairs the orphan record. Deploy the updated Worker JavaScript to apply it;
   this explicit exception remains in place when upgrading to one-minute checks.
-  The read-only `GET /` health response reports version `20261124-charts-handoff-v1`
+  The read-only `GET /` health response reports version `20261126-charts-handoff-v2`
   for this replacement, allowing deployment verification without a dispatch.
 - An active production run costs one GitHub status GET per minute for its first
   15 minutes, then up to five per minute (300 requests/hour) while the waiting
