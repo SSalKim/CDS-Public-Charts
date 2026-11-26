@@ -154,11 +154,13 @@ KMA_CENTER_RULES = {
              "temperature": {"prominence": .5, "radius": 200, "smooth_km": 22, "spacing_km": 330, "limit": 4, "sparse_km": 500, "sparse_relief": .5, "sparse_limit": 2},
              "temperature_strict": {"prominence": 1, "radius": 200, "smooth_km": 22, "spacing_km": 360, "limit": 3, "sparse_km": 500, "sparse_relief": .5, "sparse_limit": 2}},
 }
+# Korean precipitation: the 30% floor is taken against the heaviest amount within 300 km, so a lone
+# light maximum far from a heavy area is still labelled; at most 26 labels, spread by widening the spacing.
 KMA_NUMERIC_RULES = {
     "asia": {"precipitation": {"radius": 260, "prominence": .4, "minimum": 1, "smooth_km": 45},
              "wind": {"radius": 450, "prominence": 4, "minimum": 0, "smooth_km": 45},
              "vorticity": {"radius": 500, "prominence": 2, "minimum": 5, "smooth_km": 45}},
-    "hkor": {"precipitation": {"radius": 60, "prominence": .15, "minimum": 1, "smooth_km": 10, "spacing_px": 60, "relative_minimum": .3},
+    "hkor": {"precipitation": {"radius": 60, "prominence": .15, "minimum": 1, "smooth_km": 10, "spacing_px": 60, "relative_minimum": .3, "relative_radius_km": 300, "limit": 26},
              "wind": {"radius": 200, "prominence": 2.5, "minimum": 0, "smooth_km": 22},
              "vorticity": {"radius": 220, "prominence": 1.2, "minimum": 4, "smooth_km": 22}},
 }
