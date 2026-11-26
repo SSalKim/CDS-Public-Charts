@@ -2,12 +2,17 @@ const GITHUB_API = "https://api.github.com";
 const OWNER = "SSalKim";
 const REF = "main";
 const USER_AGENT = "cds-cloudflare-scheduler";
-const SCHEDULER_VERSION = "20261124-charts-handoff-v1";
+const SCHEDULER_VERSION = "20261126-charts-handoff-v2";
 const ACTIVE_STATUSES = ["in_progress", "queued", "waiting", "pending", "requested"];
 // Once the production run has been going this long, one more run is dispatched to wait behind
 // it in the workflow's concurrency group, so GitHub starts it as soon as the slot frees instead
 // of at the next minute tick. Production lasts 20-40 minutes, so a run never waits long.
 const HANDOFF_AFTER_MS = 15 * 60 * 1000;
+// GitHub's status-filtered run lists can lag a new run by a minute (on 2026-11-25 a waiting run
+// created at 15:50:43 was missed at 15:51:42 and replaced). Before dispatching, the unfiltered
+// list of the latest runs is read too, and a run created this recently that has not completed
+// counts as already dispatched.
+const RECENT_DISPATCH_MS = 3 * 60 * 1000;
 // Verified empty benchmark record; GitHub rejects both cancel APIs for this run.
 const EMPTY_QUEUED_CHART_RUN_IDS = new Set(["43883299059"]);
 const RETIRED_TARGETS = new Set(["gdm", "gdm-check", "dmdw"]);
@@ -91,6 +96,20 @@ export function createDispatcher(fetcher = fetch, now = () => Date.now()) {
           return { ok: true, target, skipped: true, run_id: active.id, run_status: active.status,
             reason: handoff ? "The next chart run is already waiting" : "Chart production is already active" };
         }
+      }
+    }
+    if (target === "charts") {
+      const recent = await githubRequest(`${base}/runs?branch=${REF}&per_page=5`, env.GITHUB_TOKEN);
+      if (!recent.ok || !Array.isArray(recent.data?.workflow_runs)) {
+        return { ok: false, target, skipped: true, status: recent.status,
+          reason: "Workflow status unavailable; dispatch skipped" };
+      }
+      const fresh = recent.data.workflow_runs.find(run => run.status !== "completed" &&
+        !EMPTY_QUEUED_CHART_RUN_IDS.has(String(run.id)) && run.id !== handoff?.id &&
+        now() - Date.parse(run.created_at ?? "") < RECENT_DISPATCH_MS);
+      if (fresh) {
+        return { ok: true, target, skipped: true, run_id: fresh.id, run_status: fresh.status,
+          reason: "A chart run was dispatched moments ago" };
       }
     }
     const response = await githubRequest(`${base}/dispatches`, env.GITHUB_TOKEN, "POST",
