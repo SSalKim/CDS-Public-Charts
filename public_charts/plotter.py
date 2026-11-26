@@ -782,35 +782,62 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
                           extrema_candidates(value, selected["latitude"], selected["longitude"],
                                              settings["radius"], settings["prominence"], high,valid_mask,
                                              smooth_km=settings.get("smooth_km") if kma else None)]
-            occupied = []
             floor = max(threshold, settings["minimum"])
+            nearby = None
             if kind == "precipitation" and settings.get("relative_minimum"):
-                # More, smaller maxima are shown, but not the trace amounts at the rim of a heavy area.
-                nx = (selected["projected"][:,:,0]-spec["xlim"][0]) / np.ptp(spec["xlim"])
-                ny = (selected["projected"][:,:,1]-spec["ylim"][0]) / np.ptp(spec["ylim"])
-                shown_values = np.asarray(value, dtype=float)[(nx >= 0) & (nx <= 1) & (ny >= 0) & (ny <= 1)]
-                if shown_values.size and np.isfinite(shown_values).any():
-                    floor = max(floor, settings["relative_minimum"] * float(np.nanmax(shown_values)))
+                # Trace amounts at the rim of a heavy area are not shown. The floor is relative to the
+                # heaviest amount within relative_radius_km, so a lone light maximum far from it stays.
+                field = np.where(np.isfinite(value), np.asarray(value, dtype=float), 0)
+                if settings.get("relative_radius_km"):
+                    lat_step = float(np.median(np.abs(np.diff(selected["latitude"]))))
+                    lon_step = float(np.median(np.abs(np.diff(selected["longitude"]))))
+                    ry = max(1, int(settings["relative_radius_km"] / (111 * lat_step)))
+                    rx = max(1, int(settings["relative_radius_km"] / (111 * .8 * lon_step)))
+                    fy, fx = np.ogrid[-ry:ry+1, -rx:rx+1]
+                    nearby = maximum_filter(field, footprint=(fy/ry)**2 + (fx/rx)**2 <= 1, mode="nearest")
+                else:
+                    nx = (selected["projected"][:,:,0]-spec["xlim"][0]) / np.ptp(spec["xlim"])
+                    ny = (selected["projected"][:,:,1]-spec["ylim"][0]) / np.ptp(spec["ylim"])
+                    shown_values = field[(nx >= 0) & (nx <= 1) & (ny >= 0) & (ny <= 1)]
+                    if shown_values.size:
+                        floor = max(floor, settings["relative_minimum"] * float(np.max(shown_values)))
+            eligible = []
             for _, row, col, actual in sorted(candidates, reverse=True):
                 if kind == "precipitation" and actual < floor:
+                    continue
+                if kind == "precipitation" and nearby is not None and actual < settings["relative_minimum"] * nearby[row, col]:
                     continue
                 if kind == "vorticity" and abs(actual) < settings["minimum"]:
                     continue
                 # KMA-style maxima may sit on the frame, cut by it like KMA's own charts.
                 point = annotation_point(row, col,grid,edge=kma)
-                if point is None:
-                    continue
-                lon, lat, px, py, sx, sy = point
-                spacing = settings.get("spacing_px", 48 if korea else 70) if kma else (48 if korea else 70)
-                if any(np.hypot(sx-x, sy-y) < spacing for x, y in occupied):
-                    continue
+                if point is not None:
+                    eligible.append((actual, point))
+            if kind == "precipitation" and settings.get("limit"):
+                # The heaviest amounts claim their place first, so the map maximum is always labelled.
+                eligible.sort(key=lambda item: -item[0])
+
+            def spaced(spacing):
+                chosen = []
+                for actual, point in eligible:
+                    if all(np.hypot(point[4]-other[4], point[5]-other[5]) >= spacing for _, other in chosen):
+                        chosen.append((actual, point))
+                return chosen
+
+            spacing = settings.get("spacing_px", 48 if korea else 70) if kma else (48 if korea else 70)
+            chosen = spaced(spacing)
+            # Long accumulations break into many small maxima: widen the spacing evenly over the map
+            # rather than dropping whole regions, until the count fits.
+            while settings.get("limit") and len(chosen) > settings["limit"]:
+                spacing *= 1.1
+                chosen = spaced(spacing)
+            for actual, (lon, lat, px, py, sx, sy) in chosen:
                 text = str(int(np.rint(actual)))
                 pin(lon, lat, color, 8)
                 ax.annotate(text, (px, py), xytext=(0, -4), textcoords="offset points", color=color,
                             fontsize=fs(7), ha="center", va="top", zorder=8, annotation_clip=not kma, clip_on=True,
                             path_effects=[effects.withStroke(linewidth=1, foreground=(1, 1, 1, .7))],
                             gid=f"{kind}-extreme").set_clip_path(ax.patch)
-                occupied.append((sx, sy))
 
         def pressure_centers():
             centers(arrays["pressure_msl"]/100,(("H",True,"blue"),("L",False,"red")),

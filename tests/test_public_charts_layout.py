@@ -154,6 +154,44 @@ class LayoutTests(unittest.TestCase):
                            profile=PUBLIC_PROFILE, return_frame=True)
         self.assertIn("4", labels)
 
+    def snow_panel_labels(self, field):
+        latitude, longitude = np.linspace(29, 45, 161), np.linspace(115, 138, 231)
+        x, y = np.meshgrid(longitude, latitude)
+        arrays = {"latitude": latitude, "longitude": longitude,
+                  "snowfall_water_equivalent": field(x, y), "precipitation": field(x, y),
+                  "geopotential_925": (810+5*(y-38))*9.80665,
+                  "geopotential_850": (1500+5*(y-38))*9.80665,
+                  "geopotential_1000": (210+0*y)*9.80665,
+                  "temperature_925": 273.15+y-38, "wet_bulb_2m": 1.2+.5*(y-38),
+                  "wind_u_925": 5+0*x, "wind_v_925": 5+0*y}
+        labels = []
+        close = plt.close
+        def capture(figure):
+            if hasattr(figure, "axes"):
+                labels.extend(int(text.get_text()) for axes in figure.axes for text in axes.texts
+                              if text.get_gid() == "precipitation-extreme")
+            close(figure)
+        with patch("cartopy.mpl.geoaxes.GeoAxes.add_feature"),              patch.object(plotter, "korean_admin_boundaries", return_value=[]),              patch.object(plotter.plt, "close", side_effect=capture):
+            plotter.render(arrays, "2026112600", 24, "acptot_snow", "hkor", None,
+                           profile=PUBLIC_PROFILE, return_frame=True)
+        return labels, arrays["snowfall_water_equivalent"]
+
+    def test_light_maximum_far_from_heavy_snow_is_labelled_but_its_rim_is_not(self):
+        def bump(x, y, peak, lon, lat, width):
+            return peak*np.exp(-((x-lon)**2+(y-lat)**2)/width**2)
+        labels, _ = self.snow_panel_labels(lambda x, y: bump(x, y, 80, 127, 41.5, 1)
+                                           + bump(x, y, 5, 127.5, 35.5, .5) + bump(x, y, 6, 129.8, 41.5, .4))
+        self.assertIn(80, labels)
+        self.assertIn(5, labels)       # about 670 km from the heavy area
+        self.assertNotIn(6, labels)    # within 300 km of 80, under its 30% floor
+
+    def test_crowded_long_accumulation_is_thinned_but_keeps_its_maximum(self):
+        labels, field = self.snow_panel_labels(
+            lambda x, y: 30+20*np.sin(x*np.pi/.75)*np.sin(y*np.pi/.75)-.05*((x-127)**2+(y-37)**2))
+        self.assertLessEqual(len(labels), 26)
+        self.assertGreaterEqual(len(labels), 12)
+        self.assertEqual(max(labels), int(np.rint(field.max())))
+
     def test_ukmo_diagnostic_label_is_above_snow_threshold_without_extra_source_line(self):
         latitude,longitude=np.linspace(29,45,41),np.linspace(115,138,47)
         x,y=np.meshgrid(longitude,latitude)
