@@ -10,7 +10,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as effects
-from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import LinearNDInterpolator, RegularGridInterpolator
+from scipy.spatial import Delaunay
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from matplotlib.cm import ScalarMappable
 from matplotlib.font_manager import FontProperties, findfont, get_font
@@ -121,6 +122,37 @@ def korean_admin_boundaries():
 
 
 FAST_STREAMLINES = True
+# Delaunay triangulations of the streamline source grids, one per domain and map extent, kept for
+# the life of the render process: the grid never changes between charts.
+_STREAM_TRIANGULATIONS = {}
+
+
+def regrid_vectors(x, y, u, v, shape, target_extent):
+    """cartopy.vector_transform.vector_scalar_to_grid for a source grid already in the target
+    projection, with the triangulation cached.
+
+    cartopy calls scipy's griddata(method="linear") once per component, and griddata builds a
+    Delaunay triangulation of the ~28,000 source points every time, which took about 14% of a
+    lead's render. LinearNDInterpolator over the same default triangulation computes the same
+    values, so the regridded field, and so the streamlines, are unchanged.
+    """
+    x0, x1, y0, y1 = target_extent
+    xr, yr = x1 - x0, y1 - y0
+    nx, ny = shape
+    key = (x.tobytes(), y.tobytes(), tuple(float(value) for value in target_extent), nx, ny)
+    cached = _STREAM_TRIANGULATIONS.get(key)
+    if cached is None:
+        gx, gy = np.meshgrid(x, y)
+        points = np.column_stack([(gx.ravel() - x0) / xr, (gy.ravel() - y0) / yr])
+        x_grid, y_grid = np.meshgrid(np.linspace(0, 1, nx), np.linspace(0, 1, ny))
+        cached = Delaunay(points), x_grid, y_grid
+        if len(_STREAM_TRIANGULATIONS) >= 8:
+            _STREAM_TRIANGULATIONS.clear()
+        _STREAM_TRIANGULATIONS[key] = cached
+    triangulation, x_grid, y_grid = cached
+    regridded = tuple(LinearNDInterpolator(triangulation, np.asanyarray(component).ravel())((x_grid, y_grid))
+                      for component in (u, v))
+    return (x_grid * xr + x0, y_grid * yr + y0) + regridded
 
 
 def stream_direction_arrows(ax,segments,*,color="#0000ff",spacing=180):
@@ -395,7 +427,9 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
         grid.top_labels = grid.right_labels = True
         grid.rotate_labels = False
         grid.xpadding = grid.ypadding = -3
-        figure.canvas.draw()
+        # Only the map's final position is needed here (for the colour bar); a full draw of the
+        # map, features and grid labels cost about 0.15 s per Asia chart and gave the same position.
+        ax.apply_aspect()
         pos = ax.get_position()
         cax = figure.add_axes([pos.x1 + (.004 if public and korea else .012), pos.y0, .013, pos.height])
         if public and model_smoothing(cycle):
@@ -581,9 +615,7 @@ def render(arrays, cycle, hour, product, domain, target, accumulation=None, *,
             if FAST_STREAMLINES:
                 # Same trajectories as cartopy's GeoAxes.streamplot: regrid to the density grid over
                 # the map extent exactly as cartopy does, then integrate every seed at once.
-                from cartopy.vector_transform import vector_scalar_to_grid
-                gx,gy,gu,gv=vector_scalar_to_grid(projection,projection,[int(30*1.35)]*2,x,y,ru,rv,
-                                                  target_extent=ax.get_extent(projection))
+                gx,gy,gu,gv=regrid_vectors(x,y,ru,rv,[int(30*1.35)]*2,ax.get_extent(projection))
                 paths=fast_streamlines(gx,gy,np.ma.filled(np.ma.masked_invalid(gu),np.nan),
                                        np.ma.filled(np.ma.masked_invalid(gv),np.nan),
                                        density=1.35,minlength=.08,maxlength=8)
